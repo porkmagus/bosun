@@ -1190,7 +1190,7 @@ function McpMarketplace({ onInstalled }) {
                   ${Object.entries(srv.meta?.env || {}).map(([key, val]) => html`
                     <div class="mcp-env-row" key=${key}>
                       <span class="mcp-env-key">${key}</span>
-                      <input class="mcp-env-input"
+                      <${TextField} size="small" variant="outlined"
                         type=${key.toLowerCase().includes("key") || key.toLowerCase().includes("token") || key.toLowerCase().includes("secret") ? "password" : "text"}
                         value=${envEdits[srv.id]?.[key] ?? val}
                         placeholder="Enter value..."
@@ -1255,7 +1255,7 @@ function McpMarketplace({ onInstalled }) {
                   ${Object.entries(srv.env).map(([key, val]) => html`
                     <div class="mcp-env-row" key=${key}>
                       <span class="mcp-env-key">${key}</span>
-                      <input class="mcp-env-input"
+                      <${TextField} size="small" variant="outlined"
                         type=${key.toLowerCase().includes("key") || key.toLowerCase().includes("token") || key.toLowerCase().includes("secret") ? "password" : "text"}
                         value=${envEdits[srv.id]?.[key] ?? ""}
                         placeholder=${val || "Enter value..."}
@@ -1348,49 +1348,49 @@ function McpCustomInstallForm({ onInstall, installing }) {
       </div>
       <label>
         Name *
-        <input type="text" value=${form.name} onInput=${updateField("name")}
-          placeholder="e.g. My Custom Server" />
+        <${TextField} size="small" variant="outlined" value=${form.name} onInput=${updateField("name")}
+          placeholder="e.g. My Custom Server" fullWidth />
       </label>
       <label>
         Description
-        <input type="text" value=${form.description} onInput=${updateField("description")}
-          placeholder="Brief description" />
+        <${TextField} size="small" variant="outlined" value=${form.description} onInput=${updateField("description")}
+          placeholder="Brief description" fullWidth />
       </label>
       <label>
         Transport
-        <select value=${form.transport} onChange=${updateField("transport")}>
-          <option value="stdio">stdio (command + args)</option>
-          <option value="url">URL (HTTP/SSE endpoint)</option>
-        </select>
+        <${Select} size="small" value=${form.transport} onChange=${updateField("transport")}>
+          <${MenuItem} value="stdio">stdio (command + args)<//>
+          <${MenuItem} value="url">URL (HTTP/SSE endpoint)<//>
+        <//>
       </label>
       ${form.transport === "stdio" && html`
         <label>
           Command
-          <input type="text" value=${form.command} onInput=${updateField("command")}
-            placeholder="npx" />
+          <${TextField} size="small" variant="outlined" value=${form.command} onInput=${updateField("command")}
+            placeholder="npx" fullWidth />
         </label>
         <label>
           Arguments (space-separated)
-          <input type="text" value=${form.args} onInput=${updateField("args")}
-            placeholder="-y @scope/mcp-server" />
+          <${TextField} size="small" variant="outlined" value=${form.args} onInput=${updateField("args")}
+            placeholder="-y @scope/mcp-server" fullWidth />
         </label>
       `}
       ${form.transport === "url" && html`
         <label>
           URL
-          <input type="text" value=${form.url} onInput=${updateField("url")}
-            placeholder="https://example.com/mcp" />
+          <${TextField} size="small" variant="outlined" value=${form.url} onInput=${updateField("url")}
+            placeholder="https://example.com/mcp" fullWidth />
         </label>
       `}
       <label>
         Tags (comma-separated)
-        <input type="text" value=${form.tags} onInput=${updateField("tags")}
-          placeholder="custom, tools" />
+        <${TextField} size="small" variant="outlined" value=${form.tags} onInput=${updateField("tags")}
+          placeholder="custom, tools" fullWidth />
       </label>
       <label>
         Environment Variable Keys (comma-separated, values set after install)
-        <input type="text" value=${form.envKeys} onInput=${updateField("envKeys")}
-          placeholder="API_KEY, SECRET_TOKEN" />
+        <${TextField} size="small" variant="outlined" value=${form.envKeys} onInput=${updateField("envKeys")}
+          placeholder="API_KEY, SECRET_TOKEN" fullWidth />
       </label>
       <div class="library-actions">
         <button class="btn-primary" onClick=${handleSubmit} disabled=${installing}>

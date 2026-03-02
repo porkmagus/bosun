@@ -550,9 +550,9 @@ export function Modal({
           <div class="modal-header">
             <div class="modal-handle"></div>
             ${title ? html`<div class="modal-title">${title}</div>` : null}
-            <button class="modal-close-btn" onClick=${requestClose} aria-label="Close">
+            <${IconButton} size="small" onClick=${requestClose} aria-label="Close" sx=${{ position: 'absolute', right: 8, top: 8 }}>
               ${ICONS.close}
-            </button>
+            <//>
           </div>
           <div class="modal-body" onTouchStart=${handleBodyTouchStart}>
             ${children}

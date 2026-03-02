@@ -7,6 +7,15 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
+import {
+  Typography, Box, Stack, CardContent, Button, IconButton, Chip,
+  Divider, Paper, TextField, CircularProgress, Alert, Tooltip,
+  Tabs, Tab, Skeleton, Avatar, LinearProgress,
+  List, ListItem, ListItemButton, ListItemText, ListItemIcon,
+  Menu, MenuItem, Accordion, AccordionSummary, AccordionDetails,
+  Select, FormControl, InputLabel,
+} from "@mui/material";
+
 import { haptic, showConfirm } from "../modules/telegram.js";
 import { apiFetch, sendCommandToChat } from "../modules/api.js";
 import { iconText, resolveIcon } from "../modules/icon-utils.js";
@@ -474,9 +483,9 @@ function WorkspaceViewer({ agent, onClose }) {
               </div>
               ${sessionInfo.preview &&
                 html`<div class="meta-text mt-xs">${truncate(sessionInfo.preview, 120)}</div>`}
-              <button class="btn btn-ghost btn-sm mt-sm" onClick=${() => setActiveTab("stream")}>
+              <${Button} variant="text" size="small" onClick=${() => setActiveTab("stream")}>
                 ${iconText(":chat: View Stream")}
-              </button>
+              <//>
             </div>
           `}
         </div>
@@ -547,12 +556,11 @@ function WorkspaceViewer({ agent, onClose }) {
           <div class="card-title">Live Tool/Event Stream</div>
           <div class="stream-toolbar">
             <div class="chip-group stream-chips">
-              <button
-                class="chip ${streamFilter === "all" ? "active" : ""}"
+              <${Button} variant="text" size="small"
                 onClick=${() => setStreamFilter("all")}
               >
                 All (${counts.all})
-              </button>
+              <//>
               <button
                 class="chip ${streamFilter === "tool" ? "active" : ""}"
                 onClick=${() => setStreamFilter("tool")}

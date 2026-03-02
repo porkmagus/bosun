@@ -499,12 +499,13 @@ export function LogsTab() {
 
       <!-- Line count slider -->
       <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 1 }}>
-        <input
-          type="range" min="20" max="800" step="20"
+        <${TextField}
+          type="number" size="small" variant="outlined"
+          inputProps=${{ min: 20, max: 800, step: 20 }}
           value=${localLogLines}
           onInput=${(e) => setLocalLogLines(Number(e.target.value))}
           onChange=${(e) => handleLogLinesChange(Number(e.target.value))}
-          style="flex:1"
+          sx=${{ flex: 1 }}
         />
         <${Chip} label="${localLogLines} lines" size="small" variant="outlined" />
       <//>
@@ -635,12 +636,13 @@ export function LogsTab() {
         <//>
       <//>
       <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 1.5 }}>
-        <input
-          type="range" min="50" max="800" step="50"
+        <${TextField}
+          type="number" size="small" variant="outlined"
+          inputProps=${{ min: 50, max: 800, step: 50 }}
           value=${localAgentLines}
           onInput=${(e) => setLocalAgentLines(Number(e.target.value))}
           onChange=${(e) => handleAgentLinesChange(Number(e.target.value))}
-          style="flex:1"
+          sx=${{ flex: 1 }}
         />
         <${Chip} label="${localAgentLines} lines" size="small" variant="outlined" />
       <//>
