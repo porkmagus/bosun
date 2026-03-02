@@ -271,6 +271,7 @@ import {
   TAB_CONFIG,
 } from "./modules/router.js";
 import { formatRelative } from "./modules/utils.js";
+import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Avatar, Stack, Paper, CircularProgress, Button, Divider, Menu, MenuItem, Fab, Snackbar, Alert } from "./modules/mui.js";
 
 /* ── Component imports ── */
 import { ToastContainer, Modal } from "./components/shared.js";
@@ -507,38 +508,29 @@ function OfflineBanner() {
 
   const retryCount = backendRetryCount.value;
   const isPersistent = retryCount > 3;
-  const tone = isPersistent ? "red" : "orange";
   const title = isPersistent
     ? "Persistent connection failure"
     : "Backend Unreachable";
 
-  // Reconnect countdown drives the progress bar
   const countdown = wsReconnectIn.value;
-  const maxWait = 15; // max backoff seconds
-  const reconnectPct = countdown != null && countdown > 0
-    ? Math.round(((maxWait - Math.min(countdown, maxWait)) / maxWait) * 100)
-    : 100;
 
   return html`
-    <div class="offline-banner tone-${tone}">
-      <div class="offline-dot ${tone}"></div>
-      <div class="offline-banner-content">
-        <div class="offline-banner-title">${title}</div>
-        <div class="offline-banner-meta">${backendError.value || "Connection lost"}</div>
-        ${backendLastSeen.value
-          ? html`<div class="offline-banner-meta">Last connected: ${formatTimeAgo(backendLastSeen.value)}</div>`
-          : null}
-        <div class="offline-banner-meta">
-          ${countdown != null && countdown > 0
-            ? `Reconnecting in ${countdown}s…`
-            : `Retry attempt #${retryCount}`}
-        </div>
-        <div class="offline-reconnect-bar">
-          <div class="offline-reconnect-fill" style="width:${reconnectPct}%"></div>
-        </div>
-      </div>
-      <button class="btn btn-ghost btn-sm" onClick=${manualRetry}>Retry</button>
-    </div>
+    <${Alert}
+      severity="error"
+      variant="outlined"
+      sx=${{m: 1, mx: 2, animation: "slideDown 0.3s ease-out"}}
+      action=${html`<${Button} color="inherit" size="small" onClick=${manualRetry}>Retry</${Button}>`}
+    >
+      <strong>${title}</strong> — ${backendError.value || "Connection lost"}
+      ${backendLastSeen.value
+        ? html`<${Typography} variant="caption" display="block">Last connected: ${formatTimeAgo(backendLastSeen.value)}</${Typography}>`
+        : null}
+      <${Typography} variant="caption" display="block">
+        ${countdown != null && countdown > 0
+          ? `Reconnecting in ${countdown}s…`
+          : `Retry attempt #${retryCount}`}
+      </${Typography}>
+    </${Alert}>
   `;
 }
 
@@ -676,30 +668,36 @@ function Header() {
     }
   }
 
+  const logoSrc = getAppLogoSource(0);
+  const connColorMap = { connected: "success", reconnecting: "warning" };
+  const connColor = connColorMap[connClass] || "error";
+  const userLabel = user ? `@${user.username || user.first_name}` : "";
   return html`
-    <header class="app-header">
-      <div class="app-header-left">
-        <div class="app-header-workspace">
+    <${AppBar} position="fixed" sx=${{zIndex: 1201}} class="app-header">
+      <${Toolbar} variant="dense">
+        <img src=${logoSrc} alt="Bosun" style=${{height: 24, width: 24, marginRight: 4}} data-logo-fallback-index="0" onError=${handleAppLogoLoadError} />
+        <${Typography} variant="h6" sx=${{ml: 1, flexGrow: 0}}>Bosun</${Typography}>
+        <${Box} sx=${{ml: 2}}>
           <${WorkspaceSwitcher} />
-        </div>
-      </div>
-      <div class="app-header-right">
-        <div class="header-actions">
-          <div class="header-status">
-            <div class="connection-pill ${connClass}">
-              <span class="connection-dot"></span>
-              ${connLabel}
-            </div>
-            ${freshnessLabel
-              ? html`<div class="header-freshness">${freshnessLabel}</div>`
-              : null}
-          </div>
-          ${user
-            ? html`<div class="app-header-user">@${user.username || user.first_name}</div>`
+        </${Box}>
+        <${Box} sx=${{flexGrow: 1}} />
+        <${Stack} direction="row" spacing=${1} alignItems="center">
+          <${Chip}
+            size="small"
+            label=${connLabel}
+            color=${connColor}
+            variant="outlined"
+            sx=${{fontSize: "0.7rem"}}
+          />
+          ${freshnessLabel
+            ? html`<${Typography} variant="caption" sx=${{opacity: 0.7}}>${freshnessLabel}</${Typography}>`
             : null}
-        </div>
-      </div>
-    </header>
+          ${user
+            ? html`<${Chip} size="small" label=${userLabel} variant="outlined" />`
+            : null}
+        </${Stack}>
+      </${Toolbar}>
+    </${AppBar}>
   `;
 }
 
@@ -758,38 +756,37 @@ function SidebarNav({ collapsed = false, onToggle }) {
           >${resolveIcon(":plus:")}</button>
         </div>
       `}
-      <nav class="sidebar-nav" aria-label="Main navigation">
+      <${Tabs}
+        orientation="vertical"
+        value=${Math.max(0, TAB_CONFIG.findIndex((t) => t.id === activeTab.value))}
+        onChange=${(_, idx) => {
+          const tab = TAB_CONFIG[idx];
+          if (tab) navigateTo(tab.id, { resetHistory: tab.id === "dashboard", forceRefresh: tab.id === "dashboard" && activeTab.value === "dashboard" });
+        }}
+        aria-label="Main navigation"
+        sx=${{
+          flexGrow: 1,
+          "& .MuiTab-root": { minHeight: 40, justifyContent: collapsed ? "center" : "flex-start", px: collapsed ? 1 : 2 },
+          "& .MuiTabs-indicator": { left: 0, right: "auto", width: 3, borderRadius: 2 },
+        }}
+      >
         ${TAB_CONFIG.map((tab) => {
-          const isActive = activeTab.value === tab.id;
-          const isHome = tab.id === "dashboard";
-          const isChild = !!tab.parent;
           let badge = 0;
-          if (tab.id === "tasks") {
-            badge = getActiveTaskCount();
-          } else if (tab.id === "agents") {
-            badge = getActiveAgentCount();
-          }
-          return html`
-            <button
-              key=${tab.id}
-              class="sidebar-nav-item ${isActive ? "active" : ""} ${isChild ? "sidebar-nav-child" : ""}"
-              style="position:relative"
-              aria-label=${tab.label}
-              aria-current=${isActive ? "page" : null}
-              title=${collapsed ? tab.label : undefined}
-              onClick=${() =>
-                navigateTo(tab.id, {
-                  resetHistory: isHome,
-                  forceRefresh: isHome && isActive,
-                })}
-            >
-              ${ICONS[tab.icon]}
-              ${!collapsed && html`<span>${tab.label}</span>`}
-              ${badge > 0 ? html`<span class="nav-badge" title=${tab.id === "tasks" ? "Active work items" : "Active agents"}>${badge}</span>` : null}
-            </button>
-          `;
+          if (tab.id === "tasks") badge = getActiveTaskCount();
+          else if (tab.id === "agents") badge = getActiveAgentCount();
+          const icon = badge > 0
+            ? html`<${Badge} badgeContent=${badge} color="primary" max=${99}>${ICONS[tab.icon]}</${Badge}>`
+            : ICONS[tab.icon];
+          return html`<${Tab}
+            key=${tab.id}
+            icon=${icon}
+            label=${collapsed ? undefined : tab.label}
+            iconPosition="start"
+            title=${collapsed ? tab.label : undefined}
+            sx=${{ minWidth: 0, textAlign: "left", ...(tab.parent ? { pl: collapsed ? 1 : 4, fontSize: "0.75rem" } : {}) }}
+          />`;
         })}
-      </nav>
+      </${Tabs}>
       <div class="sidebar-footer">
         <div class="sidebar-status ${isConn ? "online" : "offline"}" title=${collapsed ? (isConn ? "Connected" : "Offline") : undefined}>
           <span class="sidebar-status-dot"></span>
@@ -1106,45 +1103,42 @@ function BottomNav({ compact, moreOpen, onToggleMore, onNavigate }) {
   const primaryTabs = getTabsById(PRIMARY_NAV_TABS);
   const tasksBadge = getActiveTaskCount();
   const agentsBadge = getActiveAgentCount();
+  const activeIndex = primaryTabs.findIndex((t) => t.id === activeTab.value);
+  const navValue = moreOpen ? primaryTabs.length : Math.max(activeIndex, 0);
   return html`
-    <nav class=${`bottom-nav ${compact ? "compact" : ""}`}>
-      ${primaryTabs.map((tab) => {
-        const isHome = tab.id === "dashboard";
-        const isActive = activeTab.value === tab.id;
-        let badge = 0;
-        if (tab.id === "tasks") badge = tasksBadge;
-        else if (tab.id === "agents") badge = agentsBadge;
-        return html`
-          <button
-            key=${tab.id}
-            class="nav-item ${isActive ? "active" : ""}"
-            style="position:relative"
-            aria-label=${`Go to ${tab.label}`}
-            type="button"
-            onClick=${() =>
-              onNavigate(tab.id, {
-                resetHistory: isHome,
-                forceRefresh: isHome && isActive,
-              })}
-          >
-            ${ICONS[tab.icon]}
-            <span class="nav-label">${tab.label}</span>
-            ${badge > 0 ? html`<span class="nav-badge" title=${tab.id === "tasks" ? "Active work items" : "Active agents"}>${badge}</span>` : null}
-          </button>
-        `;
-      })}
-      <button
-        class="nav-item nav-item-more ${moreOpen ? "active" : ""}"
-        aria-haspopup="dialog"
-        aria-expanded=${moreOpen ? "true" : "false"}
-        aria-label=${moreOpen ? "Close more menu" : "Open more menu"}
-        type="button"
-        onClick=${onToggleMore}
+    <${Paper} sx=${{position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 1200}} elevation=${3}>
+      <${BottomNavigation}
+        value=${navValue}
+        onChange=${(_, idx) => {
+          if (idx === primaryTabs.length) { onToggleMore(); return; }
+          const tab = primaryTabs[idx];
+          if (!tab) return;
+          const isHome = tab.id === "dashboard";
+          onNavigate(tab.id, { resetHistory: isHome, forceRefresh: isHome && activeTab.value === tab.id });
+        }}
+        showLabels
+        sx=${{
+          bgcolor: "background.paper",
+          borderTop: "1px solid",
+          borderColor: "divider",
+          ...(compact ? { "& .MuiBottomNavigationAction-root": { minWidth: 52, px: 0.5 } } : {}),
+        }}
       >
-        ${ICONS.ellipsis}
-        <span class="nav-label">More</span>
-      </button>
-    </nav>
+        ${primaryTabs.map((tab) => {
+          let badge = 0;
+          if (tab.id === "tasks") badge = tasksBadge;
+          else if (tab.id === "agents") badge = agentsBadge;
+          const icon = badge > 0
+            ? html`<${Badge} badgeContent=${badge} color="primary" max=${99}>${ICONS[tab.icon]}</${Badge}>`
+            : ICONS[tab.icon];
+          return html`<${BottomNavigationAction} key=${tab.id} label=${tab.label} icon=${icon} />`;
+        })}
+        <${BottomNavigationAction}
+          label="More"
+          icon=${ICONS.ellipsis}
+        />
+      </${BottomNavigation}>
+    </${Paper}>
   `;
 }
 
@@ -2220,7 +2214,7 @@ function App() {
       `
     : null;
 
-  return html`
+  return html`<${VeTheme}><${CssBaseline} />
     <div class="top-loading-bar" style="width: ${loadingPct}%; opacity: ${loadingVisible ? 1 : 0}"></div>
     <div
       class="app-shell"
@@ -2298,15 +2292,18 @@ function App() {
           <//>
           ${showScrollTop &&
           html`
-            <button
-              class="scroll-top"
-              title="Back to top"
-              onClick=${() => {
-                mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-              }}
-            >
-              Top
-            </button>
+            <${Tooltip} title="Back to top">
+              <${Fab}
+                size="small"
+                color="primary"
+                sx=${{position: "absolute", bottom: 16, right: 16}}
+                onClick=${() => {
+                  mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                ↑
+              </${Fab}>
+            </${Tooltip}>
           `}
         </div>
       </div>
@@ -2338,8 +2335,11 @@ function App() {
     />
     ${showRestoreFloatingCall
       ? html`
-          <button
-            class="btn btn-primary floating-call-restore"
+          <${Fab}
+            variant="extended"
+            color="primary"
+            size="medium"
+            sx=${{position: "fixed", bottom: 80, right: 16, zIndex: 1100}}
             title=${floatingCallLabel}
             onClick=${async () => {
               try {
@@ -2377,7 +2377,7 @@ function App() {
             ${String(floatingCallState?.call || "").trim().toLowerCase() === "video"
               ? " Restore Video Call"
               : " Restore Voice Call"}
-          </button>
+          </${Fab}>
         `
       : null}
     <${VoiceOverlay}
@@ -2473,7 +2473,7 @@ function App() {
       initialVisionSource=${voiceInitialVisionSource}
       compact=${followWindowMode}
     />
-  `;
+  </${VeTheme}>`;
 }
 
 /* ─── Mount ─── */
