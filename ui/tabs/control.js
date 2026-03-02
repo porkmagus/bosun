@@ -7,7 +7,7 @@ import htm from "htm";
 
 const html = htm.bind(h);
 
-import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid } from "@mui/material";
+import { Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment, CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton, ListItemText, ListItemIcon, Menu, MenuItem, Tabs, Tab, Skeleton, Badge, Avatar, LinearProgress, Grid, Slider } from "@mui/material";
 
 import { haptic, showConfirm } from "../modules/telegram.js";
 import { apiFetch, sendCommandToChat } from "../modules/api.js";
@@ -608,15 +608,14 @@ export function ControlTab() {
           <div class="control-range">
             <div class="form-label mt-sm">Max parallel tasks</div>
             <div class="range-row mb-md">
-              <input
-                type="range"
-                min="0"
-                max="20"
-                step="1"
+              <${Slider}
+                min=${0}
+                max=${20}
+                step=${1}
                 value=${maxParallel}
                 aria-label="Max parallel tasks"
-                onInput=${(e) => setMaxParallel(Number(e.target.value))}
-                onChange=${(e) => handleMaxParallel(Number(e.target.value))}
+                onChange=${(e, v) => setMaxParallel(v)}
+                onChangeCommitted=${(e, v) => handleMaxParallel(v)}
               />
               <span class="pill">Max ${maxParallel}</span>
             </div>

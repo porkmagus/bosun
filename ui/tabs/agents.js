@@ -580,8 +580,8 @@ function WorkspaceViewer({ agent, onClose }) {
             <div class="stream-actions">
               <div class="stream-search">
                 <span class="icon-inline">${ICONS.search}</span>
-                <input
-                  class="input input-compact"
+                <${TextField}
+                  size="small"
                   placeholder="Filter events..."
                   value=${streamSearch}
                   onInput=${(e) => setStreamSearch(e.target.value)}
@@ -745,8 +745,8 @@ function WorkspaceViewer({ agent, onClose }) {
             <div class="stream-actions">
               <div class="stream-search">
                 <span class="icon-inline">${ICONS.search}</span>
-                <input
-                  class="input input-compact"
+                <${TextField}
+                  size="small"
                   placeholder="Filter files..."
                   value=${fileSearch}
                   onInput=${(e) => setFileSearch(e.target.value)}
@@ -955,8 +955,10 @@ function WorkspaceViewer({ agent, onClose }) {
           </div>
 
           <div class="workspace-controls">
-            <input
-              class="input"
+            <${TextField}
+              size="small"
+              variant="outlined"
+              fullWidth
               placeholder="Steer agent…"
               value=${steerInput}
               onInput=${(e) => setSteerInput(e.target.value)}
@@ -1066,28 +1068,32 @@ function DispatchSection({ freeSlots, inputRef, className = "" }) {
             : "All slots are active — dispatch still creates a dedicated agent"}
         </div>
         <div class="input-row">
-          <select
-            class="input"
+          <${Select}
+            size="small"
+            fullWidth
             aria-label="Task"
             value=${taskId}
             ref=${inputRef}
             onChange=${(e) => { setTaskId(e.target.value); if (e.target.value) setPrompt(""); }}
+            displayEmpty
           >
-            <option value="">
+            <${MenuItem} value="">
               ${tasksLoading ? "Loading tasks…" : "Select backlog or draft task"}
-            </option>
+            <//>
             ${taskChoices.map((task, i) => html`
-              <option key=${`${task.id}-${i}`} value=${task.id}>
+              <${MenuItem} key=${`${task.id}-${i}`} value=${task.id}>
                 ${formatTaskOptionLabel(task)}
-              </option>
+              <//>
             `)}
-          </select>
+          <//>
         </div>
         <div class="divider-label">or</div>
-        <textarea
-          class="input"
+        <${TextField}
+          size="small"
+          multiline
+          rows=${2}
+          fullWidth
           placeholder="Freeform prompt…"
-          rows="2"
           value=${prompt}
           onInput=${(e) => { setPrompt(e.target.value); if (e.target.value) setTaskId(""); }}
         />

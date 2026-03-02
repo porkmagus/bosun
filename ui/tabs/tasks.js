@@ -799,12 +799,12 @@ function TriggerTemplatesModal({ onClose }) {
             <${TextField} size="small" variant="outlined" value=${defaults.model || "auto"} disabled=${saving} onInput=${(e) => setDefaults({ ...defaults, model: e.target.value })} placeholder="default model (auto)" fullWidth />
           </div>
           <div class="btn-row" style="margin-top:8px;">
-            <button class="btn btn-secondary btn-sm" disabled=${saving} onClick=${handleSaveDefaults}>
+            <${Button} variant="outlined" size="small" disabled=${saving} onClick=${handleSaveDefaults}>
               Save Defaults
-            </button>
-            <button class="btn btn-ghost btn-sm" disabled=${loading || saving} onClick=${loadTemplates}>
+            <//>
+            <${Button} variant="text" size="small" disabled=${loading || saving} onClick=${loadTemplates}>
               Refresh
-            </button>
+            <//>
           </div>
 
 

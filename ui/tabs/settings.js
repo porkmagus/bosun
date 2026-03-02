@@ -54,7 +54,7 @@ import {
   Typography, Box, Stack, Button, IconButton, Chip, TextField,
   Select, MenuItem, FormControl, InputLabel, Switch, FormControlLabel,
   Tooltip, Alert, Paper, Divider, CircularProgress, Dialog, DialogTitle,
-  DialogContent, DialogActions, InputAdornment, Tabs, Tab,
+  DialogContent, DialogActions, InputAdornment, Tabs, Tab, Slider,
 } from "@mui/material";
 import {
   CATEGORIES,
@@ -1949,14 +1949,13 @@ function AppPreferencesMode() {
       <${Card}>
         <div class="card-subtitle mb-sm">Default Max Parallel</div>
         <div class="range-row mb-md">
-          <input
-            type="range"
-            min="1"
-            max="20"
-            step="1"
+          <${Slider}
+            min=${1}
+            max=${20}
+            step=${1}
             value=${defaultMaxParallel}
-            onInput=${(e) => setDefaultMaxParallel(Number(e.target.value))}
-            onChange=${(e) => handleDefaultMaxParallel(Number(e.target.value))}
+            onChange=${(e, v) => setDefaultMaxParallel(v)}
+            onChangeCommitted=${(e, v) => handleDefaultMaxParallel(v)}
           />
           <span class="pill">${defaultMaxParallel}</span>
         </div>
