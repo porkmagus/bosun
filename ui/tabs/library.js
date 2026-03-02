@@ -1173,14 +1173,14 @@ function McpMarketplace({ onInstalled }) {
                 ${(srv.tags || []).map((t) => html`<span class="mcp-card-tag" key=${t}>${t}</span>`)}
               </div>
               <div class="mcp-card-actions">
-                <button class="btn-uninstall"
+                <${Button} variant="outlined" color="error" size="small"
                   onClick=${() => handleUninstall(srv.id)}
                   disabled=${uninstalling === srv.id}>
                   ${uninstalling === srv.id ? html`<${Spinner} size=${12} />` : "Uninstall"}
-                </button>
-                <button onClick=${() => setConfiguring(configuring === srv.id ? null : srv.id)}>
+                <//>
+                <${Button} variant="outlined" size="small" onClick=${() => setConfiguring(configuring === srv.id ? null : srv.id)}>
                   ${iconText(":settings: Configure")}
-                </button>
+                <//>
               </div>
               ${configuring === srv.id && html`
                 <div class="mcp-env-editor">
@@ -1201,10 +1201,10 @@ function McpMarketplace({ onInstalled }) {
                     <div style="font-size:0.82em;color:var(--text-tertiary,#666);">No environment variables required.</div>
                   `}
                   <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-                    <button class="library-type-pill" onClick=${() => setConfiguring(null)}>Cancel</button>
-                    <button class="library-type-pill active" onClick=${() => handleConfigure(srv.id)}>
+                    <${Button} variant="text" size="small" onClick=${() => setConfiguring(null)}>Cancel<//>
+                    <${Button} variant="contained" size="small" onClick=${() => handleConfigure(srv.id)}>
                       ${iconText(":check: Save")}
-                    </button>
+                    <//>
                   </div>
                 </div>
               `}
@@ -1216,9 +1216,9 @@ function McpMarketplace({ onInstalled }) {
       <!-- Marketplace Catalog -->
       <div class="mcp-section-header">
         <h3>${iconText(":shopping: MCP Marketplace")}</h3>
-        <button class="library-type-pill" onClick=${() => setShowCustom(!showCustom)}>
+        <${Button} variant="outlined" size="small" onClick=${() => setShowCustom(!showCustom)}>
           ${iconText("➕ Custom Server")}
-        </button>
+        <//>
       </div>
 
       <div style="margin-bottom:8px;">
@@ -1274,13 +1274,13 @@ function McpMarketplace({ onInstalled }) {
               `}
               <div class="mcp-card-actions">
                 ${isInstalled
-                  ? html`<button class="btn-installed" disabled>✓ Installed</button>`
+                  ? html`<${Button} variant="outlined" size="small" disabled>✓ Installed<//>`
                   : html`
-                    <button class="btn-install"
+                    <${Button} variant="contained" size="small"
                       onClick=${() => handleInstall(srv.id)}
                       disabled=${isInstalling}>
                       ${isInstalling ? html`<${Spinner} size=${12} />` : iconText(":download: Install")}
-                    </button>
+                    <//>
                   `
                 }
               </div>
@@ -1393,9 +1393,9 @@ function McpCustomInstallForm({ onInstall, installing }) {
           placeholder="API_KEY, SECRET_TOKEN" fullWidth />
       </label>
       <div class="library-actions">
-        <button class="btn-primary" onClick=${handleSubmit} disabled=${installing}>
+        <${Button} variant="contained" size="small" onClick=${handleSubmit} disabled=${installing}>
           ${installing ? html`<${Spinner} size=${14} />` : iconText(":download: Install")}
-        </button>
+        <//>
       </div>
     </div>
   `;
@@ -1422,9 +1422,9 @@ function ScopeDetector() {
 
   return html`
     <div>
-      <button class="btn-ghost library-type-pill" onClick=${loadScopes} style="font-size:0.82em;">
+      <${Button} variant="text" size="small" onClick=${loadScopes} sx=${{ fontSize: "0.82em" }}>
         ${loading ? html`<${Spinner} size=${12} />` : iconText(":search: Detect Scopes")}
-      </button>
+      <//>
       ${showing && scopes.value.length > 0 && html`
         <div class="library-scopes">
           ${scopes.value.map((s) => html`
@@ -1476,9 +1476,9 @@ function ProfileMatcher() {
           onKeyDown=${(e) => e.key === "Enter" && doMatch()}
           sx=${{ flex: 1, fontSize: "0.85em" }}
         />
-        <button class="library-type-pill active" onClick=${doMatch} style="font-size:0.82em;" disabled=${loading}>
+        <${Button} variant="contained" size="small" onClick=${doMatch} sx=${{ fontSize: "0.82em" }} disabled=${loading}>
           ${loading ? html`<${Spinner} size=${12} />` : iconText(":target: Match")}
-        </button>
+        <//>
       </div>
       ${match && html`
         <div class="library-profile-match" style="margin-top:8px;">
@@ -1607,26 +1607,26 @@ export function LibraryTab() {
     <div class="library-root">
       <div class="library-header">
         <h2>${iconText(":book: Library")}</h2>
-        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("female")}>
+        <${Button} variant="outlined" size="small" onClick=${() => handleCreateAudioAgent("female")}>
           ${iconText(":mic: New Female Audio Agent")}
-        </button>
-        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("male")}>
+        <//>
+        <${Button} variant="outlined" size="small" onClick=${() => handleCreateAudioAgent("male")}>
           ${iconText(":mic: New Male Audio Agent")}
-        </button>
-        <button class="library-type-pill" onClick=${handleRebuild}
+        <//>
+        <${Button} variant="outlined" size="small" onClick=${handleRebuild}
           title="Rescan directories and rebuild manifest">
           ${iconText(":refresh: Rebuild")}
-        </button>
-        <button class="library-type-pill active" onClick=${() => setEditing({})}>
+        <//>
+        <${Button} variant="contained" size="small" onClick=${() => setEditing({})}>
           ${iconText("➕ New")}
-        </button>
+        <//>
       </div>
 
       ${!initialized.value && !loading && html`
         <div class="library-init-banner">
           <p><b>Welcome to the Library!</b></p>
           <p>Initialize to scaffold built-in agent profiles and index existing prompts and skills.</p>
-          <button onClick=${handleInit}>${iconText(":rocket: Initialize Library")}</button>
+          <${Button} variant="contained" size="small" onClick=${handleInit}>${iconText(":rocket: Initialize Library")}<//>
         </div>
       `}
 
