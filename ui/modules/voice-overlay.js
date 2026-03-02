@@ -1194,6 +1194,8 @@ function mergeFragmentedMeetingFeedMessages(items) {
  * executor?: string,
  * mode?: string,
  * model?: string,
+ * voiceAgentId?: string,
+ * onVoiceAgentChange?: (voiceAgentId: string) => void,
  * callType?: "voice" | "video",
  * initialVisionSource?: "camera" | "screen" | null
  * }} props
@@ -1208,6 +1210,8 @@ export function VoiceOverlay({
   executor,
   mode,
   model,
+  voiceAgentId,
+  onVoiceAgentChange,
   callType = "voice",
   initialVisionSource = null,
 }) {
@@ -1236,8 +1240,63 @@ export function VoiceOverlay({
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [voiceAgents, setVoiceAgents] = useState([]);
+  const [loadingVoiceAgents, setLoadingVoiceAgents] = useState(false);
+  const [selectedVoiceAgentId, setSelectedVoiceAgentId] = useState(
+    String(voiceAgentId || "").trim() || "",
+  );
+  const [startRequested, setStartRequested] = useState(false);
+  const [switchingVoiceAgent, setSwitchingVoiceAgent] = useState(false);
 
   useEffect(() => { injectOverlayStyles(); }, []);
+
+  useEffect(() => {
+    const incoming = String(voiceAgentId || "").trim();
+    if (!incoming) return;
+    setSelectedVoiceAgentId(incoming);
+  }, [voiceAgentId]);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    setLoadingVoiceAgents(true);
+    (async () => {
+      try {
+        const params = new URLSearchParams();
+        if (sessionId) params.set("sessionId", String(sessionId));
+        if (voiceAgentId) params.set("voiceAgentId", String(voiceAgentId));
+        const res = await apiFetch(`/api/voice/agents?${params.toString()}`, { _silent: true });
+        if (cancelled) return;
+        const agents = Array.isArray(res?.agents) ? res.agents : [];
+        setVoiceAgents(agents);
+        const fallbackId =
+          String(voiceAgentId || "").trim()
+          || String(res?.defaultAgentId || "").trim()
+          || String(agents[0]?.id || "").trim()
+          || "";
+        setSelectedVoiceAgentId(fallbackId);
+        if (typeof onVoiceAgentChange === "function" && fallbackId) {
+          onVoiceAgentChange(fallbackId);
+        }
+      } catch {
+        if (!cancelled) {
+          setVoiceAgents([]);
+          if (!selectedVoiceAgentId) setSelectedVoiceAgentId("voice-agent");
+        }
+      } finally {
+        if (!cancelled) setLoadingVoiceAgents(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, sessionId, voiceAgentId, onVoiceAgentChange]);
+
+  useEffect(() => {
+    if (visible) return;
+    setStartRequested(false);
+    setSwitchingVoiceAgent(false);
+  }, [visible]);
 
   // Close popups on outside click
   useEffect(() => {
@@ -1290,7 +1349,7 @@ export function VoiceOverlay({
 
   // Start session on mount — try Agents SDK first, fallback to legacy
   useEffect(() => {
-    if (!visible || started) return;
+    if (!visible || started || !startRequested) return;
     setStarted(true);
     autoFallbackTriedRef.current = false;
     let legacyFallbackStarted = false;
@@ -1299,12 +1358,12 @@ export function VoiceOverlay({
       if (legacyFallbackStarted) return;
       legacyFallbackStarted = true;
       setUsingSdk(false);
-      startVoiceSession({ sessionId, executor, mode, model });
+      startVoiceSession({ sessionId, executor, mode, model, voiceAgentId: selectedVoiceAgentId || undefined });
     };
 
     if (tier === 1) {
       // Try SDK-first for tier 1
-      startSdkVoiceSession({ sessionId, executor, mode, model })
+      startSdkVoiceSession({ sessionId, executor, mode, model, voiceAgentId: selectedVoiceAgentId || undefined })
         .then((result) => {
           if (result.sdk) {
             setUsingSdk(true);
@@ -1324,9 +1383,9 @@ export function VoiceOverlay({
       });
       sdkFallbackCleanupRef.current = cleanup;
     } else if (sessionId) {
-      startFallbackSession(sessionId, { executor, mode, model });
+      startFallbackSession(sessionId, { executor, mode, model, voiceAgentId: selectedVoiceAgentId || undefined });
     }
-  }, [visible, started, tier, sessionId, executor, mode, model]);
+  }, [visible, started, startRequested, tier, sessionId, executor, mode, model, selectedVoiceAgentId]);
 
   useEffect(() => {
     if (!visible || !started || tier !== 1 || !sessionId) return;
@@ -1335,11 +1394,16 @@ export function VoiceOverlay({
       if (autoFallbackTriedRef.current) return;
       autoFallbackTriedRef.current = true;
       try { stopVoiceSession(); } catch { /* best effort */ }
-      startFallbackSession(sessionId, { executor, mode, model });
+      startFallbackSession(sessionId, {
+        executor,
+        mode,
+        model,
+        voiceAgentId: selectedVoiceAgentId || undefined,
+      });
     });
     legacyFallbackCleanupRef.current = cleanup;
     return cleanup;
-  }, [visible, started, tier, sessionId, executor, mode, model, usingSdk]);
+  }, [visible, started, tier, sessionId, executor, mode, model, usingSdk, selectedVoiceAgentId]);
 
   useEffect(() => {
     if (visible) return;
@@ -1791,12 +1855,93 @@ export function VoiceOverlay({
 
   if (!visible) return null;
 
+  const activeVoiceAgent = voiceAgents.find(
+    (agent) => String(agent?.id || "").trim() === String(selectedVoiceAgentId || "").trim(),
+  ) || null;
+
+  const handleVoiceAgentSelection = async (nextAgentIdRaw) => {
+    const nextAgentId = String(nextAgentIdRaw || "").trim();
+    if (!nextAgentId) return;
+    if (nextAgentId === String(selectedVoiceAgentId || "").trim()) return;
+    setSelectedVoiceAgentId(nextAgentId);
+    if (typeof onVoiceAgentChange === "function") onVoiceAgentChange(nextAgentId);
+    if (!started) return;
+
+    setSwitchingVoiceAgent(true);
+    try {
+      stopVisionShare().catch(() => {});
+      if (usingSdk) {
+        stopSdkVoiceSession();
+      } else if (tier === 1) {
+        stopVoiceSession();
+      } else {
+        stopFallbackSession();
+      }
+      autoFallbackTriedRef.current = false;
+      setUsingSdk(false);
+      setStarted(false);
+      setStartRequested(true);
+    } finally {
+      setSwitchingVoiceAgent(false);
+    }
+  };
+
+  if (!startRequested) {
+    return html`
+      <div class=${`voice-overlay${isCompactFollowMode ? " compact" : ""}`}>
+        <div class="voice-overlay-main" style="display:flex;align-items:center;justify-content:center;padding:24px;">
+          <div class="vm-settings-panel" style="max-width:560px;width:100%;">
+            <div class="vm-settings-header">
+              <span class="vm-settings-title">${normalizedCallType === "video" ? "Start Video Call" : "Start Voice Call"}</span>
+            </div>
+            <div class="vm-settings-body">
+              <div class="vm-settings-section">
+                <div class="vm-settings-section-title">Voice Agent</div>
+                <div class="vm-settings-row">
+                  <div class="vm-settings-row-info">
+                    <div class="vm-settings-row-label">Choose starting agent</div>
+                    <div class="vm-settings-row-desc">
+                      ${loadingVoiceAgents
+                        ? "Loading available audio agents…"
+                        : (activeVoiceAgent?.description || "Pick the voice agent for this call.")}
+                    </div>
+                  </div>
+                  <select
+                    class="vm-settings-select"
+                    disabled=${loadingVoiceAgents || switchingVoiceAgent}
+                    value=${selectedVoiceAgentId || ""}
+                    onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
+                  >
+                    ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
+                      <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                    `)}
+                  </select>
+                </div>
+              </div>
+              <div class="library-actions" style="margin-top:10px;">
+                <button class="btn-ghost" onClick=${onClose}>Cancel</button>
+                <button
+                  class="btn-primary"
+                  disabled=${loadingVoiceAgents || !String(selectedVoiceAgentId || "").trim()}
+                  onClick=${() => setStartRequested(true)}
+                >
+                  Start Call
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   const statusLabel = state === "connected" ? "ready" : state;
   const boundLabel = [
     sessionId ? `session ${sessionId}` : null,
     executor ? `agent ${executor}` : null,
     mode ? `mode ${mode}` : null,
     model ? `model ${model}` : null,
+    activeVoiceAgent?.name ? `voice ${activeVoiceAgent.name}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -2326,8 +2471,22 @@ export function VoiceOverlay({
                     <span class="vm-more-icon">🧑</span> You
                   </div>
                   <div class="vm-more-item" style="cursor:default;opacity:0.9">
-                    <span class="vm-more-icon">🤖</span> AI Agent
+                    <span class="vm-more-icon">🤖</span> ${activeVoiceAgent?.name || "AI Agent"}
                   </div>
+                  <div class="vm-more-divider"></div>
+                  <div style="padding:8px 12px 6px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600;letter-spacing:0.04em">SWITCH AGENT</div>
+                  ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
+                    <button
+                      key=${agent.id}
+                      class="vm-more-item"
+                      disabled=${switchingVoiceAgent}
+                      onClick=${() => handleVoiceAgentSelection(agent.id)}
+                      style=${String(agent.id) === String(selectedVoiceAgentId || "").trim() ? "opacity:0.95;border:1px solid rgba(138,180,248,0.35);" : ""}
+                    >
+                      <span class="vm-more-icon">${String(agent.id) === String(selectedVoiceAgentId || "").trim() ? "✅" : "🤖"}</span>
+                      ${agent.name || agent.id}
+                    </button>
+                  `)}
                   <div class="vm-more-divider"></div>
                   <button class="vm-more-item" onClick=${() => {
                     const url = window.location.href;
@@ -2479,8 +2638,24 @@ export function VoiceOverlay({
                   <div class="vm-settings-row">
                     <div class="vm-settings-row-info">
                       <div class="vm-settings-row-label">Agent</div>
-                      <div class="vm-settings-row-desc">${executor || "Default"}</div>
+                      <div class="vm-settings-row-desc">${activeVoiceAgent?.name || "Default"}</div>
                     </div>
+                  </div>
+                  <div class="vm-settings-row">
+                    <div class="vm-settings-row-info">
+                      <div class="vm-settings-row-label">Switch voice agent</div>
+                      <div class="vm-settings-row-desc">Change persona/toolset without leaving this call</div>
+                    </div>
+                    <select
+                      class="vm-settings-select"
+                      disabled=${switchingVoiceAgent}
+                      value=${selectedVoiceAgentId || ""}
+                      onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
+                    >
+                      ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
+                        <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                      `)}
+                    </select>
                   </div>
                   <div class="vm-settings-row">
                     <div class="vm-settings-row-info">

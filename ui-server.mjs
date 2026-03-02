@@ -10338,6 +10338,7 @@ async function handleApi(req, res, url) {
         executor: String(body?.executor || "").trim() || undefined,
         mode: String(body?.mode || "").trim() || undefined,
         model: String(body?.model || "").trim() || undefined,
+        voiceAgentId: String(body?.voiceAgentId || "").trim() || undefined,
       };
       const options = {
         voiceId: String(body?.voiceId || "").trim() || undefined,
@@ -11212,6 +11213,7 @@ export async function startTelegramUiServer(options = {}) {
               executor,
               mode,
               model,
+              voiceAgentId,
             } = message;
             const normalizedToolName = String(toolName || "").trim();
             if (!normalizedToolName) {
@@ -11233,6 +11235,7 @@ export async function startTelegramUiServer(options = {}) {
                   mode: String(mode || "").trim() || undefined,
                   model: String(model || "").trim() || undefined,
                   authSource: String(socket.__authSource || "").trim() || undefined,
+                  voiceAgentId: String(voiceAgentId || "").trim() || undefined,
                 };
                 const normalizedArgs = relay.normalizeVoiceToolArgs(normalizedToolName, args || {});
                 relay.getAllowedVoiceTools(context).then((allowed) => {
@@ -11244,6 +11247,44 @@ export async function startTelegramUiServer(options = {}) {
                       ts: Date.now(),
                     });
                     return;
+                  }
+                  const libraryRoot = resolveVoiceLibraryRoot(context);
+                  const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+                    libraryRoot,
+                    context.voiceAgentId || "",
+                  );
+                  const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+                  const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+                  const toolEnabledForAgent =
+                    applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+                  if (!toolEnabledForAgent) {
+                    sendWsMessage(socket, {
+                      type: "voice-tool-result",
+                      callId,
+                      error: `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                      ts: Date.now(),
+                    });
+                    return;
+                  }
+                  if (
+                    normalizedToolName === "invoke_mcp_tool"
+                    && Array.isArray(voiceToolCfg?.enabledMcpServers)
+                    && voiceToolCfg.enabledMcpServers.length > 0
+                  ) {
+                    const requestedServer = String(
+                      normalizedArgs?.server
+                      || normalizedArgs?.serverId
+                      || "",
+                    ).trim();
+                    if (requestedServer && !voiceToolCfg.enabledMcpServers.includes(requestedServer)) {
+                      sendWsMessage(socket, {
+                        type: "voice-tool-result",
+                        callId,
+                        error: `MCP server "${requestedServer}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                        ts: Date.now(),
+                      });
+                      return;
+                    }
                   }
                   // Tool is allowed — execute it
                   relay.executeVoiceTool(normalizedToolName, normalizedArgs, context).then((result) => {
@@ -11287,8 +11328,27 @@ export async function startTelegramUiServer(options = {}) {
                   mode: String(mode || "").trim() || undefined,
                   model: String(model || "").trim() || undefined,
                   authSource: String(socket.__authSource || "").trim() || undefined,
+                  voiceAgentId: String(voiceAgentId || "").trim() || undefined,
                 };
                 const normalizedArgs = relay.normalizeVoiceToolArgs(normalizedToolName, args || {});
+                const libraryRoot = resolveVoiceLibraryRoot(context);
+                const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+                  libraryRoot,
+                  context.voiceAgentId || "",
+                );
+                const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+                const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+                const toolEnabledForAgent =
+                  applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+                if (!toolEnabledForAgent) {
+                  sendWsMessage(socket, {
+                    type: "voice-tool-result",
+                    callId,
+                    error: `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                    ts: Date.now(),
+                  });
+                  return;
+                }
                 const result = await relay.executeVoiceTool(normalizedToolName, normalizedArgs, context);
                 sendWsMessage(socket, {
                   type: "voice-tool-result",

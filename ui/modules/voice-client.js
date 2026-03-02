@@ -930,6 +930,7 @@ export async function startVoiceSession(options = {}) {
         executor: _callContext.executor || undefined,
         mode: _callContext.mode || undefined,
         model: _callContext.model || undefined,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
         delegateOnly: false,
       }),
     });
@@ -1143,7 +1144,13 @@ export function stopVoiceSession() {
   voiceSessionId.value = null;
   voiceBoundSessionId.value = null;
   voiceDuration.value = 0;
-  _callContext = { sessionId: null, executor: null, mode: null, model: null };
+  _callContext = {
+    sessionId: null,
+    executor: null,
+    mode: null,
+    model: null,
+    voiceAgentId: null,
+  };
   emit("session-ended", {});
 }
 
@@ -1375,6 +1382,7 @@ async function handleToolCall(event) {
         executor: _callContext.executor || undefined,
         mode: _callContext.mode || undefined,
         model: _callContext.model || undefined,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
       }),
     });
     const result = await res.json();

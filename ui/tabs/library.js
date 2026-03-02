@@ -378,6 +378,47 @@ const TYPE_ICONS = { prompt: ":edit:", agent: ":bot:", skill: ":cpu:", mcp: ":pl
 const TYPE_LABELS = { prompt: "Prompt", agent: "Agent Profile", skill: "Skill", mcp: "MCP Server" };
 const TYPE_COLORS = { prompt: "#58a6ff", agent: "#af7bff", skill: "#3fb950", mcp: "#f59e0b" };
 
+const AUDIO_AGENT_TEMPLATES = Object.freeze({
+  female: {
+    type: "agent",
+    name: "Voice Agent (Female)",
+    description: "Conversational voice specialist with concise guidance and call-friendly pacing.",
+    tags: "voice,audio-agent,female,realtime",
+    scope: "global",
+    content: JSON.stringify({
+      name: "Voice Agent (Female)",
+      description: "Conversational voice specialist with concise guidance and call-friendly pacing.",
+      titlePatterns: ["\\bvoice\\b", "\\bcall\\b", "\\bmeeting\\b", "\\bassistant\\b"],
+      scopes: ["voice", "assistant"],
+      model: null,
+      promptOverride: null,
+      skills: ["concise-voice-guidance", "conversation-memory"],
+      voiceAgent: true,
+      voicePersona: "female",
+      voiceInstructions: "You are Nova, a female voice agent. Be concise, warm, and practical. Use tools for facts and execution. Keep spoken responses short and clear.",
+    }, null, 2),
+  },
+  male: {
+    type: "agent",
+    name: "Voice Agent (Male)",
+    description: "Operational voice specialist focused on diagnostics and execution.",
+    tags: "voice,audio-agent,male,realtime",
+    scope: "global",
+    content: JSON.stringify({
+      name: "Voice Agent (Male)",
+      description: "Operational voice specialist focused on diagnostics and execution.",
+      titlePatterns: ["\\bvoice\\b", "\\bcall\\b", "\\bmeeting\\b", "\\bassistant\\b"],
+      scopes: ["voice", "assistant"],
+      model: null,
+      promptOverride: null,
+      skills: ["ops-diagnostics", "task-execution"],
+      voiceAgent: true,
+      voicePersona: "male",
+      voiceInstructions: "You are Atlas, a male voice agent. Be direct and execution-oriented. Prefer actionable status updates. Use tools proactively for diagnostics.",
+    }, null, 2),
+  },
+});
+
 /* ═══════════════════════════════════════════════════════════════
  *  Sub-components
  * ═══════════════════════════════════════════════════════════════ */
@@ -476,7 +517,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
     description: entry?.description || "",
     tags: (entry?.tags || []).join(", "),
     scope: entry?.scope || "global",
-    content: "",
+    content: typeof entry?.content === "string" ? entry.content : "",
   };
   const [form, setForm] = useState(initialFormSnapshot);
   const [baseline, setBaseline] = useState(initialFormSnapshot);
@@ -1402,6 +1443,13 @@ export function LibraryTab() {
     setEditing(entry);
   }, []);
 
+  const handleCreateAudioAgent = useCallback((templateKey) => {
+    const template = AUDIO_AGENT_TEMPLATES[templateKey];
+    if (!template) return;
+    haptic("light");
+    setEditing({ ...template });
+  }, []);
+
   const handleSaved = useCallback(() => {
     setEditing(null);
     loadEntries();
@@ -1425,6 +1473,12 @@ export function LibraryTab() {
     <div class="library-root">
       <div class="library-header">
         <h2>${iconText(":book: Library")}</h2>
+        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("female")}>
+          ${iconText(":mic: New Female Audio Agent")}
+        </button>
+        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("male")}>
+          ${iconText(":mic: New Male Audio Agent")}
+        </button>
         <button class="library-type-pill" onClick=${handleRebuild}
           title="Rescan directories and rebuild manifest">
           ${iconText(":refresh: Rebuild")}

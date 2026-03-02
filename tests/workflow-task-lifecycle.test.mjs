@@ -386,11 +386,15 @@ describe("action.detect_new_commits", () => {
     expect(result.hasCommits).toBe(false);
   });
 
-  it("throws if worktreePath is missing", async () => {
+  it("soft-fails if worktreePath is missing", async () => {
     const nt = getNodeType("action.detect_new_commits");
     const ctx = makeCtx({});
     const node = makeNode("action.detect_new_commits", {});
-    await expect(nt.execute(node, ctx)).rejects.toThrow("worktreePath");
+    const result = await nt.execute(node, ctx);
+    expect(result.success).toBe(false);
+    expect(result.hasCommits).toBe(false);
+    expect(result.hasNewCommits).toBe(false);
+    expect(result.error).toMatch(/worktreePath/);
   });
 });
 

@@ -70,6 +70,7 @@ const VOICE_LAUNCH_QUERY_KEYS = [
   "executor",
   "mode",
   "model",
+  "voiceAgentId",
   "vision",
   "source",
   "chat_id",
@@ -127,6 +128,7 @@ function parseVoiceLaunchFromUrl() {
       executor: String(params.get("executor") || "").trim() || null,
       mode: String(params.get("mode") || "").trim() || null,
       model: String(params.get("model") || "").trim() || null,
+      voiceAgentId: String(params.get("voiceAgentId") || "").trim() || null,
     },
   };
 }
@@ -166,11 +168,13 @@ function buildBrowserFollowUrl(detail = {}) {
   const executor = String(detail?.executor || "").trim();
   const mode = String(detail?.mode || "").trim();
   const model = String(detail?.model || "").trim();
+  const voiceAgentId = String(detail?.voiceAgentId || "").trim();
   const vision = String(detail?.initialVisionSource || "").trim();
   if (sessionId) target.searchParams.set("sessionId", sessionId);
   if (executor) target.searchParams.set("executor", executor);
   if (mode) target.searchParams.set("mode", mode);
   if (model) target.searchParams.set("model", model);
+  if (voiceAgentId) target.searchParams.set("voiceAgentId", voiceAgentId);
   if (vision) target.searchParams.set("vision", vision);
   return target.toString();
 }
@@ -1464,6 +1468,7 @@ function App() {
   const [voiceExecutor, setVoiceExecutor] = useState(null);
   const [voiceAgentMode, setVoiceAgentMode] = useState(null);
   const [voiceModel, setVoiceModel] = useState(null);
+  const [voiceAgentId, setVoiceAgentId] = useState(null);
   const [voiceCallType, setVoiceCallType] = useState("voice");
   const [voiceInitialVisionSource, setVoiceInitialVisionSource] = useState(
     null,
@@ -1805,6 +1810,9 @@ function App() {
         const currentModel =
           String(event?.detail?.model || selectedModel.value || "").trim() ||
           null;
+        const currentVoiceAgentId =
+          String(event?.detail?.voiceAgentId || voiceAgentId || "").trim() ||
+          null;
         const explicitSessionId =
           String(event?.detail?.sessionId || "").trim() || null;
         let currentSessionId =
@@ -1836,6 +1844,7 @@ function App() {
         setVoiceExecutor(currentExecutor);
         setVoiceAgentMode(currentMode);
         setVoiceModel(currentModel);
+        setVoiceAgentId(currentVoiceAgentId);
         setVoiceCallType(requestedCallType);
         setVoiceInitialVisionSource(requestedVisionSource);
 
@@ -1859,6 +1868,7 @@ function App() {
             executor: currentExecutor || undefined,
             mode: currentMode || undefined,
             model: currentModel || undefined,
+            voiceAgentId: currentVoiceAgentId || undefined,
           });
           if (followResult?.ok) {
             const nextFloatingState = {
@@ -1868,6 +1878,7 @@ function App() {
               executor: currentExecutor,
               mode: currentMode,
               model: currentModel,
+              voiceAgentId: currentVoiceAgentId,
               initialVisionSource: requestedVisionSource,
             };
             setFloatingCallState(nextFloatingState);
@@ -1890,7 +1901,7 @@ function App() {
     globalThis.addEventListener?.("ve:open-voice-mode", handleOpenVoiceMode);
     return () =>
       globalThis.removeEventListener?.("ve:open-voice-mode", handleOpenVoiceMode);
-  }, [followWindowMode]);
+  }, [followWindowMode, voiceAgentId]);
 
   useEffect(() => {
     const onStorage = (event) => {
@@ -1912,6 +1923,7 @@ function App() {
       executor: voiceExecutor,
       mode: voiceAgentMode,
       model: voiceModel,
+      voiceAgentId,
       initialVisionSource: voiceInitialVisionSource,
     };
     setFloatingCallState(nextFloatingState);
@@ -1924,6 +1936,7 @@ function App() {
     voiceExecutor,
     voiceAgentMode,
     voiceModel,
+    voiceAgentId,
     voiceInitialVisionSource,
   ]);
 
@@ -1937,6 +1950,7 @@ function App() {
         executor: voiceExecutor,
         mode: voiceAgentMode,
         model: voiceModel,
+        voiceAgentId,
         initialVisionSource: voiceInitialVisionSource,
       };
       setFloatingCallState(nextFloatingState);
@@ -1951,6 +1965,7 @@ function App() {
     voiceExecutor,
     voiceAgentMode,
     voiceModel,
+    voiceAgentId,
     voiceInitialVisionSource,
   ]);
 
@@ -2344,6 +2359,7 @@ function App() {
                   executor: floatingCallState?.executor,
                   mode: floatingCallState?.mode,
                   model: floatingCallState?.model,
+                  voiceAgentId: floatingCallState?.voiceAgentId,
                 });
                 if (!popupResult.ok) {
                   showToast(
@@ -2376,6 +2392,7 @@ function App() {
             executor: voiceExecutor,
             mode: voiceAgentMode,
             model: voiceModel,
+            voiceAgentId,
           };
           const desktopFollowApi = globalThis?.veDesktop?.follow;
           if (typeof desktopFollowApi?.open === "function") {
@@ -2393,6 +2410,7 @@ function App() {
                   executor: followDetail.executor,
                   mode: followDetail.mode,
                   model: followDetail.model,
+                  voiceAgentId: followDetail.voiceAgentId,
                   initialVisionSource: followDetail.initialVisionSource,
                 };
                 setFloatingCallState(nextFloatingState);
@@ -2417,6 +2435,7 @@ function App() {
             executor: followDetail.executor,
             mode: followDetail.mode,
             model: followDetail.model,
+            voiceAgentId: followDetail.voiceAgentId,
             initialVisionSource: followDetail.initialVisionSource,
           };
           setFloatingCallState(nextFloatingState);
@@ -2435,6 +2454,10 @@ function App() {
       executor=${voiceExecutor}
       mode=${voiceAgentMode}
       model=${voiceModel}
+      voiceAgentId=${voiceAgentId}
+      onVoiceAgentChange=${(nextAgentId) => {
+        setVoiceAgentId(String(nextAgentId || "").trim() || null);
+      }}
       callType=${voiceCallType}
       initialVisionSource=${voiceInitialVisionSource}
       compact=${followWindowMode}

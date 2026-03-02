@@ -69,6 +69,8 @@ describe("library-manager constants", () => {
     expect(ids).toContain("devops-agent");
     expect(ids).toContain("docs-agent");
     expect(ids).toContain("test-agent");
+    expect(ids).toContain("voice-agent-female");
+    expect(ids).toContain("voice-agent-male");
   });
 });
 
