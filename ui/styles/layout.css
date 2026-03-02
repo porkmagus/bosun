@@ -695,6 +695,7 @@
     gap: var(--shell-gap);
     padding: var(--shell-gap);
     height: var(--viewport-stable-height);
+    overflow: hidden;
   }
 
   .app-shell[data-has-rail="false"] {
@@ -703,12 +704,12 @@
   }
 
   .app-shell[data-has-inspector="true"] {
-    grid-template-columns: var(--sidebar-width) var(--rail-width) minmax(0, 1fr) var(--inspector-width);
+    grid-template-columns: var(--sidebar-width) var(--rail-width) minmax(0, 1fr) max(200px, var(--inspector-width));
     grid-template-areas: "sidebar rail main inspector";
   }
 
   .app-shell[data-has-rail="false"][data-has-inspector="true"] {
-    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) max(200px, var(--inspector-width));
     grid-template-areas: "sidebar main inspector";
   }
 
@@ -756,6 +757,7 @@
     padding: 12px;
     gap: 12px;
     min-height: 0;
+    min-width: 200px;
     box-shadow: var(--shadow-sm);
     overflow-y: auto;
     overflow-x: hidden;

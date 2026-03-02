@@ -1509,7 +1509,7 @@ function App() {
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (!globalThis.window) return 320;
     const stored = Number(localStorage.getItem("ve-inspector-width"));
-    return Number.isFinite(stored) ? stored : 320;
+    return Number.isFinite(stored) && stored >= 200 ? stored : 320;
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (!globalThis.window) return false;

@@ -893,10 +893,10 @@
 .chat-empty-state-inline.chat-empty-state-inline--no-box {
   width: auto;
   max-width: 100%;
-  border: none !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   padding: clamp(18px, 2.8vw, 30px) var(--space-lg);
   margin-top: auto;
   margin-bottom: auto;
@@ -2455,10 +2455,10 @@ ul.md-list li::before {
 }
 
 .chat-retry-btn {
-  font-size: 11px !important;
-  padding: 1px 6px !important;
-  min-height: unset !important;
-  border: 1px solid rgba(255, 255, 255, .12) !important;
+  font-size: 11px;
+  padding: 1px 6px;
+  min-height: unset;
+  border: 1px solid rgba(255, 255, 255, .12);
 }
 
 /* ═══ Agent Status Indicator ═══ */
