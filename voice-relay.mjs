@@ -314,18 +314,42 @@ function sanitizeVoiceCallContext(context = {}) {
   const rawExecutor = String(context?.executor || "").trim().toLowerCase();
   const rawMode = String(context?.mode || "").trim().toLowerCase();
   const rawModel = String(context?.model || "").trim();
+  const rawVoiceAgentId = String(context?.voiceAgentId || "").trim();
+  const rawVoiceAgentName = String(context?.voiceAgentName || "").trim();
+  const rawVoiceAgentInstructions = String(context?.voiceAgentInstructions || "").trim();
+  const rawVoiceToolCapabilityPrompt = String(context?.voiceToolCapabilityPrompt || "").trim();
+  const rawVoiceAgentSkills = Array.isArray(context?.voiceAgentSkills)
+    ? context.voiceAgentSkills.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
+  const rawEnabledMcpServers = Array.isArray(context?.enabledMcpServers)
+    ? context.enabledMcpServers.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
 
   return {
     sessionId: rawSessionId || null,
     executor: VALID_EXECUTORS.has(rawExecutor) ? rawExecutor : null,
     mode: VALID_AGENT_MODES.has(rawMode) ? rawMode : null,
     model: rawModel || null,
+    voiceAgentId: rawVoiceAgentId || null,
+    voiceAgentName: rawVoiceAgentName || null,
+    voiceAgentInstructions: rawVoiceAgentInstructions || null,
+    voiceToolCapabilityPrompt: rawVoiceToolCapabilityPrompt || null,
+    voiceAgentSkills: rawVoiceAgentSkills,
+    enabledMcpServers: rawEnabledMcpServers,
   };
 }
 
 async function buildSessionScopedInstructions(baseInstructions, callContext = {}) {
   const context = sanitizeVoiceCallContext(callContext);
-  if (!context.sessionId && !context.executor && !context.mode && !context.model) {
+  if (
+    !context.sessionId
+    && !context.executor
+    && !context.mode
+    && !context.model
+    && !context.voiceAgentId
+    && !context.voiceAgentInstructions
+    && !context.voiceToolCapabilityPrompt
+  ) {
     return baseInstructions;
   }
 
@@ -390,6 +414,22 @@ async function buildSessionScopedInstructions(baseInstructions, callContext = {}
     "",
     "## Bosun Voice Call Context",
     `Active chat session id: ${context.sessionId || "none"}.`,
+    context.voiceAgentId
+      ? `Active voice agent id: ${context.voiceAgentId}.`
+      : "Active voice agent id: default.",
+    context.voiceAgentName
+      ? `Active voice agent name: ${context.voiceAgentName}.`
+      : "",
+    context.voiceAgentInstructions
+      ? `Voice agent instruction emphasis: ${context.voiceAgentInstructions}`
+      : "",
+    context.voiceToolCapabilityPrompt || "",
+    context.enabledMcpServers?.length
+      ? `Enabled MCP servers for this session: ${context.enabledMcpServers.join(", ")}.`
+      : "",
+    context.voiceAgentSkills?.length
+      ? `Voice agent skills: ${context.voiceAgentSkills.join(", ")}.`
+      : "",
     context.executor
       ? `Preferred executor for delegated work: ${context.executor}.`
       : "Preferred executor for delegated work: use configured default.",

@@ -633,6 +633,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["ui", "frontend", "portal", "css", "web"],
+    agentType: "task",
   },
   {
     id: "backend-agent",
@@ -647,6 +648,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["api", "server", "backend", "database"],
+    agentType: "task",
   },
   {
     id: "devops-agent",
@@ -661,6 +663,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["ci", "cd", "build", "deploy", "infra", "devops"],
+    agentType: "task",
   },
   {
     id: "docs-agent",
@@ -675,6 +678,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["docs", "documentation", "readme", "markdown"],
+    agentType: "task",
   },
   {
     id: "test-agent",
@@ -689,6 +693,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["test", "testing", "e2e", "unit", "coverage"],
+    agentType: "task",
   },
   {
     id: "voice-agent-female",
@@ -703,6 +708,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["voice", "assistant", "realtime", "female", "default", "audio-agent"],
+    agentType: "voice",
     voiceAgent: true,
     voicePersona: "female",
     voiceInstructions: "You are Nova, a female voice agent. Be concise, warm, and practical. Use tools for facts and execution. Keep spoken responses short and clear.",
@@ -722,6 +728,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["voice", "assistant", "realtime", "male", "default", "audio-agent"],
+    agentType: "voice",
     voiceAgent: true,
     voicePersona: "male",
     voiceInstructions: "You are Atlas, a male voice agent. Be direct and execution-oriented. Prefer actionable status updates. Use tools proactively for diagnostics.",
@@ -741,6 +748,7 @@ export const BUILTIN_AGENT_PROFILES = [
     hookProfile: null,
     env: {},
     tags: ["voice", "assistant", "realtime", "default"],
+    agentType: "voice",
     voiceAgent: true,
     voicePersona: "neutral",
     enabledTools: null,

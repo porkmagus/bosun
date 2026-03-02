@@ -1419,6 +1419,12 @@ export function VoiceOverlay({
     autoVisionAppliedRef.current = false;
   }, [visible]);
 
+  const stopAllVoiceTransports = useCallback(() => {
+    try { stopSdkVoiceSession(); } catch { /* best effort */ }
+    try { stopVoiceSession(); } catch { /* best effort */ }
+    try { stopFallbackSession(); } catch { /* best effort */ }
+  }, []);
+
   useEffect(() => {
     if (visible || !started) return;
     if (preserveSessionOnHideRef.current) {
@@ -1433,17 +1439,11 @@ export function VoiceOverlay({
       legacyFallbackCleanupRef.current();
       legacyFallbackCleanupRef.current = null;
     }
-    if (usingSdk) {
-      stopSdkVoiceSession();
-    } else if (tier === 1) {
-      stopVoiceSession();
-    } else {
-      stopFallbackSession();
-    }
+    stopAllVoiceTransports();
     setStarted(false);
     setUsingSdk(false);
     autoFallbackTriedRef.current = false;
-  }, [visible, started, usingSdk, tier]);
+  }, [visible, started, stopAllVoiceTransports]);
 
   const loadMeetingMessages = useCallback(async () => {
     const activeSessionId = String(sessionId || "").trim();
@@ -1595,18 +1595,13 @@ export function VoiceOverlay({
       legacyFallbackCleanupRef.current();
       legacyFallbackCleanupRef.current = null;
     }
-    if (usingSdk) {
-      stopSdkVoiceSession();
-    } else if (tier === 1) {
-      stopVoiceSession();
-    } else {
-      stopFallbackSession();
-    }
+    stopAllVoiceTransports();
+    preserveSessionOnHideRef.current = false;
     autoFallbackTriedRef.current = false;
     setUsingSdk(false);
     setStarted(false);
     onClose();
-  }, [tier, onClose, usingSdk]);
+  }, [onClose, stopAllVoiceTransports]);
 
   const handleDismiss = useCallback((detail = {}) => {
     haptic("light");
@@ -1710,17 +1705,11 @@ export function VoiceOverlay({
   useEffect(() => () => {
     try {
       stopVisionShare().catch(() => {});
-      if (usingSdk) {
-        stopSdkVoiceSession();
-      } else if (tier === 1) {
-        stopVoiceSession();
-      } else {
-        stopFallbackSession();
-      }
+      stopAllVoiceTransports();
     } catch {
       // best effort cleanup
     }
-  }, [tier, usingSdk]);
+  }, [stopAllVoiceTransports]);
 
   const handleExpand = useCallback(() => {
     haptic("light");
@@ -1886,13 +1875,7 @@ export function VoiceOverlay({
     setSwitchingVoiceAgent(true);
     try {
       stopVisionShare().catch(() => {});
-      if (usingSdk) {
-        stopSdkVoiceSession();
-      } else if (tier === 1) {
-        stopVoiceSession();
-      } else {
-        stopFallbackSession();
-      }
+      stopAllVoiceTransports();
       autoFallbackTriedRef.current = false;
       setUsingSdk(false);
       setStarted(false);

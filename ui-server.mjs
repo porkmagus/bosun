@@ -233,22 +233,28 @@ function ensureLibraryInitialized(rootDir = repoRoot) {
 }
 
 const VOICE_TOOL_ID_MAP = Object.freeze({
-  "search-files": ["search_code"],
+  "search-files": ["search_code", "list_directory"],
   "read-file": ["read_file_content"],
-  "edit-file": ["update_task_status", "comment_on_task"],
+  "edit-file": ["delegate_to_agent", "run_workspace_command"],
   "run-command": ["run_command", "run_workspace_command"],
-  "web-search": ["get_recent_logs"],
+  "web-search": ["ask_agent_context"],
   "code-search": ["search_code", "get_workspace_context"],
-  "git-operations": ["get_pr_status"],
+  "git-operations": ["run_workspace_command", "get_pr_status"],
   "create-task": ["create_task"],
-  "delegate-task": ["delegate_to_agent", "ask_agent_context"],
-  "fetch-url": ["get_recent_logs"],
+  "delegate-task": ["delegate_to_agent", "ask_agent_context", "poll_background_session"],
+  "fetch-url": ["run_workspace_command"],
   "list-directory": ["list_directory"],
   "grep-search": ["search_code"],
   "task-management": ["list_tasks", "get_task", "search_tasks", "get_task_stats", "delete_task", "comment_on_task"],
-  "notifications": [],
+  "notifications": ["dispatch_action"],
   "vision-analysis": ["query_live_view"],
 });
+
+const BUILTIN_TOOL_ID_SET = new Set(
+  (Array.isArray(DEFAULT_BUILTIN_TOOLS) ? DEFAULT_BUILTIN_TOOLS : [])
+    .map((tool) => String(tool?.id || "").trim())
+    .filter(Boolean),
+);
 
 function mapToolConfigIdsToVoiceToolNames(enabledIds = []) {
   const resolved = new Set();
@@ -260,6 +266,11 @@ function mapToolConfigIdsToVoiceToolNames(enabledIds = []) {
       for (const toolName of mapped) resolved.add(String(toolName || "").trim());
       continue;
     }
+    // If this is a known built-in tool id without a runtime mapping, skip it
+    // instead of treating the id as a voice runtime tool name.
+    if (BUILTIN_TOOL_ID_SET.has(id)) {
+      continue;
+    }
     resolved.add(id);
   }
   return resolved;
@@ -269,10 +280,19 @@ function isVoiceAgentProfileEntry(entry, profile) {
   if (!entry || entry.type !== "agent") return false;
   const id = String(entry.id || "").trim().toLowerCase();
   const tags = Array.isArray(entry.tags) ? entry.tags.map((t) => String(t || "").trim().toLowerCase()) : [];
+  const profileType = String(profile?.agentType || "").trim().toLowerCase();
+  if (profileType === "voice") return true;
   if (id.startsWith("voice-agent")) return true;
   if (tags.includes("voice") || tags.includes("audio-agent") || tags.includes("realtime")) return true;
   if (profile && typeof profile === "object" && profile.voiceAgent === true) return true;
   return false;
+}
+
+function resolveAgentProfileType(entry, profile) {
+  const explicit = String(profile?.agentType || "").trim().toLowerCase();
+  if (explicit === "voice" || explicit === "task" || explicit === "chat") return explicit;
+  if (isVoiceAgentProfileEntry(entry, profile)) return "voice";
+  return "task";
 }
 
 function resolveVoiceLibraryRoot(callContext = {}) {
@@ -313,6 +333,7 @@ function listVoiceAgentProfiles(rootDir = repoRoot) {
       voiceInstructions: String(profile?.voiceInstructions || "").trim() || "",
       skills: Array.isArray(profile?.skills) ? profile.skills.map((s) => String(s || "").trim()).filter(Boolean) : [],
       promptOverride: String(profile?.promptOverride || "").trim() || null,
+      agentType: resolveAgentProfileType(entry, profile),
     });
   }
 
@@ -364,6 +385,63 @@ function applyVoiceAgentToolFilters(allTools, toolConfig = null) {
     if (disabledNames.has(name)) return false;
     return true;
   });
+}
+
+function buildVoiceToolCapabilityPrompt(tools = [], toolConfig = null, selectedVoiceAgent = null) {
+  const runtimeTools = Array.isArray(tools) ? tools : [];
+  const enabledServers = Array.isArray(toolConfig?.enabledMcpServers)
+    ? toolConfig.enabledMcpServers
+    : [];
+  const toolLines = runtimeTools
+    .slice(0, 48)
+    .map((tool) => {
+      const name = String(tool?.name || "").trim();
+      if (!name) return null;
+      const description = String(tool?.description || "").replace(/\s+/g, " ").trim();
+      return description ? `- ${name}: ${description}` : `- ${name}`;
+    })
+    .filter(Boolean);
+  const skills = Array.isArray(selectedVoiceAgent?.skills)
+    ? selectedVoiceAgent.skills.map((skill) => String(skill || "").trim()).filter(Boolean)
+    : [];
+  const agentName = String(selectedVoiceAgent?.name || selectedVoiceAgent?.id || "Voice Agent").trim();
+
+  return [
+    "",
+    "## Active Voice Agent Capability Contract",
+    `Agent profile: ${agentName}.`,
+    "You can execute tools directly in this voice session. Do not claim you cannot use tools or must rely on chat-only help.",
+    "When the user asks for action or facts, call the most relevant tool first, then report results briefly.",
+    toolLines.length > 0
+      ? "Enabled runtime tools:\n" + toolLines.join("\n")
+      : "Enabled runtime tools: none (tool calls unavailable for this profile).",
+    enabledServers.length > 0
+      ? `Enabled MCP servers (for invoke_mcp_tool): ${enabledServers.join(", ")}.`
+      : "Enabled MCP servers: none.",
+    skills.length > 0
+      ? `Voice agent skills: ${skills.join(", ")}.`
+      : "Voice agent skills: none specified.",
+    "",
+    "If you need the current tool list, call get_admin_help.",
+  ].join("\n");
+}
+
+async function listBosunRuntimeTools(context = {}) {
+  try {
+    const { getVoiceToolDefinitions } = await import("./voice-relay.mjs");
+    const defs = await getVoiceToolDefinitions({ delegateOnly: false, context });
+    return (Array.isArray(defs) ? defs : [])
+      .map((tool) => ({
+        id: String(tool?.name || "").trim(),
+        name: String(tool?.name || "").trim(),
+        description: String(tool?.description || "").trim(),
+        category: "Bosun",
+      }))
+      .filter((tool) => Boolean(tool.id))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  } catch {
+    return [];
+  }
 }
 
 // ── Workflow engine lazy-loader (module-scope cache) ──────────────────────────
@@ -5960,6 +6038,128 @@ function summarizeTelemetry(metrics, days) {
   };
 }
 
+// ── Usage Analytics ─────────────────────────────────────────────────────────
+
+/**
+ * Build comprehensive usage analytics from agent-work-stream.jsonl.
+ * Aggregates agent runs, skill invocations, MCP tool calls, and daily trends.
+ *
+ * @param {number} [days]  - Look-back window in days; 0 = all time.
+ * @returns {Promise<Object>}
+ */
+async function buildUsageAnalytics(days) {
+  const logDir = resolveAgentWorkLogDir();
+  const streamPath = resolve(logDir, "agent-work-stream.jsonl");
+  const events = await readJsonlTail(streamPath, 100_000);
+
+  const cutoff = days ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+
+  let agentRuns = 0;
+  let skillInvocations = 0;
+  let mcpToolCalls = 0;
+  let oldestTs = Infinity;
+  let newestTs = 0;
+
+  /** @type {Map<string,number>} */
+  const agents = new Map();
+  /** @type {Map<string,number>} */
+  const skills = new Map();
+  /** @type {Map<string,number>} */
+  const mcpTools = new Map();
+
+  /** dailyAgents[date][executor] = count */
+  const dailyAgents = {};
+  /** dailySkills[date][skill] = count */
+  const dailySkills = {};
+  /** dailyMcp[date][tool] = count */
+  const dailyMcp = {};
+
+  const allDates = new Set();
+
+  for (const e of events) {
+    const ts = Date.parse(e.timestamp || "");
+    if (!Number.isFinite(ts)) continue;
+    if (cutoff && ts < cutoff) continue;
+    if (ts < oldestTs) oldestTs = ts;
+    if (ts > newestTs) newestTs = ts;
+    const day = (e.timestamp || "").slice(0, 10);
+    if (day) allDates.add(day);
+
+    if (e.event_type === "session_start") {
+      agentRuns++;
+      const exec = e.executor || "unknown";
+      agents.set(exec, (agents.get(exec) || 0) + 1);
+      if (day) {
+        (dailyAgents[day] = dailyAgents[day] || {})[exec] =
+          (dailyAgents[day][exec] || 0) + 1;
+      }
+    } else if (e.event_type === "skill_invoke") {
+      skillInvocations++;
+      const skill = e.data?.skill_name || e.skill_name || "unknown";
+      skills.set(skill, (skills.get(skill) || 0) + 1);
+      if (day) {
+        (dailySkills[day] = dailySkills[day] || {})[skill] =
+          (dailySkills[day][skill] || 0) + 1;
+      }
+    } else if (e.event_type === "tool_call") {
+      mcpToolCalls++;
+      const tool = e.data?.tool_name || e.tool_name || "unknown";
+      mcpTools.set(tool, (mcpTools.get(tool) || 0) + 1);
+      if (day) {
+        (dailyMcp[day] = dailyMcp[day] || {})[tool] =
+          (dailyMcp[day][tool] || 0) + 1;
+      }
+    }
+  }
+
+  const sortedDates = [...allDates].sort();
+  const dayCount = sortedDates.length || 1;
+  const total = agentRuns + skillInvocations + mcpToolCalls;
+  const avgPerDay = Math.round(total / dayCount);
+
+  const topAgents = [...agents.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+  const topSkills = [...skills.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+  const topMcpTools = [...mcpTools.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+
+  // Build trend series for top-6 items per category
+  const topAgentNames = topAgents.slice(0, 6).map((a) => a.name);
+  const topSkillNames = topSkills.slice(0, 6).map((s) => s.name);
+  const topMcpNames = topMcpTools.slice(0, 6).map((t) => t.name);
+
+  const trend = { dates: sortedDates, agents: {}, skills: {}, mcpTools: {} };
+  for (const name of topAgentNames) {
+    trend.agents[name] = sortedDates.map((d) => dailyAgents[d]?.[name] || 0);
+  }
+  for (const name of topSkillNames) {
+    trend.skills[name] = sortedDates.map((d) => dailySkills[d]?.[name] || 0);
+  }
+  for (const name of topMcpNames) {
+    trend.mcpTools[name] = sortedDates.map((d) => dailyMcp[d]?.[name] || 0);
+  }
+
+  return {
+    agentRuns,
+    skillInvocations,
+    mcpToolCalls,
+    avgPerDay,
+    lastActiveAt: newestTs < Infinity && newestTs > 0 ? new Date(newestTs).toISOString() : null,
+    sinceAt: oldestTs < Infinity ? new Date(oldestTs).toISOString() : null,
+    topAgents,
+    topSkills,
+    topMcpTools,
+    trend,
+  };
+}
+
 function resolveAgentWorkLogDir() {
   const candidates = [
     resolve(repoRoot, ".cache", "agent-work-logs"),
@@ -6887,12 +7087,19 @@ async function handleApi(req, res, url) {
       const libraryRoot = workspaceContext.workspaceDir || repoRoot;
       ensureLibraryInitialized(libraryRoot);
       const typeRaw = (url.searchParams.get("type") || "").trim();
+      const agentTypeRaw = String(url.searchParams.get("agentType") || "").trim().toLowerCase();
       const search = (url.searchParams.get("search") || "").trim();
       const type = typeRaw && typeRaw !== "all" ? typeRaw : "";
-      const data = listEntries(libraryRoot, {
+      let data = listEntries(libraryRoot, {
         type: type || undefined,
         search: search || undefined,
       });
+      if (type === "agent" && (agentTypeRaw === "voice" || agentTypeRaw === "task" || agentTypeRaw === "chat")) {
+        data = data.filter((entry) => {
+          const profile = getEntryContent(libraryRoot, entry);
+          return resolveAgentProfileType(entry, profile) === agentTypeRaw;
+        });
+      }
       jsonResponse(res, 200, { ok: true, data });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -7127,7 +7334,14 @@ async function handleApi(req, res, url) {
   if (path === "/api/agent-tools/available") {
     try {
       const available = await listAvailableTools(repoRoot);
-      jsonResponse(res, 200, { ok: true, data: available });
+      const bosunTools = await listBosunRuntimeTools({});
+      jsonResponse(res, 200, {
+        ok: true,
+        data: {
+          ...available,
+          bosunTools,
+        },
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -7145,7 +7359,23 @@ async function handleApi(req, res, url) {
           return;
         }
         const effective = getEffectiveTools(repoRoot, agentId);
-        jsonResponse(res, 200, { ok: true, data: effective });
+        const bosunTools = await listBosunRuntimeTools({});
+        const raw = getAgentToolConfig(repoRoot, agentId);
+        const enabledSet = Array.isArray(raw?.enabledTools) && raw.enabledTools.length > 0
+          ? new Set(raw.enabledTools.map((id) => String(id || "").trim()).filter(Boolean))
+          : null;
+        const effectiveBosunTools = bosunTools.map((tool) => ({
+          ...tool,
+          enabled: enabledSet ? enabledSet.has(tool.id) : true,
+        }));
+        jsonResponse(res, 200, {
+          ok: true,
+          data: {
+            ...effective,
+            bosunTools: effectiveBosunTools,
+            enabledTools: raw?.enabledTools ?? null,
+          },
+        });
         return;
       }
 
@@ -7683,6 +7913,17 @@ async function handleApi(req, res, url) {
         ok: true,
         data: alerts.slice(-50),
       });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/analytics/usage") {
+    try {
+      const days = Number(url.searchParams.get("days") || "30");
+      const data = await buildUsageAnalytics(days || 0);
+      jsonResponse(res, 200, { ok: true, data });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -10461,6 +10702,11 @@ async function handleApi(req, res, url) {
 
       const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
       tools = applyVoiceAgentToolFilters(tools, voiceToolCfg);
+      const capabilityPrompt = buildVoiceToolCapabilityPrompt(
+        tools,
+        voiceToolCfg,
+        selectedVoiceAgent,
+      );
 
       const voiceCallContext = {
         ...callContext,
@@ -10468,6 +10714,7 @@ async function handleApi(req, res, url) {
         voiceAgentName: selectedVoiceAgent?.name || undefined,
         voiceAgentInstructions: selectedVoiceAgent?.voiceInstructions || undefined,
         voiceAgentSkills: Array.isArray(selectedVoiceAgent?.skills) ? selectedVoiceAgent.skills : undefined,
+        voiceToolCapabilityPrompt: capabilityPrompt,
         enabledMcpServers: Array.isArray(voiceToolCfg?.enabledMcpServers)
           ? voiceToolCfg.enabledMcpServers
           : undefined,
@@ -10484,7 +10731,10 @@ async function handleApi(req, res, url) {
       // When client requests sdkMode, include extra fields for @openai/agents SDK
       if (body?.sdkMode === true) {
         const voiceCfg = getVoiceConfig();
-        tokenData.instructions = voiceCfg.instructions || undefined;
+        tokenData.instructions = [voiceCfg.instructions || "", capabilityPrompt]
+          .filter(Boolean)
+          .join("\n\n")
+          .trim() || undefined;
         if (selectedVoiceAgent?.voiceInstructions) {
           tokenData.instructions = `${tokenData.instructions || ""}\n\n${selectedVoiceAgent.voiceInstructions}`.trim();
         }

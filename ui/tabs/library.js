@@ -349,12 +349,12 @@ async function configureMcpEnv(id, env) {
 
 async function fetchAvailableTools() {
   const res = await apiFetch("/api/agent-tools/available");
-  return res?.data || { builtinTools: [], mcpServers: [] };
+  return res?.data || { builtinTools: [], bosunTools: [], mcpServers: [] };
 }
 
 async function fetchAgentToolConfig(agentId) {
   const res = await apiFetch(`/api/agent-tools/config?agentId=${encodeURIComponent(agentId)}`);
-  return res?.data || { builtinTools: [], mcpServers: [] };
+  return res?.data || { builtinTools: [], bosunTools: [], mcpServers: [], enabledTools: null };
 }
 
 async function saveAgentToolConfig(agentId, config) {

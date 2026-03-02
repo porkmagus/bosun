@@ -16,8 +16,44 @@
  * scan quickly to decide which skill files to read.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { resolve, basename } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, resolve, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ── Analytics stream path (same file task-executor writes to) ────────────────
+const _SKILL_STREAM_PATH = resolve(
+  __dirname,
+  ".cache",
+  "agent-work-logs",
+  "agent-work-stream.jsonl",
+);
+
+/**
+ * Best-effort: emit a skill_invoke event to the agent work stream so usage
+ * analytics can track which skills are loaded per task.
+ *
+ * @param {string} skillName
+ * @param {string} [skillTitle]
+ * @param {{ taskId?: string, executor?: string }} [opts]
+ */
+function emitSkillInvokeEvent(skillName, skillTitle, opts = {}) {
+  try {
+    const event = {
+      timestamp: new Date().toISOString(),
+      event_type: "skill_invoke",
+      data: { skill_name: skillName, skill_title: skillTitle || skillName },
+      ...(opts.taskId ? { task_id: String(opts.taskId) } : {}),
+      ...(opts.executor ? { executor: String(opts.executor) } : {}),
+    };
+    mkdirSync(dirname(_SKILL_STREAM_PATH), { recursive: true });
+    appendFileSync(_SKILL_STREAM_PATH, JSON.stringify(event) + "\n", "utf8");
+  } catch {
+    /* best effort — never let analytics crash skill loading */
+  }
+}
 
 // ── Built-in skill definitions ────────────────────────────────────────────────
 
@@ -911,14 +947,25 @@ export function loadSkillsIndex(bosunHome) {
  * @param {string}   [taskDescription]
  * @returns {Array<{filename:string,title:string,tags:string[],content:string}>}
  */
-export function findRelevantSkills(bosunHome, taskTitle, taskDescription = "") {
+/**
+ * Find skills relevant to a given task by matching tags against the task title
+ * and description. Also emits `skill_invoke` analytics events for each matched
+ * skill so usage analytics can track skill popularity over time.
+ *
+ * @param {string}   bosunHome
+ * @param {string}   taskTitle
+ * @param {string}   [taskDescription]
+ * @param {{ taskId?: string, executor?: string }} [opts]  - Optional task context for analytics.
+ * @returns {Array<{filename:string,title:string,tags:string[],content:string}>}
+ */
+export function findRelevantSkills(bosunHome, taskTitle, taskDescription = "", opts = {}) {
   const index = loadSkillsIndex(bosunHome);
   if (!index?.skills?.length) return [];
 
   const searchText = `${taskTitle} ${taskDescription}`.toLowerCase();
   const skillsDir = getSkillsDir(bosunHome);
 
-  return index.skills
+  const matched = index.skills
     .filter(({ tags }) =>
       tags.some((tag) => searchText.includes(tag)),
     )
@@ -930,4 +977,12 @@ export function findRelevantSkills(bosunHome, taskTitle, taskDescription = "") {
       return { filename, title, tags, content };
     })
     .filter(({ content }) => !!content);
+
+  // Emit analytics events for each loaded skill
+  for (const skill of matched) {
+    const skillName = skill.filename.replace(/\.md$/i, "");
+    emitSkillInvokeEvent(skillName, skill.title, opts);
+  }
+
+  return matched;
 }
