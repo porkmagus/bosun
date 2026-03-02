@@ -1116,11 +1116,9 @@ function WorkflowAgentLibraryPicker({ config, onUpdate }) {
     if (agents.length > 0) { setExpanded(e => !e); return; }
     setLoading(true);
     try {
-      const res = await apiFetch("/api/library?type=agent");
-      if (res.ok) {
-        const data = await res.json();
-        setAgents(data.entries || data || []);
-      }
+      const res = await apiFetch("/api/library?type=agent&agentType=task");
+      const data = Array.isArray(res?.data) ? res.data : [];
+      setAgents(data);
     } catch { /* ignore */ }
     setLoading(false);
     setExpanded(true);

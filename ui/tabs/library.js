@@ -521,6 +521,9 @@ function LibraryCard({ entry, onSelect }) {
         <div class="library-card-desc">${entry.description}</div>
       `}
       <div class="library-card-meta">
+        ${entry.type === "agent" && entry.agentType && html`
+          <span class="library-card-tag">${String(entry.agentType).toUpperCase()}</span>
+        `}
         ${(entry.tags || []).slice(0, 5).map((tag) => html`
           <span class="library-card-tag" key=${tag}>${tag}</span>
         `)}
@@ -824,8 +827,8 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
 /* ─ Agent Tool Configurator ─────────────────────────────── */
 
 function AgentToolConfigurator({ agentId, agentName }) {
-  const [toolsTab, setToolsTab] = useState("builtin"); // "builtin" | "mcp"
-  const [tools, setTools] = useState({ builtinTools: [], mcpServers: [] });
+  const [toolsTab, setToolsTab] = useState("builtin"); // "builtin" | "bosun" | "mcp"
+  const [tools, setTools] = useState({ builtinTools: [], bosunTools: [], mcpServers: [], enabledTools: null });
   const [installed, setInstalled] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -853,14 +856,57 @@ function AgentToolConfigurator({ agentId, agentName }) {
     const newDisabled = enabled
       ? disabledList.filter((id) => id !== toolId)
       : [...disabledList, toolId];
+    const currentEnabledTools = Array.isArray(tools.enabledTools)
+      ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+      : null;
+    const nextEnabledTools = currentEnabledTools
+      ? (() => {
+        const set = new Set(currentEnabledTools);
+        if (enabled) set.add(toolId);
+        else set.delete(toolId);
+        return [...set];
+      })()
+      : undefined;
     setSaving(true);
     try {
-      await saveAgentToolConfig(agentId, { disabledBuiltinTools: newDisabled });
+      await saveAgentToolConfig(agentId, {
+        disabledBuiltinTools: newDisabled,
+        ...(nextEnabledTools !== undefined ? { enabledTools: nextEnabledTools } : {}),
+      });
       setTools((prev) => ({
         ...prev,
+        ...(nextEnabledTools !== undefined ? { enabledTools: nextEnabledTools } : {}),
         builtinTools: prev.builtinTools.map((t) =>
           t.id === toolId ? { ...t, enabled } : t
         ),
+      }));
+    } catch (err) {
+      showToast("Failed to save: " + err.message, "error");
+    }
+    setSaving(false);
+  }, [agentId, tools]);
+
+  const toggleBosunTool = useCallback(async (toolId, enabled) => {
+    const bosunIds = (tools.bosunTools || []).map((tool) => String(tool?.id || "").trim()).filter(Boolean);
+    const bosunIdSet = new Set(bosunIds);
+    const currentEnabledTools = Array.isArray(tools.enabledTools)
+      ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const currentSet = new Set(currentEnabledTools);
+    const hasBosunAllowlist = bosunIds.some((id) => currentSet.has(id));
+    const nextBosunSet = hasBosunAllowlist
+      ? new Set(currentEnabledTools.filter((id) => bosunIdSet.has(id)))
+      : new Set(bosunIds);
+    if (enabled) nextBosunSet.add(toolId);
+    else nextBosunSet.delete(toolId);
+    const preserved = currentEnabledTools.filter((id) => !bosunIdSet.has(id));
+    const nextEnabledTools = [...new Set([...preserved, ...nextBosunSet])];
+    setSaving(true);
+    try {
+      await saveAgentToolConfig(agentId, { enabledTools: nextEnabledTools });
+      setTools((prev) => ({
+        ...prev,
+        enabledTools: nextEnabledTools,
       }));
     } catch (err) {
       showToast("Failed to save: " + err.message, "error");
@@ -884,6 +930,17 @@ function AgentToolConfigurator({ agentId, agentName }) {
   }, [agentId, tools]);
 
   const enabledMcpSet = new Set(tools.mcpServers || []);
+  const bosunTools = Array.isArray(tools.bosunTools) ? tools.bosunTools : [];
+  const bosunToolIds = bosunTools.map((tool) => String(tool?.id || "").trim()).filter(Boolean);
+  const rawEnabledTools = Array.isArray(tools.enabledTools)
+    ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+    : null;
+  const hasBosunAllowlist = Boolean(rawEnabledTools && rawEnabledTools.some((id) => bosunToolIds.includes(id)));
+  const enabledBosunSet = new Set(
+    hasBosunAllowlist
+      ? rawEnabledTools.filter((id) => bosunToolIds.includes(id))
+      : bosunToolIds,
+  );
 
   if (loading) {
     return html`<div class="agent-tools-section">
@@ -902,6 +959,10 @@ function AgentToolConfigurator({ agentId, agentName }) {
         <button class=${`agent-tools-tab ${toolsTab === "builtin" ? "active" : ""}`}
           onClick=${() => setToolsTab("builtin")}>
           ${iconText(":cpu: Built-in Tools")} (${(tools.builtinTools || []).filter((t) => t.enabled).length}/${(tools.builtinTools || []).length})
+        </button>
+        <button class=${`agent-tools-tab ${toolsTab === "bosun" ? "active" : ""}`}
+          onClick=${() => setToolsTab("bosun")}>
+          ${iconText(":zap: Bosun Tools")} (${enabledBosunSet.size}/${bosunTools.length})
         </button>
         <button class=${`agent-tools-tab ${toolsTab === "mcp" ? "active" : ""}`}
           onClick=${() => setToolsTab("mcp")}>
@@ -927,6 +988,34 @@ function AgentToolConfigurator({ agentId, agentName }) {
             </div>
           `)}
         </div>
+      `}
+
+      ${toolsTab === "bosun" && html`
+        <details open class="tool-config-group">
+          <summary class="tool-config-group-label">
+            Runtime Voice Tools (collapsible)
+          </summary>
+          ${bosunTools.length === 0 && html`
+            <div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:0.85em;">
+              No Bosun runtime tools were discovered.
+            </div>
+          `}
+          ${bosunTools.map((tool) => html`
+            <div class="tool-config-item" key=${tool.id}>
+              <span class="tool-config-item-icon">${resolveIcon(":zap:") || iconText(":zap:")}</span>
+              <div class="tool-config-item-info">
+                <div class="tool-config-item-name">${tool.name}</div>
+                <div class="tool-config-item-desc">${tool.description || "Bosun runtime tool"}</div>
+              </div>
+              <div class="tool-config-toggle">
+                <${Toggle}
+                  checked=${enabledBosunSet.has(tool.id)}
+                  onChange=${(val) => toggleBosunTool(tool.id, val)}
+                />
+              </div>
+            </div>
+          `)}
+        </details>
       `}
 
       ${toolsTab === "mcp" && html`

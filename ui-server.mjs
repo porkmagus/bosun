@@ -7094,10 +7094,17 @@ async function handleApi(req, res, url) {
         type: type || undefined,
         search: search || undefined,
       });
+      data = data.map((entry) => {
+        if (entry?.type !== "agent") return entry;
+        const profile = getEntryContent(libraryRoot, entry);
+        return {
+          ...entry,
+          agentType: resolveAgentProfileType(entry, profile),
+        };
+      });
       if (type === "agent" && (agentTypeRaw === "voice" || agentTypeRaw === "task" || agentTypeRaw === "chat")) {
         data = data.filter((entry) => {
-          const profile = getEntryContent(libraryRoot, entry);
-          return resolveAgentProfileType(entry, profile) === agentTypeRaw;
+          return String(entry?.agentType || "").trim().toLowerCase() === agentTypeRaw;
         });
       }
       jsonResponse(res, 200, { ok: true, data });
@@ -7364,9 +7371,15 @@ async function handleApi(req, res, url) {
         const enabledSet = Array.isArray(raw?.enabledTools) && raw.enabledTools.length > 0
           ? new Set(raw.enabledTools.map((id) => String(id || "").trim()).filter(Boolean))
           : null;
+        const bosunToolIdSet = new Set(
+          bosunTools.map((tool) => String(tool?.id || "").trim()).filter(Boolean),
+        );
+        const hasBosunAllowlist = Boolean(
+          enabledSet && [...enabledSet].some((id) => bosunToolIdSet.has(id)),
+        );
         const effectiveBosunTools = bosunTools.map((tool) => ({
           ...tool,
-          enabled: enabledSet ? enabledSet.has(tool.id) : true,
+          enabled: hasBosunAllowlist ? enabledSet.has(tool.id) : true,
         }));
         jsonResponse(res, 200, {
           ok: true,
