@@ -1475,6 +1475,7 @@ function App() {
   );
   const followWindowMode = isFollowWindowFromUrl();
   const followOverlayOpenedRef = useRef(false);
+  const externalizeInFlightRef = useRef(false);
   const [floatingCallState, setFloatingCallState] = useState(() =>
     readFloatingCallState(),
   );
@@ -2385,6 +2386,10 @@ function App() {
       onDismiss=${(detail = {}) => {
         const reason = String(detail?.reason || "").trim().toLowerCase();
         if (!followWindowMode && reason === "externalize") {
+          if (externalizeInFlightRef.current) {
+            return;
+          }
+          externalizeInFlightRef.current = true;
           const followDetail = {
             call: voiceCallType,
             sessionId: voiceSessionId,
@@ -2417,7 +2422,10 @@ function App() {
                 writeFloatingCallState(nextFloatingState);
                 setVoiceOverlayOpen(false);
               })
-              .catch(() => showToast("Could not open floating call window.", "error"));
+              .catch(() => showToast("Could not open floating call window.", "error"))
+              .finally(() => {
+                externalizeInFlightRef.current = false;
+              });
             return;
           }
           const popupResult = openBrowserFollowWindow(followDetail);
@@ -2426,6 +2434,7 @@ function App() {
               popupResult.reason || "Could not open floating browser call window.",
               "error",
             );
+            externalizeInFlightRef.current = false;
             return;
           }
           const nextFloatingState = {
@@ -2441,8 +2450,10 @@ function App() {
           setFloatingCallState(nextFloatingState);
           writeFloatingCallState(nextFloatingState);
           setVoiceOverlayOpen(false);
+          externalizeInFlightRef.current = false;
           return;
         }
+        externalizeInFlightRef.current = false;
         if (followWindowMode && globalThis?.veDesktop?.follow?.hide) {
           globalThis.veDesktop.follow.hide().catch(() => {});
           return;

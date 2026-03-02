@@ -95,6 +95,13 @@ function normalizeAzureRealtimeDeployment(rawDeployment) {
   return deployment;
 }
 
+function parseOptionalBoolean(rawValue) {
+  if (rawValue == null) return null;
+  const normalized = String(rawValue).trim().toLowerCase();
+  if (!normalized) return null;
+  return !["0", "false", "no", "off"].includes(normalized);
+}
+
 function isOpenAIAudioResponsesModel(rawModel) {
   const model = String(rawModel || "").trim().toLowerCase();
   return /^gpt-audio/.test(model);
@@ -786,7 +793,11 @@ export function getVoiceConfig(forceReload = false) {
       voiceId: String(ep.voiceId || "").trim() || null,
       visionModel: String(ep.visionModel || "").trim() || null,
       transcriptionModel: String(ep.transcriptionModel || "").trim() || null,
-      transcriptionEnabled: ep.transcriptionEnabled !== false,
+      // Azure defaults to transcription OFF unless explicitly enabled because
+      // item-level ASR failures can spam and destabilize long-running calls.
+      transcriptionEnabled: String(ep.provider || "").toLowerCase() === "azure"
+        ? (ep.transcriptionEnabled === true)
+        : (ep.transcriptionEnabled !== false),
       role: String(ep.role || "primary").trim() || "primary",
       weight: typeof ep.weight === "number" ? ep.weight : 100,
       name: String(ep.name || "").trim() || null,
@@ -875,6 +886,9 @@ export function getVoiceConfig(forceReload = false) {
       : !["0", "false", "no", "off"].includes(
           String(transcriptionEnabledRaw).trim().toLowerCase(),
         );
+  const azureTranscriptionEnabled = parseOptionalBoolean(
+    voice.azureTranscriptionEnabled ?? process.env.VOICE_AZURE_TRANSCRIPTION_ENABLED,
+  );
   const fallbackMode =
     voice.fallbackMode || process.env.VOICE_FALLBACK_MODE || "browser";
   const delegateExecutor =
@@ -922,6 +936,7 @@ For complex operations like writing code or creating PRs, delegate to the approp
     instructions,
     transcriptionModel,
     transcriptionEnabled,
+    azureTranscriptionEnabled,
     fallbackMode,
     delegateExecutor,
     enabled,
@@ -1138,7 +1153,11 @@ async function createOpenAIEphemeralToken(cfg, toolDefinitions = [], callContext
   const voiceId = String(candidate?.voiceId || cfg.voiceId || "alloy").trim() || "alloy";
   // Per-endpoint transcription overrides
   const transcriptionModel = String(candidate?.transcriptionModel || "").trim() || cfg.transcriptionModel;
-  const transcriptionEnabled = candidate?.transcriptionEnabled !== undefined ? candidate.transcriptionEnabled !== false : cfg.transcriptionEnabled;
+  const transcriptionEnabled = candidate?.transcriptionEnabled !== undefined
+    ? candidate.transcriptionEnabled !== false
+    : cfg.azureTranscriptionEnabled != null
+      ? cfg.azureTranscriptionEnabled !== false
+      : false;
 
   const sessionConfig = {
     model,

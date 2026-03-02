@@ -14,6 +14,7 @@
  */
 
 import { signal, computed } from "@preact/signals";
+import { isVoiceMicMuted } from "./voice-client.js";
 
 // ── State Signals (same shape as voice-client.js) ───────────────────────────
 
@@ -122,6 +123,14 @@ function isNonFatalSdkSessionError(err) {
   if (!message) return false;
   // Seen during transient renegotiation on some browsers even when stream remains active.
   if (/setRemoteDescription/i.test(message) && /SessionDescription/i.test(message)) {
+    return true;
+  }
+  // Runtime item-level transcription failures should not hard-fail the live call.
+  if (
+    lower.includes("input transcription failed")
+    || lower.includes("transcription failed for item")
+    || lower.includes("input_audio_transcription")
+  ) {
     return true;
   }
   return false;
@@ -801,45 +810,79 @@ async function startGeminiMicCapture(ws) {
   sdkVoiceState.value = "listening";
 }
 
+function forEachAudioTrackInSource(source, cb) {
+  if (!source || typeof cb !== "function") return;
+  const seenObjects = new Set();
+  const seenTracks = new Set();
+  const queue = [{ node: source, depth: 0 }];
+  let visited = 0;
+
+  while (queue.length) {
+    const { node, depth } = queue.shift();
+    if (!node || (typeof node !== "object" && typeof node !== "function")) continue;
+    if (seenObjects.has(node)) continue;
+    seenObjects.add(node);
+    visited += 1;
+    if (visited > 220 || depth > 4) continue;
+
+    if (typeof node?.getTracks === "function") {
+      try {
+        for (const track of node.getTracks()) {
+          if (!track || String(track?.kind || "").toLowerCase() !== "audio") continue;
+          if (seenTracks.has(track)) continue;
+          seenTracks.add(track);
+          cb(track);
+        }
+      } catch {
+        // ignore stream enumeration failures
+      }
+    }
+
+    if (typeof node?.getSenders === "function") {
+      try {
+        for (const sender of node.getSenders()) {
+          const track = sender?.track;
+          if (!track || String(track?.kind || "").toLowerCase() !== "audio") continue;
+          if (seenTracks.has(track)) continue;
+          seenTracks.add(track);
+          cb(track);
+        }
+      } catch {
+        // ignore pc sender failures
+      }
+    }
+
+    let values = null;
+    try {
+      values = Object.values(node);
+    } catch {
+      values = null;
+    }
+    if (!values) continue;
+    for (const next of values) {
+      if (!next || (typeof next !== "object" && typeof next !== "function")) continue;
+      queue.push({ node: next, depth: depth + 1 });
+    }
+  }
+}
+
 function stopMicLikeTracks(source) {
-  if (!source) return;
-  const streams = [
-    source,
-    source?.stream,
-    source?.localStream,
-    source?.mediaStream,
-    source?._mediaStream,
-    source?.audioInputStream,
-    source?.transport?.stream,
-    source?.transport?.localStream,
-    source?.transport?.mediaStream,
-    source?.transport?._mediaStream,
-  ].filter(Boolean);
+  forEachAudioTrackInSource(source, (track) => {
+    try { track.stop(); } catch { /* ignore */ }
+  });
+}
 
-  for (const stream of streams) {
-    if (typeof stream?.getTracks !== "function") continue;
-    for (const track of stream.getTracks()) {
-      if (String(track?.kind || "").toLowerCase() !== "audio") continue;
-      try { track.stop(); } catch { /* ignore */ }
+function setMicLikeTracksEnabled(source, enabled) {
+  let updated = false;
+  forEachAudioTrackInSource(source, (track) => {
+    try {
+      track.enabled = Boolean(enabled);
+      updated = true;
+    } catch {
+      // ignore per-track failures
     }
-  }
-
-  const pcs = [
-    source?.pc,
-    source?._pc,
-    source?.peerConnection,
-    source?.transport?.pc,
-    source?.transport?._pc,
-    source?.transport?.peerConnection,
-  ].filter(Boolean);
-  for (const pc of pcs) {
-    if (typeof pc?.getSenders !== "function") continue;
-    for (const sender of pc.getSenders()) {
-      const track = sender?.track;
-      if (!track || String(track.kind || "").toLowerCase() !== "audio") continue;
-      try { track.stop(); } catch { /* ignore */ }
-    }
-  }
+  });
+  return updated;
 }
 
 function handleGeminiServerEvent(msg) {
@@ -986,6 +1029,7 @@ export async function startSdkVoiceSession(options = {}) {
     return { sdk: sdkVoiceSdkActive.value, provider: sdkVoiceProvider.value };
   }
 
+  isVoiceMicMuted.value = false;
   _callContext = _normalizeCallContext(options);
   sdkVoiceBoundSessionId.value = _callContext.sessionId;
   sdkVoiceState.value = "connecting";
@@ -1102,6 +1146,7 @@ export function stopSdkVoiceSession() {
   sdkVoiceDuration.value = 0;
   sdkVoiceProvider.value = null;
   sdkVoiceSdkActive.value = false;
+  isVoiceMicMuted.value = false;
   _callContext = {
     sessionId: null,
     executor: null,
@@ -1129,6 +1174,39 @@ export function interruptSdkResponse() {
     }
     emit("interrupt", {});
   }
+}
+
+/**
+ * Toggle microphone mute state for SDK-driven voice sessions.
+ * Returns the new muted state.
+ */
+export function toggleSdkMicMute() {
+  const willBeMuted = !isVoiceMicMuted.value;
+  const enabled = !willBeMuted;
+
+  if (_session) {
+    // Try SDK-native controls first when available.
+    try {
+      if (enabled && typeof _session.unmute === "function") {
+        _session.unmute();
+      } else if (!enabled && typeof _session.mute === "function") {
+        _session.mute();
+      }
+    } catch {
+      // fall through to track-level toggles
+    }
+    setMicLikeTracksEnabled(_session, enabled);
+  }
+
+  if (_geminiMicStream) {
+    for (const track of _geminiMicStream.getTracks()) {
+      if (String(track?.kind || "").toLowerCase() !== "audio") continue;
+      try { track.enabled = enabled; } catch { /* ignore */ }
+    }
+  }
+
+  isVoiceMicMuted.value = willBeMuted;
+  return isVoiceMicMuted.value;
 }
 
 /**

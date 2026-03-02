@@ -2114,27 +2114,36 @@ function VoiceEndpointsEditor() {
     ];
   }, []);
 
-  const normalizeEp = useCallback((ep = {}, idx = 0) => ({
-    _id: ep._id ?? `ep-${idx}-${Date.now()}`,
-    name: String(ep.name || `endpoint-${idx + 1}`),
-    provider: ["azure", "openai", "claude", "gemini", "custom"].includes(ep.provider) ? ep.provider : "azure",
+  const normalizeEp = useCallback((ep = {}, idx = 0) => {
+    const provider = ["azure", "openai", "claude", "gemini", "custom"].includes(ep.provider)
+      ? ep.provider
+      : "azure";
+    const transcriptionEnabled = ep.transcriptionEnabled == null
+      ? provider !== "azure"
+      : ep.transcriptionEnabled !== false;
+    return {
+      _id: ep._id ?? `ep-${idx}-${Date.now()}`,
+      name: String(ep.name || `endpoint-${idx + 1}`),
+      provider,
     endpoint: (() => {
-      const p = ["azure", "openai", "claude", "gemini", "custom"].includes(ep.provider) ? ep.provider : "azure";
       const raw = String(ep.endpoint || "");
-      return (p === "azure" || p === "custom") ? raw : (raw || getDefaultEndpointUrl(p, ep.authSource));
+      return (provider === "azure" || provider === "custom")
+        ? raw
+        : (raw || getDefaultEndpointUrl(provider, ep.authSource));
     })(),
     deployment: String(ep.deployment || ""),
     model: String(ep.model || ""),
     visionModel: String(ep.visionModel || ""),
     transcriptionModel: String(ep.transcriptionModel || ""),
-    transcriptionEnabled: ep.transcriptionEnabled !== false,
+    transcriptionEnabled,
     apiKey: String(ep.apiKey || ""),
     voiceId: String(ep.voiceId || ""),
     role: ["primary", "backup"].includes(ep.role) ? ep.role : "primary",
     weight: Number(ep.weight) > 0 ? Number(ep.weight) : 1,
     enabled: ep.enabled !== false,
     authSource: ["apiKey", "oauth"].includes(ep.authSource) ? ep.authSource : "apiKey",
-  }), [getDefaultEndpointUrl]);
+    };
+  }, [getDefaultEndpointUrl]);
 
   // Fetch OAuth status for all providers
   const fetchOAuthStatuses = useCallback(async () => {
@@ -2468,7 +2477,10 @@ function VoiceEndpointsEditor() {
                 <input type="text" value=${ep.transcriptionModel || ""}
                   placeholder="gpt-4o-transcribe"
                   onInput=${(e) => updateEndpoint(ep._id, "transcriptionModel", e.target.value)} />
-                <div class="meta-text" style="margin-top:3px">Model used for input audio transcription. Leave blank for default (gpt-4o-transcribe).</div>
+                <div class="meta-text" style="margin-top:3px">
+                  Model used for input audio transcription. Leave blank for default (gpt-4o-transcribe).
+                  ${ep.provider === "azure" ? " Azure endpoints default transcription OFF unless enabled." : ""}
+                </div>
               </div>
               <div style="display:flex;align-items:center;gap:6px;padding-bottom:22px">
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:13px">

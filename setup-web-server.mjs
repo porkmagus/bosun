@@ -442,6 +442,9 @@ function buildStableSetupDefaults({
     voiceTurnDetection: "semantic_vad",
     voiceFallbackMode: "browser",
     voiceDelegateExecutor: "codex-sdk",
+    voiceTranscriptionEnabled: true,
+    voiceTranscriptionModel: "gpt-4o-transcribe",
+    voiceAzureTranscriptionEnabled: false,
     openaiRealtimeApiKey: "",
     azureOpenaiRealtimeEndpoint: "",
     azureOpenaiRealtimeApiKey: "",
@@ -913,6 +916,32 @@ function applyNonBlockingSetupEnvDefaults(envMap, env = {}, sourceEnv = process.
     ),
     ["codex-sdk", "copilot-sdk", "claude-sdk", "gemini-sdk", "opencode-sdk"],
     "codex-sdk",
+  );
+  envMap.VOICE_TRANSCRIPTION_ENABLED = toBooleanEnvString(
+    pickNonEmptyValue(
+      env.voiceTranscriptionEnabled,
+      env.VOICE_TRANSCRIPTION_ENABLED,
+      envMap.VOICE_TRANSCRIPTION_ENABLED,
+      sourceEnv.VOICE_TRANSCRIPTION_ENABLED,
+    ),
+    true,
+  );
+  envMap.VOICE_TRANSCRIPTION_MODEL = String(
+    pickNonEmptyValue(
+      env.voiceTranscriptionModel,
+      env.VOICE_TRANSCRIPTION_MODEL,
+      envMap.VOICE_TRANSCRIPTION_MODEL,
+      sourceEnv.VOICE_TRANSCRIPTION_MODEL,
+    ) || "gpt-4o-transcribe",
+  ).trim() || "gpt-4o-transcribe";
+  envMap.VOICE_AZURE_TRANSCRIPTION_ENABLED = toBooleanEnvString(
+    pickNonEmptyValue(
+      env.voiceAzureTranscriptionEnabled,
+      env.VOICE_AZURE_TRANSCRIPTION_ENABLED,
+      envMap.VOICE_AZURE_TRANSCRIPTION_ENABLED,
+      sourceEnv.VOICE_AZURE_TRANSCRIPTION_ENABLED,
+    ),
+    false,
   );
 
   const openaiRealtimeApiKey = pickNonEmptyValue(

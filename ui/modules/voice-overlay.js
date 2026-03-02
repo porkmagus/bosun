@@ -27,7 +27,7 @@ import {
   sdkVoiceState, sdkVoiceTranscript, sdkVoiceResponse, sdkVoiceError,
   sdkVoiceToolCalls, sdkVoiceDuration, sdkVoiceSdkActive,
   startSdkVoiceSession, stopSdkVoiceSession, interruptSdkResponse,
-  sendSdkTextMessage, sendSdkImageFrame, onSdkVoiceEvent,
+  sendSdkTextMessage, sendSdkImageFrame, onSdkVoiceEvent, toggleSdkMicMute,
 } from "./voice-client-sdk.js";
 import {
   fallbackState, fallbackTranscript, fallbackResponse,
@@ -1247,6 +1247,7 @@ export function VoiceOverlay({
   );
   const [startRequested, setStartRequested] = useState(false);
   const [switchingVoiceAgent, setSwitchingVoiceAgent] = useState(false);
+  const preserveSessionOnHideRef = useRef(false);
 
   useEffect(() => { injectOverlayStyles(); }, []);
 
@@ -1293,6 +1294,9 @@ export function VoiceOverlay({
   }, [visible, sessionId, voiceAgentId, onVoiceAgentChange]);
 
   useEffect(() => {
+    if (visible) {
+      preserveSessionOnHideRef.current = false;
+    }
     if (visible) return;
     setStartRequested(false);
     setSwitchingVoiceAgent(false);
@@ -1417,6 +1421,9 @@ export function VoiceOverlay({
 
   useEffect(() => {
     if (visible || !started) return;
+    if (preserveSessionOnHideRef.current) {
+      return;
+    }
     stopVisionShare().catch(() => {});
     if (typeof sdkFallbackCleanupRef.current === "function") {
       sdkFallbackCleanupRef.current();
@@ -1603,6 +1610,11 @@ export function VoiceOverlay({
 
   const handleDismiss = useCallback((detail = {}) => {
     haptic("light");
+    const reason = String(detail?.reason || "").trim().toLowerCase();
+    if (reason === "externalize") {
+      // Externalize hides this overlay while the live call continues.
+      preserveSessionOnHideRef.current = true;
+    }
     const fn = typeof onDismiss === "function" ? onDismiss : onClose;
     fn(detail);
   }, [onDismiss, onClose]);
@@ -1668,8 +1680,12 @@ export function VoiceOverlay({
 
   const handleToggleMic = useCallback(() => {
     haptic("light");
+    if (effectiveSdk) {
+      toggleSdkMicMute();
+      return;
+    }
     toggleMicMute();
-  }, []);
+  }, [effectiveSdk]);
 
   const handleBackToApp = useCallback(() => {
     haptic("light");
