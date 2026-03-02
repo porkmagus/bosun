@@ -50,6 +50,7 @@ import {
   streamRetryDelay,
   MAX_STREAM_RETRIES,
 } from "./stream-resilience.mjs";
+import { cacheAndCompressItems } from "./context-cache.mjs";
 
 // Lazy-load MCP registry to avoid circular dependencies.
 // Cached at module scope per AGENTS.md hard rules.
@@ -99,7 +100,8 @@ const DEFAULT_MAX_ITEMS_PER_TURN = 600;
 const DEFAULT_MAX_ITEM_CHARS = 12_000;
 const TOOL_OUTPUT_GUARDRAIL = String.raw`
 
-[Tool Output Guardrail] Keep tool outputs compact: prefer narrow searches, bounded command output (for example head/tail), and summaries for large results instead of dumping full payloads.`;
+[Tool Output Guardrail] Keep tool outputs compact: prefer narrow searches, bounded command output (for example head/tail), and summaries for large results instead of dumping full payloads.
+[Context Cache] Older tool outputs are automatically compressed and cached to disk. If you see "[…compressed — full output: bosun --tool-log <ID>]" and need the full output, run that command to retrieve it.`;
 
 function parseBoundedNumber(value, fallback, min, max) {
   const num = Number(value);
@@ -2358,9 +2360,18 @@ export async function execPooledPrompt(userMessage, options = {}) {
     };
   }
 
+  // Apply tiered context compression — cache old tool outputs to disk,
+  // replace them with compressed summaries + retrieval commands.
+  let compressedItems = result.items;
+  try {
+    compressedItems = await cacheAndCompressItems(result.items);
+  } catch (compErr) {
+    console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
+  }
+
   return {
     finalResponse: result.output,
-    items: result.items,
+    items: compressedItems,
     usage: null, // ephemeral threads don't aggregate usage today
   };
 }
@@ -3143,6 +3154,16 @@ export async function launchOrResumeThread(
   };
   threadRegistry.set(taskKey, record);
   saveThreadRegistry().catch(() => {});
+
+  // Apply tiered context compression for persistent threads
+  if (result.success && Array.isArray(result.items) && result.items.length > 0) {
+    try {
+      const compressedItems = await cacheAndCompressItems(result.items);
+      return { ...result, items: compressedItems, threadId: finalThreadId, resumed: false };
+    } catch (compErr) {
+      console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
+    }
+  }
 
   return { ...result, threadId: finalThreadId, resumed: false };
 }

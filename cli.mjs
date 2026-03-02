@@ -80,6 +80,7 @@ function showHelp() {
     --setup-terminal            Run the legacy terminal setup wizard
     --where                     Show the resolved bosun config directory
     --doctor                    Validate bosun .env/config setup
+    --tool-log <ID|list|prune>  Retrieve/list/prune cached tool outputs
     --help                      Show this help
     --version                   Show version
     --portal, --desktop         Launch the Bosun desktop portal (Electron)
@@ -912,6 +913,63 @@ async function main() {
     const result = runConfigDoctor();
     console.log(formatConfigDoctorReport(result));
     process.exit(result.ok ? 0 : 1);
+  }
+
+  // Handle --tool-log <ID> — retrieve cached tool output
+  if (args.includes("--tool-log")) {
+    const idx = args.indexOf("--tool-log");
+    const logIdArg = args[idx + 1];
+    const { retrieveToolLog, listToolLogs, pruneToolLogCache, getToolLogDir } =
+      await import("./context-cache.mjs");
+
+    if (logIdArg === "list" || logIdArg === "ls") {
+      const logs = await listToolLogs(50);
+      if (logs.length === 0) {
+        console.log("No cached tool logs found.");
+      } else {
+        console.log(`Cached tool logs (${logs.length} entries):\n`);
+        for (const entry of logs) {
+          const ts = new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19);
+          console.log(`  ${entry.id}  ${ts}  ${entry.toolName}(${entry.argsPreview || ""})`);
+        }
+        console.log(`\nCache dir: ${getToolLogDir()}`);
+      }
+      process.exit(0);
+    }
+
+    if (logIdArg === "prune") {
+      const pruned = await pruneToolLogCache();
+      console.log(`Pruned ${pruned} expired cache entries.`);
+      process.exit(0);
+    }
+
+    if (!logIdArg || !/^\d+$/.test(logIdArg)) {
+      console.error("Usage: bosun --tool-log <ID>       Retrieve a cached tool output");
+      console.error("       bosun --tool-log list       List cached tool logs");
+      console.error("       bosun --tool-log prune      Remove expired cache entries");
+      process.exit(1);
+    }
+
+    const result = await retrieveToolLog(Number(logIdArg));
+    if (!result.found) {
+      console.error(result.error || `Tool log ${logIdArg} not found.`);
+      process.exit(1);
+    }
+
+    // Print the full original tool output
+    const entry = result.entry;
+    console.log(`\n── Tool Log ${entry.id} ──`);
+    console.log(`Tool:  ${entry.toolName}`);
+    console.log(`Args:  ${entry.argsPreview || "(none)"}`);
+    console.log(`Time:  ${new Date(entry.ts).toISOString()}`);
+    console.log(`${"─".repeat(60)}\n`);
+
+    const item = entry.item;
+    const output =
+      item?.text || item?.output || item?.aggregated_output ||
+      item?.result || item?.message || JSON.stringify(item, null, 2);
+    console.log(output);
+    process.exit(0);
   }
 
   // Handle sentinel controls

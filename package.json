@@ -149,6 +149,7 @@
     "config.mjs",
     "config-doctor.mjs",
     "conflict-resolver.mjs",
+    "context-cache.mjs",
     "copilot-shell.mjs",
     "gemini-shell.mjs",
     "diff-stats.mjs",
