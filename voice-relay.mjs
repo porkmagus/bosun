@@ -26,7 +26,7 @@ const OPENAI_REALTIME_MODEL = "gpt-realtime-1.5";
 const OPENAI_AUDIO_RESPONSES_MODEL = "gpt-audio-1.5";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_DEFAULT_VISION_MODEL = "gpt-4.1-nano";
-const REALTIME_TRANSCRIBE_MODEL = "gpt-4o-transcribe";
+const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-transcribe";
 
 const AZURE_API_VERSION = "2025-04-01-preview";
 
@@ -73,6 +73,8 @@ function buildOpenAIRealtimeWebRtcUrl(model, overrideBase = "") {
 
 // GA models (gpt-realtime, gpt-realtime-1.5, gpt-realtime-mini, etc.) use /openai/v1/ paths.
 // Preview models (for example gpt-4o-realtime-preview-*) use legacy /openai/realtimeapi/ paths.
+// NOTE: Azure AI Foundry "Global Standard" deployments may only support preview paths
+// even for GA model names.  We try GA first.  If it 404s the caller falls back to preview.
 function isAzureGaProtocol(deployment) {
   const d = String(deployment || "").toLowerCase().trim();
   return d.startsWith("gpt-realtime") && !d.startsWith("gpt-4o-realtime");
@@ -91,6 +93,13 @@ function normalizeAzureRealtimeDeployment(rawDeployment) {
   if (!deployment) return OPENAI_REALTIME_MODEL;
   if (/^gpt-audio/i.test(deployment)) return OPENAI_REALTIME_MODEL;
   return deployment;
+}
+
+function parseOptionalBoolean(rawValue) {
+  if (rawValue == null) return null;
+  const normalized = String(rawValue).trim().toLowerCase();
+  if (!normalized) return null;
+  return !["0", "false", "no", "off"].includes(normalized);
 }
 
 function isOpenAIAudioResponsesModel(rawModel) {
@@ -305,18 +314,42 @@ function sanitizeVoiceCallContext(context = {}) {
   const rawExecutor = String(context?.executor || "").trim().toLowerCase();
   const rawMode = String(context?.mode || "").trim().toLowerCase();
   const rawModel = String(context?.model || "").trim();
+  const rawVoiceAgentId = String(context?.voiceAgentId || "").trim();
+  const rawVoiceAgentName = String(context?.voiceAgentName || "").trim();
+  const rawVoiceAgentInstructions = String(context?.voiceAgentInstructions || "").trim();
+  const rawVoiceToolCapabilityPrompt = String(context?.voiceToolCapabilityPrompt || "").trim();
+  const rawVoiceAgentSkills = Array.isArray(context?.voiceAgentSkills)
+    ? context.voiceAgentSkills.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
+  const rawEnabledMcpServers = Array.isArray(context?.enabledMcpServers)
+    ? context.enabledMcpServers.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
 
   return {
     sessionId: rawSessionId || null,
     executor: VALID_EXECUTORS.has(rawExecutor) ? rawExecutor : null,
     mode: VALID_AGENT_MODES.has(rawMode) ? rawMode : null,
     model: rawModel || null,
+    voiceAgentId: rawVoiceAgentId || null,
+    voiceAgentName: rawVoiceAgentName || null,
+    voiceAgentInstructions: rawVoiceAgentInstructions || null,
+    voiceToolCapabilityPrompt: rawVoiceToolCapabilityPrompt || null,
+    voiceAgentSkills: rawVoiceAgentSkills,
+    enabledMcpServers: rawEnabledMcpServers,
   };
 }
 
 async function buildSessionScopedInstructions(baseInstructions, callContext = {}) {
   const context = sanitizeVoiceCallContext(callContext);
-  if (!context.sessionId && !context.executor && !context.mode && !context.model) {
+  if (
+    !context.sessionId
+    && !context.executor
+    && !context.mode
+    && !context.model
+    && !context.voiceAgentId
+    && !context.voiceAgentInstructions
+    && !context.voiceToolCapabilityPrompt
+  ) {
     return baseInstructions;
   }
 
@@ -381,6 +414,22 @@ async function buildSessionScopedInstructions(baseInstructions, callContext = {}
     "",
     "## Bosun Voice Call Context",
     `Active chat session id: ${context.sessionId || "none"}.`,
+    context.voiceAgentId
+      ? `Active voice agent id: ${context.voiceAgentId}.`
+      : "Active voice agent id: default.",
+    context.voiceAgentName
+      ? `Active voice agent name: ${context.voiceAgentName}.`
+      : "",
+    context.voiceAgentInstructions
+      ? `Voice agent instruction emphasis: ${context.voiceAgentInstructions}`
+      : "",
+    context.voiceToolCapabilityPrompt || "",
+    context.enabledMcpServers?.length
+      ? `Enabled MCP servers for this session: ${context.enabledMcpServers.join(", ")}.`
+      : "",
+    context.voiceAgentSkills?.length
+      ? `Voice agent skills: ${context.voiceAgentSkills.join(", ")}.`
+      : "",
     context.executor
       ? `Preferred executor for delegated work: ${context.executor}.`
       : "Preferred executor for delegated work: use configured default.",
@@ -783,6 +832,12 @@ export function getVoiceConfig(forceReload = false) {
       azureDeployment: String(ep.deployment || ep.azureDeployment || "").trim() || null,
       voiceId: String(ep.voiceId || "").trim() || null,
       visionModel: String(ep.visionModel || "").trim() || null,
+      transcriptionModel: String(ep.transcriptionModel || "").trim() || null,
+      // Azure defaults to transcription OFF unless explicitly enabled because
+      // item-level ASR failures can spam and destabilize long-running calls.
+      transcriptionEnabled: String(ep.provider || "").toLowerCase() === "azure"
+        ? (ep.transcriptionEnabled === true)
+        : (ep.transcriptionEnabled !== false),
       role: String(ep.role || "primary").trim() || "primary",
       weight: typeof ep.weight === "number" ? ep.weight : 100,
       name: String(ep.name || "").trim() || null,
@@ -861,6 +916,19 @@ export function getVoiceConfig(forceReload = false) {
         : OPENAI_DEFAULT_VISION_MODEL;
   const visionModel =
     voice.visionModel || process.env.VOICE_VISION_MODEL || defaultVisionModel;
+  const transcriptionModel =
+    voice.transcriptionModel || process.env.VOICE_TRANSCRIPTION_MODEL || DEFAULT_TRANSCRIBE_MODEL;
+  const transcriptionEnabledRaw =
+    voice.transcriptionEnabled ?? process.env.VOICE_TRANSCRIPTION_ENABLED;
+  const transcriptionEnabled =
+    transcriptionEnabledRaw == null
+      ? true
+      : !["0", "false", "no", "off"].includes(
+          String(transcriptionEnabledRaw).trim().toLowerCase(),
+        );
+  const azureTranscriptionEnabled = parseOptionalBoolean(
+    voice.azureTranscriptionEnabled ?? process.env.VOICE_AZURE_TRANSCRIPTION_ENABLED,
+  );
   const fallbackMode =
     voice.fallbackMode || process.env.VOICE_FALLBACK_MODE || "browser";
   const delegateExecutor =
@@ -906,6 +974,9 @@ For complex operations like writing code or creating PRs, delegate to the approp
     turnDetection,
     visionModel,
     instructions,
+    transcriptionModel,
+    transcriptionEnabled,
+    azureTranscriptionEnabled,
     fallbackMode,
     delegateExecutor,
     enabled,
@@ -1120,6 +1191,13 @@ async function createOpenAIEphemeralToken(cfg, toolDefinitions = [], callContext
   const instructions = await buildSessionScopedInstructions(cfg.instructions, context);
   const model = normalizeOpenAIRealtimeModel(candidate?.model || cfg.model || OPENAI_REALTIME_MODEL);
   const voiceId = String(candidate?.voiceId || cfg.voiceId || "alloy").trim() || "alloy";
+  // Per-endpoint transcription overrides
+  const transcriptionModel = String(candidate?.transcriptionModel || "").trim() || cfg.transcriptionModel;
+  const transcriptionEnabled = candidate?.transcriptionEnabled !== undefined
+    ? candidate.transcriptionEnabled !== false
+    : cfg.azureTranscriptionEnabled != null
+      ? cfg.azureTranscriptionEnabled !== false
+      : false;
 
   const sessionConfig = {
     model,
@@ -1144,8 +1222,7 @@ async function createOpenAIEphemeralToken(cfg, toolDefinitions = [], callContext
         interrupt_response: true,
       } : {}),
     },
-    input_audio_transcription: { model: REALTIME_TRANSCRIBE_MODEL },
-    output_audio_transcription: { model: REALTIME_TRANSCRIBE_MODEL },
+    ...(transcriptionEnabled ? { input_audio_transcription: { model: transcriptionModel } } : {}),
     tools: toolDefinitions,
   };
 
@@ -1198,11 +1275,17 @@ async function createAzureEphemeralToken(cfg, toolDefinitions = [], callContext 
     candidate?.azureDeployment || candidate?.model || cfg.azureDeployment || OPENAI_REALTIME_MODEL,
   );
   const voiceId = String(candidate?.voiceId || cfg.voiceId || "alloy").trim() || "alloy";
+  // Per-endpoint transcription overrides
+  const transcriptionModel = String(candidate?.transcriptionModel || "").trim() || cfg.transcriptionModel;
+  const transcriptionEnabled = candidate?.transcriptionEnabled !== undefined ? candidate.transcriptionEnabled !== false : cfg.transcriptionEnabled;
   // GA protocol (gpt-realtime-1.5, gpt-realtime, etc.) uses /openai/v1/realtime/sessions?api-version=...
   // Preview protocol uses /openai/realtimeapi/sessions?api-version=...
-  const url = isAzureGaProtocol(deployment)
-    ? `${resolvedEndpoint}/openai/v1/realtime/sessions?api-version=${AZURE_API_VERSION}`
-    : `${resolvedEndpoint}/openai/realtimeapi/sessions?api-version=${AZURE_API_VERSION}&deployment=${encodeURIComponent(deployment)}`;
+  // Azure AI Foundry "Global Standard" resources may not support GA paths even for GA model names,
+  // so we build both and try GA first with automatic fallback to preview.
+  const gaUrl = `${resolvedEndpoint}/openai/v1/realtime/sessions?api-version=${AZURE_API_VERSION}`;
+  const previewUrl = `${resolvedEndpoint}/openai/realtimeapi/sessions?api-version=${AZURE_API_VERSION}&deployment=${encodeURIComponent(deployment)}`;
+  const useGa = isAzureGaProtocol(deployment);
+  const url = useGa ? gaUrl : previewUrl;
 
   const headers = {
     "Content-Type": "application/json",
@@ -1239,16 +1322,27 @@ async function createAzureEphemeralToken(cfg, toolDefinitions = [], callContext 
         interrupt_response: true,
       } : {}),
     },
-    input_audio_transcription: { model: REALTIME_TRANSCRIBE_MODEL },
-    output_audio_transcription: { model: REALTIME_TRANSCRIBE_MODEL },
+    ...(transcriptionEnabled ? { input_audio_transcription: { model: transcriptionModel } } : {}),
     tools: toolDefinitions,
   };
 
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     method: "POST",
     headers,
     body: JSON.stringify(sessionConfig),
   });
+
+  // Azure AI Foundry "Global Standard" deployments may 404 on the GA path.
+  // Automatically fall back to the preview path before giving up.
+  if (!response.ok && response.status === 404 && useGa) {
+    const previewConfig = { ...sessionConfig };
+    delete previewConfig.type; // preview path does not accept type: "realtime"
+    response = await fetch(previewUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(previewConfig),
+    });
+  }
 
   if (!response.ok) {
     const errorText = await buildProviderErrorDetails(response, "unknown");
@@ -1257,9 +1351,22 @@ async function createAzureEphemeralToken(cfg, toolDefinitions = [], callContext 
 
   const data = await response.json();
   // WebRTC URL diverges from /sessions URL: GA uses /openai/v1/realtime, preview uses /openai/realtime.
-  const webrtcUrl = isAzureGaProtocol(deployment)
+  // If the GA session was created via fallback to preview, use preview WebRTC URL too.
+  const gaSessionSucceeded = useGa && response.url?.includes("/v1/realtime");
+  const webrtcUrl = (useGa && gaSessionSucceeded)
     ? `${resolvedEndpoint}/openai/v1/realtime?api-version=${AZURE_API_VERSION}`
     : `${resolvedEndpoint}/openai/realtime?api-version=${AZURE_API_VERSION}&deployment=${encodeURIComponent(deployment)}`;
+
+  // WebSocket fallback URL — Azure Realtime API always supports WebSocket even
+  // when WebRTC SDP is unavailable (404).  The api-key query parameter provides
+  // authentication since browsers cannot set custom headers on WebSocket.
+  const wsAuthParam = resolvedOAuthToken
+    ? `access_token=${encodeURIComponent(resolvedOAuthToken)}`
+    : `api-key=${encodeURIComponent(resolvedApiKey)}`;
+  const wsUrl = (useGa && gaSessionSucceeded)
+    ? `wss://${new URL(resolvedEndpoint).host}/openai/v1/realtime?api-version=${AZURE_API_VERSION}&${wsAuthParam}`
+    : `wss://${new URL(resolvedEndpoint).host}/openai/realtime?api-version=${AZURE_API_VERSION}&deployment=${encodeURIComponent(deployment)}&${wsAuthParam}`;
+
   return {
     token: data.client_secret?.value || data.token,
     expiresAt: data.client_secret?.expires_at || (Date.now() / 1000 + 60),
@@ -1267,6 +1374,7 @@ async function createAzureEphemeralToken(cfg, toolDefinitions = [], callContext 
     voiceId,
     provider: "azure",
     url: webrtcUrl,
+    wsUrl,
     sessionConfig,
     azureEndpoint: resolvedEndpoint,
     azureDeployment: deployment,

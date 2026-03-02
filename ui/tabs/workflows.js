@@ -1116,11 +1116,9 @@ function WorkflowAgentLibraryPicker({ config, onUpdate }) {
     if (agents.length > 0) { setExpanded(e => !e); return; }
     setLoading(true);
     try {
-      const res = await apiFetch("/api/library?type=agent");
-      if (res.ok) {
-        const data = await res.json();
-        setAgents(data.entries || data || []);
-      }
+      const res = await apiFetch("/api/library?type=agent&agentType=task");
+      const data = Array.isArray(res?.data) ? res.data : [];
+      setAgents(data);
     } catch { /* ignore */ }
     setLoading(false);
     setExpanded(true);
@@ -2319,6 +2317,25 @@ export function WorkflowsTab() {
     loadWorkflows();
     loadTemplates();
     loadNodeTypes();
+  }, []);
+
+  useEffect(() => {
+    const onWorkspaceSwitched = () => {
+      activeWorkflow.value = null;
+      selectedRunId.value = null;
+      selectedRunDetail.value = null;
+      workflowRuns.value = [];
+      workflowRunsLimit.value = WORKFLOW_RUN_PAGE_SIZE;
+      viewMode.value = "list";
+      setRouteParams({}, { replace: true, skipGuard: true });
+      loadWorkflows();
+      loadTemplates();
+      loadNodeTypes();
+    };
+    window.addEventListener("ve:workspace-switched", onWorkspaceSwitched);
+    return () => {
+      window.removeEventListener("ve:workspace-switched", onWorkspaceSwitched);
+    };
   }, []);
 
   useEffect(() => {

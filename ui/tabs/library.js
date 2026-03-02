@@ -349,12 +349,12 @@ async function configureMcpEnv(id, env) {
 
 async function fetchAvailableTools() {
   const res = await apiFetch("/api/agent-tools/available");
-  return res?.data || { builtinTools: [], mcpServers: [] };
+  return res?.data || { builtinTools: [], bosunTools: [], mcpServers: [] };
 }
 
 async function fetchAgentToolConfig(agentId) {
   const res = await apiFetch(`/api/agent-tools/config?agentId=${encodeURIComponent(agentId)}`);
-  return res?.data || { builtinTools: [], mcpServers: [] };
+  return res?.data || { builtinTools: [], bosunTools: [], mcpServers: [], enabledTools: null };
 }
 
 async function saveAgentToolConfig(agentId, config) {
@@ -377,6 +377,73 @@ async function fetchBuiltinToolDefaults() {
 const TYPE_ICONS = { prompt: ":edit:", agent: ":bot:", skill: ":cpu:", mcp: ":plug:" };
 const TYPE_LABELS = { prompt: "Prompt", agent: "Agent Profile", skill: "Skill", mcp: "MCP Server" };
 const TYPE_COLORS = { prompt: "#58a6ff", agent: "#af7bff", skill: "#3fb950", mcp: "#f59e0b" };
+const AGENT_TYPE_OPTIONS = Object.freeze([
+  { value: "voice", label: "Voice" },
+  { value: "task", label: "Task" },
+  { value: "chat", label: "Chat" },
+]);
+
+function normalizeAgentType(rawType) {
+  const value = String(rawType || "").trim().toLowerCase();
+  if (value === "voice" || value === "task" || value === "chat") return value;
+  return "task";
+}
+
+function inferAgentTypeFromEntry(entry, parsedContent) {
+  const explicit = normalizeAgentType(parsedContent?.agentType);
+  if (parsedContent?.agentType) return explicit;
+  if (parsedContent?.voiceAgent === true) return "voice";
+  const id = String(entry?.id || "").trim().toLowerCase();
+  const tags = Array.isArray(entry?.tags)
+    ? entry.tags.map((tag) => String(tag || "").trim().toLowerCase())
+    : [];
+  if (id.startsWith("voice-agent")) return "voice";
+  if (tags.includes("voice") || tags.includes("audio-agent") || tags.includes("realtime")) return "voice";
+  return "task";
+}
+
+const AUDIO_AGENT_TEMPLATES = Object.freeze({
+  female: {
+    type: "agent",
+    name: "Voice Agent (Female)",
+    description: "Conversational voice specialist with concise guidance and call-friendly pacing.",
+    tags: "voice,audio-agent,female,realtime",
+    scope: "global",
+    content: JSON.stringify({
+      name: "Voice Agent (Female)",
+      description: "Conversational voice specialist with concise guidance and call-friendly pacing.",
+      titlePatterns: ["\\bvoice\\b", "\\bcall\\b", "\\bmeeting\\b", "\\bassistant\\b"],
+      scopes: ["voice", "assistant"],
+      model: null,
+      promptOverride: null,
+      skills: ["concise-voice-guidance", "conversation-memory"],
+      agentType: "voice",
+      voiceAgent: true,
+      voicePersona: "female",
+      voiceInstructions: "You are Nova, a female voice agent. Be concise, warm, and practical. Use tools for facts and execution. Keep spoken responses short and clear.",
+    }, null, 2),
+  },
+  male: {
+    type: "agent",
+    name: "Voice Agent (Male)",
+    description: "Operational voice specialist focused on diagnostics and execution.",
+    tags: "voice,audio-agent,male,realtime",
+    scope: "global",
+    content: JSON.stringify({
+      name: "Voice Agent (Male)",
+      description: "Operational voice specialist focused on diagnostics and execution.",
+      titlePatterns: ["\\bvoice\\b", "\\bcall\\b", "\\bmeeting\\b", "\\bassistant\\b"],
+      scopes: ["voice", "assistant"],
+      model: null,
+      promptOverride: null,
+      skills: ["ops-diagnostics", "task-execution"],
+      agentType: "voice",
+      voiceAgent: true,
+      voicePersona: "male",
+      voiceInstructions: "You are Atlas, a male voice agent. Be direct and execution-oriented. Prefer actionable status updates. Use tools proactively for diagnostics.",
+    }, null, 2),
+  },
+});
 
 /* ═══════════════════════════════════════════════════════════════
  *  Sub-components
@@ -454,6 +521,9 @@ function LibraryCard({ entry, onSelect }) {
         <div class="library-card-desc">${entry.description}</div>
       `}
       <div class="library-card-meta">
+        ${entry.type === "agent" && entry.agentType && html`
+          <span class="library-card-tag">${String(entry.agentType).toUpperCase()}</span>
+        `}
         ${(entry.tags || []).slice(0, 5).map((tag) => html`
           <span class="library-card-tag" key=${tag}>${tag}</span>
         `)}
@@ -476,7 +546,8 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
     description: entry?.description || "",
     tags: (entry?.tags || []).join(", "),
     scope: entry?.scope || "global",
-    content: "",
+    agentType: inferAgentTypeFromEntry(entry, null),
+    content: typeof entry?.content === "string" ? entry.content : "",
   };
   const [form, setForm] = useState(initialFormSnapshot);
   const [baseline, setBaseline] = useState(initialFormSnapshot);
@@ -496,6 +567,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
       description: entry?.description || "",
       tags: (entry?.tags || []).join(", "),
       scope: entry?.scope || "global",
+      agentType: inferAgentTypeFromEntry(entry, null),
       content: "",
     };
     setForm(next);
@@ -513,8 +585,13 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
         if (cancelled) return;
         let contentStr = detail?.content ?? "";
         if (typeof contentStr === "object") contentStr = JSON.stringify(contentStr, null, 2);
+        const parsed = detail?.content && typeof detail.content === "object" ? detail.content : null;
         setForm((f) => {
-          const next = { ...f, content: contentStr };
+          const next = {
+            ...f,
+            content: contentStr,
+            agentType: inferAgentTypeFromEntry(detail || entry, parsed),
+          };
           setBaseline(next);
           return next;
         });
@@ -551,7 +628,19 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
       const tags = form.tags.split(/[,\s]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
       let content = form.content;
       if (form.type === "agent") {
-        try { content = JSON.parse(content); } catch { /* keep as string if invalid JSON */ }
+        try {
+          content = JSON.parse(content);
+        } catch {
+          showToast("Agent profile content must be valid JSON", "error");
+          return false;
+        }
+        const agentType = normalizeAgentType(form.agentType);
+        content.agentType = agentType;
+        if (agentType === "voice") {
+          content.voiceAgent = true;
+        } else if (content.voiceAgent === true) {
+          content.voiceAgent = false;
+        }
       }
       const res = await saveEntry({
         id: form.id || undefined,
@@ -611,6 +700,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
           model: null,
           promptOverride: null,
           skills: [],
+          agentType: "task",
           tags: [],
         }, null, 2)
       : "# Skill Title\n\n## Purpose\nDescribe what this skill teaches agents.\n\n## Instructions\n...";
@@ -661,6 +751,16 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
             <option value="workspace">Workspace</option>
           </select>
         </label>
+        ${form.type === "agent" && html`
+          <label>
+            Agent Type
+            <select value=${normalizeAgentType(form.agentType)} onChange=${updateField("agentType")}>
+              ${AGENT_TYPE_OPTIONS.map((opt) => html`
+                <option key=${opt.value} value=${opt.value}>${opt.label}</option>
+              `)}
+            </select>
+          </label>
+        `}
         <label>
           Content
           ${loadingContent
@@ -672,7 +772,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
         </label>
         <div style="font-size:0.78em;color:var(--text-tertiary,#666);margin-top:-8px;">
           ${form.type === "prompt" ? "Use {{VARIABLE_NAME}} for template variables. Reference in workflows as {{prompt:name}}."
-            : form.type === "agent" ? "JSON format. Referenced in workflows as {{agent:name}}."
+          : form.type === "agent" ? "JSON format. Referenced in workflows as {{agent:name}}."
             : form.type === "mcp" ? "MCP server configuration. Managed via the MCP Servers panel."
             : "Markdown format. Referenced in workflows as {{skill:name}}."}
         </div>
@@ -727,8 +827,8 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
 /* ─ Agent Tool Configurator ─────────────────────────────── */
 
 function AgentToolConfigurator({ agentId, agentName }) {
-  const [toolsTab, setToolsTab] = useState("builtin"); // "builtin" | "mcp"
-  const [tools, setTools] = useState({ builtinTools: [], mcpServers: [] });
+  const [toolsTab, setToolsTab] = useState("builtin"); // "builtin" | "bosun" | "mcp"
+  const [tools, setTools] = useState({ builtinTools: [], bosunTools: [], mcpServers: [], enabledTools: null });
   const [installed, setInstalled] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -756,14 +856,57 @@ function AgentToolConfigurator({ agentId, agentName }) {
     const newDisabled = enabled
       ? disabledList.filter((id) => id !== toolId)
       : [...disabledList, toolId];
+    const currentEnabledTools = Array.isArray(tools.enabledTools)
+      ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+      : null;
+    const nextEnabledTools = currentEnabledTools
+      ? (() => {
+        const set = new Set(currentEnabledTools);
+        if (enabled) set.add(toolId);
+        else set.delete(toolId);
+        return [...set];
+      })()
+      : undefined;
     setSaving(true);
     try {
-      await saveAgentToolConfig(agentId, { disabledBuiltinTools: newDisabled });
+      await saveAgentToolConfig(agentId, {
+        disabledBuiltinTools: newDisabled,
+        ...(nextEnabledTools !== undefined ? { enabledTools: nextEnabledTools } : {}),
+      });
       setTools((prev) => ({
         ...prev,
+        ...(nextEnabledTools !== undefined ? { enabledTools: nextEnabledTools } : {}),
         builtinTools: prev.builtinTools.map((t) =>
           t.id === toolId ? { ...t, enabled } : t
         ),
+      }));
+    } catch (err) {
+      showToast("Failed to save: " + err.message, "error");
+    }
+    setSaving(false);
+  }, [agentId, tools]);
+
+  const toggleBosunTool = useCallback(async (toolId, enabled) => {
+    const bosunIds = (tools.bosunTools || []).map((tool) => String(tool?.id || "").trim()).filter(Boolean);
+    const bosunIdSet = new Set(bosunIds);
+    const currentEnabledTools = Array.isArray(tools.enabledTools)
+      ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const currentSet = new Set(currentEnabledTools);
+    const hasBosunAllowlist = bosunIds.some((id) => currentSet.has(id));
+    const nextBosunSet = hasBosunAllowlist
+      ? new Set(currentEnabledTools.filter((id) => bosunIdSet.has(id)))
+      : new Set(bosunIds);
+    if (enabled) nextBosunSet.add(toolId);
+    else nextBosunSet.delete(toolId);
+    const preserved = currentEnabledTools.filter((id) => !bosunIdSet.has(id));
+    const nextEnabledTools = [...new Set([...preserved, ...nextBosunSet])];
+    setSaving(true);
+    try {
+      await saveAgentToolConfig(agentId, { enabledTools: nextEnabledTools });
+      setTools((prev) => ({
+        ...prev,
+        enabledTools: nextEnabledTools,
       }));
     } catch (err) {
       showToast("Failed to save: " + err.message, "error");
@@ -787,6 +930,17 @@ function AgentToolConfigurator({ agentId, agentName }) {
   }, [agentId, tools]);
 
   const enabledMcpSet = new Set(tools.mcpServers || []);
+  const bosunTools = Array.isArray(tools.bosunTools) ? tools.bosunTools : [];
+  const bosunToolIds = bosunTools.map((tool) => String(tool?.id || "").trim()).filter(Boolean);
+  const rawEnabledTools = Array.isArray(tools.enabledTools)
+    ? tools.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+    : null;
+  const hasBosunAllowlist = Boolean(rawEnabledTools && rawEnabledTools.some((id) => bosunToolIds.includes(id)));
+  const enabledBosunSet = new Set(
+    hasBosunAllowlist
+      ? rawEnabledTools.filter((id) => bosunToolIds.includes(id))
+      : bosunToolIds,
+  );
 
   if (loading) {
     return html`<div class="agent-tools-section">
@@ -805,6 +959,10 @@ function AgentToolConfigurator({ agentId, agentName }) {
         <button class=${`agent-tools-tab ${toolsTab === "builtin" ? "active" : ""}`}
           onClick=${() => setToolsTab("builtin")}>
           ${iconText(":cpu: Built-in Tools")} (${(tools.builtinTools || []).filter((t) => t.enabled).length}/${(tools.builtinTools || []).length})
+        </button>
+        <button class=${`agent-tools-tab ${toolsTab === "bosun" ? "active" : ""}`}
+          onClick=${() => setToolsTab("bosun")}>
+          ${iconText(":zap: Bosun Tools")} (${enabledBosunSet.size}/${bosunTools.length})
         </button>
         <button class=${`agent-tools-tab ${toolsTab === "mcp" ? "active" : ""}`}
           onClick=${() => setToolsTab("mcp")}>
@@ -830,6 +988,34 @@ function AgentToolConfigurator({ agentId, agentName }) {
             </div>
           `)}
         </div>
+      `}
+
+      ${toolsTab === "bosun" && html`
+        <details open class="tool-config-group">
+          <summary class="tool-config-group-label">
+            Runtime Voice Tools (collapsible)
+          </summary>
+          ${bosunTools.length === 0 && html`
+            <div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:0.85em;">
+              No Bosun runtime tools were discovered.
+            </div>
+          `}
+          ${bosunTools.map((tool) => html`
+            <div class="tool-config-item" key=${tool.id}>
+              <span class="tool-config-item-icon">${resolveIcon(":zap:") || iconText(":zap:")}</span>
+              <div class="tool-config-item-info">
+                <div class="tool-config-item-name">${tool.name}</div>
+                <div class="tool-config-item-desc">${tool.description || "Bosun runtime tool"}</div>
+              </div>
+              <div class="tool-config-toggle">
+                <${Toggle}
+                  checked=${enabledBosunSet.has(tool.id)}
+                  onChange=${(val) => toggleBosunTool(tool.id, val)}
+                />
+              </div>
+            </div>
+          `)}
+        </details>
       `}
 
       ${toolsTab === "mcp" && html`
@@ -1350,6 +1536,17 @@ export function LibraryTab() {
 
   useEffect(() => { loadEntries(); }, [filterType.value]);
 
+  useEffect(() => {
+    const onWorkspaceSwitched = () => {
+      setEditing(null);
+      loadEntries();
+    };
+    window.addEventListener("ve:workspace-switched", onWorkspaceSwitched);
+    return () => {
+      window.removeEventListener("ve:workspace-switched", onWorkspaceSwitched);
+    };
+  }, [loadEntries]);
+
   // Debounced search
   const searchTimer = useRef(null);
   const handleSearch = useCallback((value) => {
@@ -1391,6 +1588,13 @@ export function LibraryTab() {
     setEditing(entry);
   }, []);
 
+  const handleCreateAudioAgent = useCallback((templateKey) => {
+    const template = AUDIO_AGENT_TEMPLATES[templateKey];
+    if (!template) return;
+    haptic("light");
+    setEditing({ ...template });
+  }, []);
+
   const handleSaved = useCallback(() => {
     setEditing(null);
     loadEntries();
@@ -1414,6 +1618,12 @@ export function LibraryTab() {
     <div class="library-root">
       <div class="library-header">
         <h2>${iconText(":book: Library")}</h2>
+        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("female")}>
+          ${iconText(":mic: New Female Audio Agent")}
+        </button>
+        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("male")}>
+          ${iconText(":mic: New Male Audio Agent")}
+        </button>
         <button class="library-type-pill" onClick=${handleRebuild}
           title="Rescan directories and rebuild manifest">
           ${iconText(":refresh: Rebuild")}

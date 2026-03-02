@@ -70,6 +70,7 @@ import {
   matchAgentProfile,
   loadManifest,
   getManifestPath,
+  scaffoldAgentProfiles,
 } from "./library-manager.mjs";
 import {
   listCatalog,
@@ -161,7 +162,7 @@ const repoRoot = resolveRepoRoot();
 const uiRootPreferred = resolve(__dirname, "ui");
 const uiRootFallback = resolve(__dirname, "site", "ui");
 const uiRoot = existsSync(uiRootPreferred) ? uiRootPreferred : uiRootFallback;
-let libraryInitAttempted = false;
+const libraryInitAttemptedRoots = new Set();
 const MAX_VISION_FRAME_BYTES = Math.max(
   128_000,
   Number.parseInt(process.env.VISION_FRAME_MAX_BYTES || "", 10) || 2_000_000,
@@ -208,21 +209,238 @@ function parseVisionFrameDataUrl(dataUrl) {
   return { ok: true, mimeType, base64Data, approxBytes, raw };
 }
 
-function ensureLibraryInitialized() {
-  if (libraryInitAttempted) return;
-  libraryInitAttempted = true;
+function ensureLibraryInitialized(rootDir = repoRoot) {
+  const normalizedRoot = normalizeCandidatePath(rootDir) || repoRoot;
+  if (libraryInitAttemptedRoots.has(normalizedRoot)) return;
+  libraryInitAttemptedRoots.add(normalizedRoot);
   try {
-    const manifestPath = getManifestPath(repoRoot);
-    const manifest = loadManifest(repoRoot);
+    const manifestPath = getManifestPath(normalizedRoot);
+    const manifest = loadManifest(normalizedRoot);
     if (!existsSync(manifestPath) || !Array.isArray(manifest?.entries) || manifest.entries.length === 0) {
-      const result = initLibrary(repoRoot);
+      const result = initLibrary(normalizedRoot);
       const count = result?.manifest?.entries?.length ?? 0;
       if (count > 0) {
-        console.log(`[ui] Library initialized (${count} entries).`);
+        console.log(`[ui] Library initialized (${count} entries) at ${normalizedRoot}.`);
       }
     }
+    const scaffoldResult = scaffoldAgentProfiles(normalizedRoot);
+    if (Array.isArray(scaffoldResult?.written) && scaffoldResult.written.length > 0) {
+      rebuildManifest(normalizedRoot);
+    }
   } catch (err) {
-    console.warn(`[ui] Library init failed: ${err.message}`);
+    console.warn(`[ui] Library init failed for ${normalizedRoot}: ${err.message}`);
+  }
+}
+
+const VOICE_TOOL_ID_MAP = Object.freeze({
+  "search-files": ["search_code", "list_directory"],
+  "read-file": ["read_file_content"],
+  "edit-file": ["delegate_to_agent", "run_workspace_command"],
+  "run-command": ["run_command", "run_workspace_command"],
+  "web-search": ["ask_agent_context"],
+  "code-search": ["search_code", "get_workspace_context"],
+  "git-operations": ["run_workspace_command", "get_pr_status"],
+  "create-task": ["create_task"],
+  "delegate-task": ["delegate_to_agent", "ask_agent_context", "poll_background_session"],
+  "fetch-url": ["run_workspace_command"],
+  "list-directory": ["list_directory"],
+  "grep-search": ["search_code"],
+  "task-management": ["list_tasks", "get_task", "search_tasks", "get_task_stats", "delete_task", "comment_on_task"],
+  "notifications": ["dispatch_action"],
+  "vision-analysis": ["query_live_view"],
+});
+
+const BUILTIN_TOOL_ID_SET = new Set(
+  (Array.isArray(DEFAULT_BUILTIN_TOOLS) ? DEFAULT_BUILTIN_TOOLS : [])
+    .map((tool) => String(tool?.id || "").trim())
+    .filter(Boolean),
+);
+
+function mapToolConfigIdsToVoiceToolNames(enabledIds = []) {
+  const resolved = new Set();
+  for (const rawId of Array.isArray(enabledIds) ? enabledIds : []) {
+    const id = String(rawId || "").trim();
+    if (!id) continue;
+    const mapped = VOICE_TOOL_ID_MAP[id];
+    if (Array.isArray(mapped) && mapped.length > 0) {
+      for (const toolName of mapped) resolved.add(String(toolName || "").trim());
+      continue;
+    }
+    // If this is a known built-in tool id without a runtime mapping, skip it
+    // instead of treating the id as a voice runtime tool name.
+    if (BUILTIN_TOOL_ID_SET.has(id)) {
+      continue;
+    }
+    resolved.add(id);
+  }
+  return resolved;
+}
+
+function isVoiceAgentProfileEntry(entry, profile) {
+  if (!entry || entry.type !== "agent") return false;
+  const id = String(entry.id || "").trim().toLowerCase();
+  const tags = Array.isArray(entry.tags) ? entry.tags.map((t) => String(t || "").trim().toLowerCase()) : [];
+  const profileType = String(profile?.agentType || "").trim().toLowerCase();
+  if (profileType === "voice") return true;
+  if (id.startsWith("voice-agent")) return true;
+  if (tags.includes("voice") || tags.includes("audio-agent") || tags.includes("realtime")) return true;
+  if (profile && typeof profile === "object" && profile.voiceAgent === true) return true;
+  return false;
+}
+
+function resolveAgentProfileType(entry, profile) {
+  const explicit = String(profile?.agentType || "").trim().toLowerCase();
+  if (explicit === "voice" || explicit === "task" || explicit === "chat") return explicit;
+  if (isVoiceAgentProfileEntry(entry, profile)) return "voice";
+  return "task";
+}
+
+function resolveVoiceLibraryRoot(callContext = {}) {
+  const sessionId = String(callContext?.sessionId || "").trim();
+  if (!sessionId) return repoRoot;
+  try {
+    const tracker = getSessionTracker();
+    const session = tracker.getSessionById
+      ? tracker.getSessionById(sessionId)
+      : (tracker.getSession ? tracker.getSession(sessionId) : null);
+    const workspaceDir = String(
+      session?.workspaceDir
+      || session?.metadata?.workspaceDir
+      || "",
+    ).trim();
+    if (workspaceDir) return workspaceDir;
+  } catch {
+    // best effort
+  }
+  return repoRoot;
+}
+
+function listVoiceAgentProfiles(rootDir = repoRoot) {
+  const libraryRoot = rootDir || repoRoot;
+  ensureLibraryInitialized(libraryRoot);
+  const entries = listEntries(libraryRoot, { type: "agent" }) || [];
+  const profiles = [];
+  for (const entry of entries) {
+    const profile = getEntryContent(libraryRoot, entry);
+    if (!isVoiceAgentProfileEntry(entry, profile)) continue;
+    profiles.push({
+      id: entry.id,
+      name: entry.name || entry.id,
+      description: entry.description || "",
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
+      model: String(profile?.model || "").trim() || null,
+      voicePersona: String(profile?.voicePersona || "").trim() || "neutral",
+      voiceInstructions: String(profile?.voiceInstructions || "").trim() || "",
+      skills: Array.isArray(profile?.skills) ? profile.skills.map((s) => String(s || "").trim()).filter(Boolean) : [],
+      promptOverride: String(profile?.promptOverride || "").trim() || null,
+      agentType: resolveAgentProfileType(entry, profile),
+    });
+  }
+
+  profiles.sort((a, b) => {
+    const rank = (id) => {
+      if (id === "voice-agent-female") return 0;
+      if (id === "voice-agent-male") return 1;
+      if (id === "voice-agent") return 2;
+      return 3;
+    };
+    const ra = rank(a.id);
+    const rb = rank(b.id);
+    if (ra !== rb) return ra - rb;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id));
+  });
+  return profiles;
+}
+
+function resolveActiveVoiceAgent(rootDir = repoRoot, requestedAgentId = "") {
+  const agents = listVoiceAgentProfiles(rootDir);
+  if (agents.length === 0) return { agents: [], selected: null };
+  const requested = String(requestedAgentId || "").trim();
+  const selected = agents.find((a) => a.id === requested)
+    || agents.find((a) => a.id === "voice-agent-female")
+    || agents[0];
+  return { agents, selected };
+}
+
+function applyVoiceAgentToolFilters(allTools, toolConfig = null) {
+  const tools = Array.isArray(allTools) ? [...allTools] : [];
+  if (!toolConfig || typeof toolConfig !== "object") return tools;
+
+  const disabledBuiltinIds = Array.isArray(toolConfig.disabledBuiltinTools)
+    ? toolConfig.disabledBuiltinTools
+    : [];
+  const enabledIds = Array.isArray(toolConfig.enabledTools) ? toolConfig.enabledTools : null;
+  const enabledServers = Array.isArray(toolConfig.enabledMcpServers) ? toolConfig.enabledMcpServers : [];
+
+  const disabledNames = mapToolConfigIdsToVoiceToolNames(disabledBuiltinIds);
+  const enabledNames = enabledIds ? mapToolConfigIdsToVoiceToolNames(enabledIds) : null;
+
+  return tools.filter((tool) => {
+    const name = String(tool?.name || "").trim();
+    if (!name) return false;
+    if (name === "invoke_mcp_tool" && enabledServers.length === 0) return false;
+    if (enabledNames && enabledNames.size > 0) {
+      return enabledNames.has(name);
+    }
+    if (disabledNames.has(name)) return false;
+    return true;
+  });
+}
+
+function buildVoiceToolCapabilityPrompt(tools = [], toolConfig = null, selectedVoiceAgent = null) {
+  const runtimeTools = Array.isArray(tools) ? tools : [];
+  const enabledServers = Array.isArray(toolConfig?.enabledMcpServers)
+    ? toolConfig.enabledMcpServers
+    : [];
+  const toolLines = runtimeTools
+    .slice(0, 48)
+    .map((tool) => {
+      const name = String(tool?.name || "").trim();
+      if (!name) return null;
+      const description = String(tool?.description || "").replace(/\s+/g, " ").trim();
+      return description ? `- ${name}: ${description}` : `- ${name}`;
+    })
+    .filter(Boolean);
+  const skills = Array.isArray(selectedVoiceAgent?.skills)
+    ? selectedVoiceAgent.skills.map((skill) => String(skill || "").trim()).filter(Boolean)
+    : [];
+  const agentName = String(selectedVoiceAgent?.name || selectedVoiceAgent?.id || "Voice Agent").trim();
+
+  return [
+    "",
+    "## Active Voice Agent Capability Contract",
+    `Agent profile: ${agentName}.`,
+    "You can execute tools directly in this voice session. Do not claim you cannot use tools or must rely on chat-only help.",
+    "When the user asks for action or facts, call the most relevant tool first, then report results briefly.",
+    toolLines.length > 0
+      ? "Enabled runtime tools:\n" + toolLines.join("\n")
+      : "Enabled runtime tools: none (tool calls unavailable for this profile).",
+    enabledServers.length > 0
+      ? `Enabled MCP servers (for invoke_mcp_tool): ${enabledServers.join(", ")}.`
+      : "Enabled MCP servers: none.",
+    skills.length > 0
+      ? `Voice agent skills: ${skills.join(", ")}.`
+      : "Voice agent skills: none specified.",
+    "",
+    "If you need the current tool list, call get_admin_help.",
+  ].join("\n");
+}
+
+async function listBosunRuntimeTools(context = {}) {
+  try {
+    const { getVoiceToolDefinitions } = await import("./voice-relay.mjs");
+    const defs = await getVoiceToolDefinitions({ delegateOnly: false, context });
+    return (Array.isArray(defs) ? defs : [])
+      .map((tool) => ({
+        id: String(tool?.name || "").trim(),
+        name: String(tool?.name || "").trim(),
+        description: String(tool?.description || "").trim(),
+        category: "Bosun",
+      }))
+      .filter((tool) => Boolean(tool.id))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  } catch {
+    return [];
   }
 }
 
@@ -231,10 +449,27 @@ let _wfEngine;
 let _wfNodes;
 let _wfTemplates;
 let _wfServicesReady = false;
+let _wfServices = null;
 let _wfRecommendedInstalled = false;
+const _wfRecommendedInstalledByWorkspace = new Set();
+const _wfEngineByWorkspace = new Map();
 let _wfInitPromise = null;
 let _wfInitDone = false;
 let _wfLoadedBase = null;
+
+/**
+ * Test-only: inject a mock workflow engine module and pre-seed the per-workspace
+ * engine cache so that dispatchWorkflowEvent uses the specified mock.
+ */
+let _testDefaultEngine = null;
+export function _testInjectWorkflowEngine(mockModule, mockEngine) {
+  _wfEngine = mockModule;
+  _wfInitDone = true;
+  _wfInitPromise = null;
+  _testDefaultEngine = mockEngine || null;
+  _wfEngineByWorkspace.clear();
+}
+
 let workflowEventDedupWindowMs = (() => {
   const parsed = Number.parseInt(process.env.WORKFLOW_EVENT_DEDUP_WINDOW_MS || "15000", 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 15_000;
@@ -441,6 +676,7 @@ async function getWorkflowEngineModule() {
           meeting: meetingService,
           prompts: promptBundle?.prompts || null,
         };
+        _wfServices = services;
         _wfEngine.getWorkflowEngine({ services });
         _wfServicesReady = true;
 
@@ -533,6 +769,100 @@ async function getWorkflowEngineModule() {
   return _wfEngine;
 }
 
+function getWorkflowWorkspaceKey(workspaceDir = "") {
+  const normalized = normalizeCandidatePath(workspaceDir) || repoRoot;
+  if (process.platform === "win32") {
+    return normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+function getWorkflowStoragePaths(workspaceDir = "") {
+  const root = normalizeCandidatePath(workspaceDir) || repoRoot;
+  return {
+    workspaceRoot: root,
+    workflowDir: resolve(root, ".bosun", "workflows"),
+    runsDir: resolve(root, ".bosun", "workflow-runs"),
+  };
+}
+
+function maybeBootstrapWorkspaceWorkflowTemplates(engine, workspaceKey, workspaceLabel) {
+  if (!engine || !_wfTemplates) return;
+  if (_wfRecommendedInstalledByWorkspace.has(workspaceKey)) return;
+  try {
+    const selection = resolveWorkflowBootstrapSelection(_wfTemplates);
+    let result = { installed: [], skipped: [], errors: [] };
+    if (selection.enabled) {
+      if (
+        Array.isArray(selection.templateIds) &&
+        selection.templateIds.length > 0 &&
+        typeof _wfTemplates.installTemplateSet === "function"
+      ) {
+        result = _wfTemplates.installTemplateSet(engine, selection.templateIds);
+      } else if (
+        selection.source === "recommended" &&
+        typeof _wfTemplates.installRecommendedTemplates === "function"
+      ) {
+        result = _wfTemplates.installRecommendedTemplates(engine);
+      }
+    }
+    if (typeof _wfTemplates.reconcileInstalledTemplates === "function") {
+      _wfTemplates.reconcileInstalledTemplates(engine, {
+        autoUpdateUnmodified: true,
+      });
+    }
+    if (result.installed.length) {
+      console.log(
+        `[workflows] Installed ${result.installed.length} default workflow templates for workspace ${workspaceLabel}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[workflows] Default template install failed for workspace ${workspaceLabel}: ${err.message}`,
+    );
+  } finally {
+    _wfRecommendedInstalledByWorkspace.add(workspaceKey);
+  }
+}
+
+async function getWorkflowRequestContext(reqUrl) {
+  const workspaceContext = resolveWorkspaceContextFromRequest(reqUrl, { allowAll: false });
+  if (!workspaceContext) {
+    return { ok: false, status: 400, error: "Unknown workspace. Set a valid workspace query value." };
+  }
+  const wfMod = await getWorkflowEngineModule();
+  if (!wfMod?.WorkflowEngine) {
+    return { ok: false, status: 503, error: "Workflow engine not available" };
+  }
+  const paths = getWorkflowStoragePaths(workspaceContext.workspaceDir);
+  const workspaceKey = getWorkflowWorkspaceKey(paths.workspaceRoot);
+  let engine = _wfEngineByWorkspace.get(workspaceKey) || null;
+  if (!engine) {
+    if (_testDefaultEngine) {
+      engine = _testDefaultEngine;
+    } else {
+      engine = new wfMod.WorkflowEngine({
+        workflowDir: paths.workflowDir,
+        runsDir: paths.runsDir,
+        services: _wfServices || {},
+      });
+      engine.load();
+    }
+    _wfEngineByWorkspace.set(workspaceKey, engine);
+  }
+  maybeBootstrapWorkspaceWorkflowTemplates(
+    engine,
+    workspaceKey,
+    workspaceContext.workspaceId || workspaceKey,
+  );
+  return {
+    ok: true,
+    wfMod,
+    engine,
+    workspaceContext: { ...workspaceContext, workspaceDir: paths.workspaceRoot },
+  };
+}
+
 function allowWorkflowEvent(dedupKey, windowMs = workflowEventDedupWindowMs) {
   if (!dedupKey) return true;
   const now = Date.now();
@@ -576,10 +906,11 @@ async function dispatchWorkflowEvent(eventType, eventData = {}, opts = {}) {
       return false;
     }
 
-    const wfMod = await getWorkflowEngineModule();
-    if (!wfMod?.getWorkflowEngine) return false;
-
-    const engine = wfMod.getWorkflowEngine();
+    const wfCtx = await getWorkflowRequestContext(
+      new URL(`http://localhost?workspace=active`),
+    );
+    if (!wfCtx?.ok) return false;
+    const engine = wfCtx.engine;
     if (!engine?.evaluateTriggers || !engine?.execute) return false;
 
     const payload = buildWorkflowEventPayload(eventType, eventData, "ui-server");
@@ -1293,6 +1624,79 @@ function resolveActiveWorkspaceExecutionContext() {
     workspaceId,
     workspaceDir,
   };
+}
+
+function resolveWorkspaceContextById(workspaceId = "") {
+  const requestedId = String(workspaceId || "").trim().toLowerCase();
+  if (!requestedId) return resolveActiveWorkspaceExecutionContext();
+  const configDir = resolveUiConfigDir();
+  if (!configDir) return null;
+  const listed = listManagedWorkspaces(configDir, { repoRoot });
+  const workspace = listed.find(
+    (entry) => String(entry?.id || "").trim().toLowerCase() === requestedId,
+  );
+  if (!workspace) return null;
+  const id = String(workspace.id || "").trim();
+  return {
+    workspaceId: id,
+    workspaceDir: pickWorkspaceRepoDir(workspace) || repoRoot,
+  };
+}
+
+function resolveWorkspaceContextFromRequest(reqUrl, opts = {}) {
+  const allowAll = opts.allowAll !== false;
+  const workspaceRaw = String(reqUrl?.searchParams?.get("workspace") || "").trim();
+  const workspaceKey = workspaceRaw.toLowerCase();
+  if (allowAll && (workspaceKey === "all" || workspaceKey === "*")) {
+    return {
+      allWorkspaces: true,
+      workspaceId: "",
+      workspaceDir: repoRoot,
+      workspaceFilter: "",
+    };
+  }
+  if (!workspaceKey || workspaceKey === "active") {
+    const active = resolveActiveWorkspaceExecutionContext();
+    return {
+      allWorkspaces: false,
+      workspaceId: String(active.workspaceId || "").trim(),
+      workspaceDir: normalizeCandidatePath(active.workspaceDir) || repoRoot,
+      workspaceFilter: String(active.workspaceId || "").trim().toLowerCase(),
+    };
+  }
+  const explicit = resolveWorkspaceContextById(workspaceKey);
+  if (!explicit) return null;
+  return {
+    allWorkspaces: false,
+    workspaceId: String(explicit.workspaceId || "").trim(),
+    workspaceDir: normalizeCandidatePath(explicit.workspaceDir) || repoRoot,
+    workspaceFilter: String(explicit.workspaceId || "").trim().toLowerCase(),
+  };
+}
+
+function resolveSessionWorkspaceMeta(session) {
+  const metadata =
+    session && typeof session.metadata === "object" && session.metadata
+      ? session.metadata
+      : null;
+  return {
+    workspaceId: String(metadata?.workspaceId || "").trim().toLowerCase(),
+    workspaceDir: normalizeCandidatePath(metadata?.workspaceDir),
+  };
+}
+
+function sessionMatchesWorkspaceContext(session, workspaceContext) {
+  if (!session) return false;
+  if (!workspaceContext || workspaceContext.allWorkspaces) return true;
+  const sessionWorkspace = resolveSessionWorkspaceMeta(session);
+  if (sessionWorkspace.workspaceId) {
+    return sessionWorkspace.workspaceId === String(workspaceContext.workspaceFilter || "").trim().toLowerCase();
+  }
+  const activeWorkspaceDir = normalizeCandidatePath(workspaceContext.workspaceDir);
+  if (sessionWorkspace.workspaceDir && activeWorkspaceDir) {
+    return sessionWorkspace.workspaceDir === activeWorkspaceDir;
+  }
+  return !workspaceContext.workspaceFilter;
 }
 
 function resolveSessionWorkspaceDir(session = null) {
@@ -5634,6 +6038,128 @@ function summarizeTelemetry(metrics, days) {
   };
 }
 
+// ── Usage Analytics ─────────────────────────────────────────────────────────
+
+/**
+ * Build comprehensive usage analytics from agent-work-stream.jsonl.
+ * Aggregates agent runs, skill invocations, MCP tool calls, and daily trends.
+ *
+ * @param {number} [days]  - Look-back window in days; 0 = all time.
+ * @returns {Promise<Object>}
+ */
+async function buildUsageAnalytics(days) {
+  const logDir = resolveAgentWorkLogDir();
+  const streamPath = resolve(logDir, "agent-work-stream.jsonl");
+  const events = await readJsonlTail(streamPath, 100_000);
+
+  const cutoff = days ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+
+  let agentRuns = 0;
+  let skillInvocations = 0;
+  let mcpToolCalls = 0;
+  let oldestTs = Infinity;
+  let newestTs = 0;
+
+  /** @type {Map<string,number>} */
+  const agents = new Map();
+  /** @type {Map<string,number>} */
+  const skills = new Map();
+  /** @type {Map<string,number>} */
+  const mcpTools = new Map();
+
+  /** dailyAgents[date][executor] = count */
+  const dailyAgents = {};
+  /** dailySkills[date][skill] = count */
+  const dailySkills = {};
+  /** dailyMcp[date][tool] = count */
+  const dailyMcp = {};
+
+  const allDates = new Set();
+
+  for (const e of events) {
+    const ts = Date.parse(e.timestamp || "");
+    if (!Number.isFinite(ts)) continue;
+    if (cutoff && ts < cutoff) continue;
+    if (ts < oldestTs) oldestTs = ts;
+    if (ts > newestTs) newestTs = ts;
+    const day = (e.timestamp || "").slice(0, 10);
+    if (day) allDates.add(day);
+
+    if (e.event_type === "session_start") {
+      agentRuns++;
+      const exec = e.executor || "unknown";
+      agents.set(exec, (agents.get(exec) || 0) + 1);
+      if (day) {
+        (dailyAgents[day] = dailyAgents[day] || {})[exec] =
+          (dailyAgents[day][exec] || 0) + 1;
+      }
+    } else if (e.event_type === "skill_invoke") {
+      skillInvocations++;
+      const skill = e.data?.skill_name || e.skill_name || "unknown";
+      skills.set(skill, (skills.get(skill) || 0) + 1);
+      if (day) {
+        (dailySkills[day] = dailySkills[day] || {})[skill] =
+          (dailySkills[day][skill] || 0) + 1;
+      }
+    } else if (e.event_type === "tool_call") {
+      mcpToolCalls++;
+      const tool = e.data?.tool_name || e.tool_name || "unknown";
+      mcpTools.set(tool, (mcpTools.get(tool) || 0) + 1);
+      if (day) {
+        (dailyMcp[day] = dailyMcp[day] || {})[tool] =
+          (dailyMcp[day][tool] || 0) + 1;
+      }
+    }
+  }
+
+  const sortedDates = [...allDates].sort();
+  const dayCount = sortedDates.length || 1;
+  const total = agentRuns + skillInvocations + mcpToolCalls;
+  const avgPerDay = Math.round(total / dayCount);
+
+  const topAgents = [...agents.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+  const topSkills = [...skills.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+  const topMcpTools = [...mcpTools.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, count]) => ({ name, count }));
+
+  // Build trend series for top-6 items per category
+  const topAgentNames = topAgents.slice(0, 6).map((a) => a.name);
+  const topSkillNames = topSkills.slice(0, 6).map((s) => s.name);
+  const topMcpNames = topMcpTools.slice(0, 6).map((t) => t.name);
+
+  const trend = { dates: sortedDates, agents: {}, skills: {}, mcpTools: {} };
+  for (const name of topAgentNames) {
+    trend.agents[name] = sortedDates.map((d) => dailyAgents[d]?.[name] || 0);
+  }
+  for (const name of topSkillNames) {
+    trend.skills[name] = sortedDates.map((d) => dailySkills[d]?.[name] || 0);
+  }
+  for (const name of topMcpNames) {
+    trend.mcpTools[name] = sortedDates.map((d) => dailyMcp[d]?.[name] || 0);
+  }
+
+  return {
+    agentRuns,
+    skillInvocations,
+    mcpToolCalls,
+    avgPerDay,
+    lastActiveAt: newestTs < Infinity && newestTs > 0 ? new Date(newestTs).toISOString() : null,
+    sinceAt: oldestTs < Infinity ? new Date(oldestTs).toISOString() : null,
+    topAgents,
+    topSkills,
+    topMcpTools,
+    trend,
+  };
+}
+
 function resolveAgentWorkLogDir() {
   const candidates = [
     resolve(repoRoot, ".cache", "agent-work-logs"),
@@ -5942,7 +6468,15 @@ async function handleApi(req, res, url) {
   if (path === "/api/tasks") {
     const status = url.searchParams.get("status") || "";
     const projectId = url.searchParams.get("project") || "";
-    const workspaceFilter = (url.searchParams.get("workspace") || "").trim().toLowerCase();
+    const workspaceQueryRaw = String(url.searchParams.get("workspace") || "").trim();
+    let workspaceFilter = workspaceQueryRaw.toLowerCase();
+    if (!workspaceFilter || workspaceFilter === "active") {
+      const activeWorkspace = getActiveManagedWorkspace(resolveUiConfigDir());
+      workspaceFilter = String(activeWorkspace?.id || "").trim().toLowerCase();
+    }
+    if (workspaceFilter === "*" || workspaceFilter === "all") {
+      workspaceFilter = "";
+    }
     const repositoryFilter = (url.searchParams.get("repository") || "").trim().toLowerCase();
     const page = Math.max(0, Number(url.searchParams.get("page") || "0"));
     const pageSize = Math.min(
@@ -6545,14 +7079,34 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library") {
     try {
-      ensureLibraryInitialized();
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      ensureLibraryInitialized(libraryRoot);
       const typeRaw = (url.searchParams.get("type") || "").trim();
+      const agentTypeRaw = String(url.searchParams.get("agentType") || "").trim().toLowerCase();
       const search = (url.searchParams.get("search") || "").trim();
       const type = typeRaw && typeRaw !== "all" ? typeRaw : "";
-      const data = listEntries(repoRoot, {
+      let data = listEntries(libraryRoot, {
         type: type || undefined,
         search: search || undefined,
       });
+      data = data.map((entry) => {
+        if (entry?.type !== "agent") return entry;
+        const profile = getEntryContent(libraryRoot, entry);
+        return {
+          ...entry,
+          agentType: resolveAgentProfileType(entry, profile),
+        };
+      });
+      if (type === "agent" && (agentTypeRaw === "voice" || agentTypeRaw === "task" || agentTypeRaw === "chat")) {
+        data = data.filter((entry) => {
+          return String(entry?.agentType || "").trim().toLowerCase() === agentTypeRaw;
+        });
+      }
       jsonResponse(res, 200, { ok: true, data });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -6562,19 +7116,25 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library/entry") {
     try {
-      ensureLibraryInitialized();
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      ensureLibraryInitialized(libraryRoot);
       if (req.method === "GET") {
         const id = (url.searchParams.get("id") || "").trim();
         if (!id) {
           jsonResponse(res, 400, { ok: false, error: "id required" });
           return;
         }
-        const entry = getEntry(repoRoot, id);
+        const entry = getEntry(libraryRoot, id);
         if (!entry) {
           jsonResponse(res, 404, { ok: false, error: "not found" });
           return;
         }
-        const content = getEntryContent(repoRoot, entry);
+        const content = getEntryContent(libraryRoot, entry);
         jsonResponse(res, 200, { ok: true, data: { ...entry, content } });
         return;
       }
@@ -6582,7 +7142,7 @@ async function handleApi(req, res, url) {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
         const { content, ...entryData } = body || {};
-        const entry = upsertEntry(repoRoot, entryData, content);
+        const entry = upsertEntry(libraryRoot, entryData, content);
         jsonResponse(res, 200, { ok: true, data: entry });
         return;
       }
@@ -6594,7 +7154,7 @@ async function handleApi(req, res, url) {
           jsonResponse(res, 400, { ok: false, error: "id required" });
           return;
         }
-        const deleted = deleteEntry(repoRoot, id, { deleteFile: Boolean(body?.deleteFile) });
+        const deleted = deleteEntry(libraryRoot, id, { deleteFile: Boolean(body?.deleteFile) });
         if (!deleted) {
           jsonResponse(res, 404, { ok: false, error: "not found" });
           return;
@@ -6612,8 +7172,14 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library/scopes") {
     try {
-      ensureLibraryInitialized();
-      const result = detectScopes(repoRoot);
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      ensureLibraryInitialized(libraryRoot);
+      const result = detectScopes(libraryRoot);
       jsonResponse(res, 200, { ok: true, data: result?.scopes || [] });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -6623,7 +7189,13 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library/init" && req.method === "POST") {
     try {
-      const result = initLibrary(repoRoot);
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      const result = initLibrary(libraryRoot);
       const entriesCount = result?.manifest?.entries?.length ?? 0;
       const scaffoldedCount = result?.scaffolded?.written?.length ?? 0;
       jsonResponse(res, 200, {
@@ -6638,7 +7210,13 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library/rebuild" && req.method === "POST") {
     try {
-      const result = rebuildManifest(repoRoot);
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      const result = rebuildManifest(libraryRoot);
       jsonResponse(res, 200, {
         ok: true,
         data: {
@@ -6655,9 +7233,15 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/library/match-profile") {
     try {
-      ensureLibraryInitialized();
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
+      const libraryRoot = workspaceContext.workspaceDir || repoRoot;
+      ensureLibraryInitialized(libraryRoot);
       const title = (url.searchParams.get("title") || "").trim();
-      const match = matchAgentProfile(repoRoot, title);
+      const match = matchAgentProfile(libraryRoot, title);
       jsonResponse(res, 200, { ok: true, data: match || null });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -6757,7 +7341,14 @@ async function handleApi(req, res, url) {
   if (path === "/api/agent-tools/available") {
     try {
       const available = await listAvailableTools(repoRoot);
-      jsonResponse(res, 200, { ok: true, data: available });
+      const bosunTools = await listBosunRuntimeTools({});
+      jsonResponse(res, 200, {
+        ok: true,
+        data: {
+          ...available,
+          bosunTools,
+        },
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -6775,7 +7366,29 @@ async function handleApi(req, res, url) {
           return;
         }
         const effective = getEffectiveTools(repoRoot, agentId);
-        jsonResponse(res, 200, { ok: true, data: effective });
+        const bosunTools = await listBosunRuntimeTools({});
+        const raw = getAgentToolConfig(repoRoot, agentId);
+        const enabledSet = Array.isArray(raw?.enabledTools) && raw.enabledTools.length > 0
+          ? new Set(raw.enabledTools.map((id) => String(id || "").trim()).filter(Boolean))
+          : null;
+        const bosunToolIdSet = new Set(
+          bosunTools.map((tool) => String(tool?.id || "").trim()).filter(Boolean),
+        );
+        const hasBosunAllowlist = Boolean(
+          enabledSet && [...enabledSet].some((id) => bosunToolIdSet.has(id)),
+        );
+        const effectiveBosunTools = bosunTools.map((tool) => ({
+          ...tool,
+          enabled: hasBosunAllowlist ? enabledSet.has(tool.id) : true,
+        }));
+        jsonResponse(res, 200, {
+          ok: true,
+          data: {
+            ...effective,
+            bosunTools: effectiveBosunTools,
+            enabledTools: raw?.enabledTools ?? null,
+          },
+        });
         return;
       }
 
@@ -6892,7 +7505,7 @@ async function handleApi(req, res, url) {
           ok: true,
           activeId: String(active?.id || wsId),
         });
-        broadcastUiEvent(["workspaces", "tasks", "overview"], "invalidate", {
+        broadcastUiEvent(["workspaces", "tasks", "overview", "sessions", "workflows", "library"], "invalidate", {
           reason: "workspace-switched",
           workspaceId: wsId,
         });
@@ -7313,6 +7926,17 @@ async function handleApi(req, res, url) {
         ok: true,
         data: alerts.slice(-50),
       });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/analytics/usage") {
+    try {
+      const days = Number(url.searchParams.get("days") || "30");
+      const data = await buildUsageAnalytics(days || 0);
+      jsonResponse(res, 200, { ok: true, data });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -7886,14 +8510,14 @@ async function handleApi(req, res, url) {
    *  Workflow API endpoints
    * ═══════════════════════════════════════════════════════════ */
 
-  // Use module-scope getWorkflowEngineModule() for cross-request caching.
-  const getWorkflowEngine = getWorkflowEngineModule;
-
   if (path === "/api/workflows") {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       const all = engine.list();
       jsonResponse(res, 200, { ok: true, workflows: all.map(w => ({
         id: w.id, name: w.name, description: w.description, category: w.category,
@@ -7910,9 +8534,12 @@ async function handleApi(req, res, url) {
   if (path === "/api/workflows/save") {
     try {
       const body = await readJsonBody(req);
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       if (typeof _wfTemplates?.applyWorkflowTemplateState === "function") {
         _wfTemplates.applyWorkflowTemplateState(body);
       }
@@ -7926,8 +8553,11 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/workflows/templates") {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
       const tplMod = _wfTemplates;
       const list = tplMod.listTemplates();
       jsonResponse(res, 200, { ok: true, templates: list });
@@ -7940,10 +8570,13 @@ async function handleApi(req, res, url) {
   if (path === "/api/workflows/install-template") {
     try {
       const body = await readJsonBody(req);
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
       const tplMod = _wfTemplates;
-      const engine = wfMod.getWorkflowEngine();
+      const engine = wfCtx.engine;
       const wf = await tplMod.installTemplate(body.templateId, engine, body.overrides);
       jsonResponse(res, 200, { ok: true, workflow: wf });
     } catch (err) {
@@ -7954,9 +8587,12 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/workflows/template-updates") {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       if (typeof _wfTemplates?.reconcileInstalledTemplates === "function") {
         _wfTemplates.reconcileInstalledTemplates(engine, {
           autoUpdateUnmodified: true,
@@ -7988,9 +8624,12 @@ async function handleApi(req, res, url) {
 
   if (path.startsWith("/api/workflows/") && path.endsWith("/template-update")) {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       const workflowId = decodeURIComponent(path.split("/")[3] || "");
       if (!workflowId) {
         jsonResponse(res, 400, { ok: false, error: "Missing workflow id" });
@@ -8013,8 +8652,12 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/workflows/node-types") {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const wfMod = wfCtx.wfMod;
       const types = wfMod.listNodeTypes();
       jsonResponse(res, 200, { ok: true, nodeTypes: types.map(nt => ({
         type: nt.type,
@@ -8030,9 +8673,12 @@ async function handleApi(req, res, url) {
 
   if (path === "/api/workflows/runs") {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       const rawLimit = Number(url.searchParams.get("limit"));
       const limit = Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(rawLimit, 500)
@@ -8047,9 +8693,12 @@ async function handleApi(req, res, url) {
 
   if (path.startsWith("/api/workflows/runs/")) {
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
       const subPath = path.replace("/api/workflows/runs/", "");
       const segments = subPath.split("/").map(decodeURIComponent);
       const runId = (segments[0] || "").trim();
@@ -8131,9 +8780,12 @@ async function handleApi(req, res, url) {
     const action = segments[1] || "";
 
     try {
-      const wfMod = await getWorkflowEngine();
-      if (!wfMod) { jsonResponse(res, 503, { ok: false, error: "Workflow engine not available" }); return; }
-      const engine = wfMod.getWorkflowEngine();
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
 
       if (action === "execute" && req.method === "POST") {
         const body = await readJsonBody(req);
@@ -9018,11 +9670,20 @@ async function handleApi(req, res, url) {
   if (path === "/api/sessions" && req.method === "GET") {
     try {
       const tracker = getSessionTracker();
+      const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: true });
+      if (!workspaceContext) {
+        jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+        return;
+      }
       let sessions = tracker.listAllSessions();
       const typeFilter = url.searchParams.get("type");
       const statusFilter = url.searchParams.get("status");
       if (typeFilter) sessions = sessions.filter((s) => s.type === typeFilter);
       if (statusFilter) sessions = sessions.filter((s) => s.status === statusFilter);
+      sessions = sessions.filter((session) => {
+        const detailed = tracker.getSessionById(session.id) || session;
+        return sessionMatchesWorkspaceContext(detailed, workspaceContext);
+      });
       jsonResponse(res, 200, { ok: true, sessions });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -9068,10 +9729,24 @@ async function handleApi(req, res, url) {
   if (sessionMatch) {
     const sessionId = decodeURIComponent(sessionMatch[1]);
     const action = sessionMatch[2] || null;
+    const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+    if (!workspaceContext) {
+      jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
+      return;
+    }
+    const tracker = getSessionTracker();
+    const getScopedSession = () => {
+      const session = tracker.getSessionById(sessionId);
+      if (!session) return null;
+      return sessionMatchesWorkspaceContext(session, workspaceContext) ? session : null;
+    };
 
     if (!action && req.method === "GET") {
       try {
-        const tracker = getSessionTracker();
+        if (!getScopedSession()) {
+          jsonResponse(res, 404, { ok: false, error: "Session not found" });
+          return;
+        }
         const session = tracker.getSessionMessages(sessionId);
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
@@ -9112,8 +9787,7 @@ async function handleApi(req, res, url) {
 
     if (action === "attachments" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9165,8 +9839,7 @@ async function handleApi(req, res, url) {
 
     if (action === "stop" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9201,8 +9874,7 @@ async function handleApi(req, res, url) {
 
     if (action === "message" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9356,8 +10028,7 @@ async function handleApi(req, res, url) {
 
     if (action === "message/edit" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9394,8 +10065,7 @@ async function handleApi(req, res, url) {
 
     if (action === "archive" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9414,8 +10084,7 @@ async function handleApi(req, res, url) {
 
     if (action === "resume" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9431,8 +10100,7 @@ async function handleApi(req, res, url) {
 
     if (action === "delete" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9451,8 +10119,7 @@ async function handleApi(req, res, url) {
 
     if (action === "rename" && req.method === "POST") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 404, { ok: false, error: "Session not found" });
           return;
@@ -9474,8 +10141,7 @@ async function handleApi(req, res, url) {
 
     if (action === "diff" && req.method === "GET") {
       try {
-        const tracker = getSessionTracker();
-        const session = tracker.getSessionById(sessionId);
+        const session = getScopedSession();
         if (!session) {
           jsonResponse(res, 200, {
             ok: true,
@@ -9668,9 +10334,10 @@ async function handleApi(req, res, url) {
             // Respect it as final and issue the probe directly.
             testUrl = base;
           } else {
-            testUrl = dep
-              ? `${base}/openai/deployments/${encodeURIComponent(dep)}?api-version=2024-10-21`
-              : `${base}/openai/models?api-version=2024-10-21`;
+            // Always use /openai/models — works on both classic Azure OpenAI and
+            // Azure AI Foundry (Global Standard) where /openai/deployments/{name}
+            // returns 404.
+            testUrl = `${base}/openai/models?api-version=2024-10-21`;
           }
           if (apiKey) headers["api-key"] = apiKey;
           else {
@@ -9728,8 +10395,37 @@ async function handleApi(req, res, url) {
         clearTimeout(timer);
         const latencyMs = Date.now() - start;
         if (resp.ok || resp.status === 200) {
-          // Single-deployment GET: a 200 means both key and deployment are valid.
-          jsonResponse(res, 200, { ok: true, latencyMs });
+          // Credentials verified via /openai/models. If a deployment name was
+          // provided, do a secondary check to confirm the deployment exists.
+          if (provider === "azure" && deployment) {
+            const dep = String(deployment).trim();
+            try {
+              let base2 = String(azureEndpoint || "").replace(/\/+$/, "");
+              try { const u2 = new URL(base2); base2 = `${u2.protocol}//${u2.host}`; } catch { /* keep */ }
+              const depUrl = `${base2}/openai/deployments/${encodeURIComponent(dep)}/chat/completions?api-version=2024-10-21`;
+              const depCtrl = new AbortController();
+              const depTimer = setTimeout(() => depCtrl.abort(), 8_000);
+              const depResp = await fetch(depUrl, {
+                method: "POST",
+                headers: { ...headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
+                signal: depCtrl.signal,
+              });
+              clearTimeout(depTimer);
+              // 200 = chat model works, 400 = realtime model (expected), both confirm deployment exists
+              if (depResp.ok || depResp.status === 400) {
+                jsonResponse(res, 200, { ok: true, latencyMs, deployment: dep });
+              } else if (depResp.status === 404) {
+                jsonResponse(res, 200, { ok: false, error: `Credentials valid but deployment "${dep}" not found — check the deployment name in Azure AI Foundry`, latencyMs });
+              } else {
+                jsonResponse(res, 200, { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (HTTP ${depResp.status})` });
+              }
+            } catch {
+              jsonResponse(res, 200, { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (timeout)` });
+            }
+          } else {
+            jsonResponse(res, 200, { ok: true, latencyMs });
+          }
         } else {
           const text = await resp.text().catch(() => "");
           let errMsg = `HTTP ${resp.status}`;
@@ -9738,9 +10434,13 @@ async function handleApi(req, res, url) {
             const missing = String(errMsg || "").match(/Missing scopes?:\s*([A-Za-z0-9._:\s-]+)/i)?.[1]?.trim() || "required scopes";
             errMsg = `OpenAI Connected Account token is missing scopes (${missing}). Sign out and reconnect OpenAI in Connected Accounts. Also verify role access: org Owner/Reader, project Owner/Member, and workspace RBAC API/dashboard permissions.`;
           }
-          // Friendly message when the deployment name itself is not found (key is fine)
-          if (resp.status === 404 && deployment) {
-            errMsg = `Deployment "${deployment}" not found — check deployment name in Azure AI Foundry`;
+          // Azure-specific: provide helpful messages for common errors
+          if (provider === "azure") {
+            if (resp.status === 401 || resp.status === 403) {
+              errMsg = `Authentication failed (HTTP ${resp.status}) — check API key and endpoint URL`;
+            } else if (resp.status === 404) {
+              errMsg = `Endpoint not found (HTTP 404) — check the Azure endpoint URL. Use https://<resource>.openai.azure.com`;
+            }
           }
           jsonResponse(res, 200, { ok: false, error: errMsg, latencyMs });
         }
@@ -9967,10 +10667,33 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // GET /api/voice/agents
+  if (path === "/api/voice/agents" && req.method === "GET") {
+    try {
+      const callContext = {
+        sessionId: String(url.searchParams.get("sessionId") || "").trim() || undefined,
+      };
+      const libraryRoot = resolveVoiceLibraryRoot(callContext);
+      const { agents, selected } = resolveActiveVoiceAgent(
+        libraryRoot,
+        String(url.searchParams.get("voiceAgentId") || "").trim(),
+      );
+      jsonResponse(res, 200, {
+        ok: true,
+        agents,
+        defaultAgentId: selected?.id || null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   // POST /api/voice/token
   if (path === "/api/voice/token" && req.method === "POST") {
     try {
       const body = await readJsonBody(req).catch(() => ({}));
+      const requestedVoiceAgentId = String(body?.voiceAgentId || "").trim();
       const callContext = {
         sessionId: String(body?.sessionId || "").trim() || undefined,
         executor: String(body?.executor || "").trim() || undefined,
@@ -9978,31 +10701,56 @@ async function handleApi(req, res, url) {
         model: String(body?.model || "").trim() || undefined,
         authSource: String(authResult?.source || "").trim() || undefined,
       };
+      const libraryRoot = resolveVoiceLibraryRoot(callContext);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        requestedVoiceAgentId,
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
       const { createEphemeralToken, getVoiceToolDefinitions, getVoiceConfig, isPrivilegedVoiceContext } = await import("./voice-relay.mjs");
       const privileged = isPrivilegedVoiceContext(callContext);
       const delegateOnly =
         body?.delegateOnly === true && !privileged;
       let tools = await getVoiceToolDefinitions({ delegateOnly, context: callContext });
 
-      // Apply voice-agent tool config if present
-      try {
-        const { getAgentToolConfig } = await import("./agent-tool-config.mjs");
-        const voiceToolCfg = getAgentToolConfig(repoRoot, "voice-agent");
-        if (voiceToolCfg) {
-          const disabled = voiceToolCfg.disabledBuiltinTools || [];
-          if (disabled.length > 0 && Array.isArray(tools)) {
-            tools = tools.filter(t => !disabled.includes(String(t?.name || "")));
-          }
-        }
-      } catch { /* agent-tool-config not critical */ }
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+      tools = applyVoiceAgentToolFilters(tools, voiceToolCfg);
+      const capabilityPrompt = buildVoiceToolCapabilityPrompt(
+        tools,
+        voiceToolCfg,
+        selectedVoiceAgent,
+      );
 
-      const tokenData = await createEphemeralToken(tools, callContext);
+      const voiceCallContext = {
+        ...callContext,
+        voiceAgentId: activeVoiceAgentId,
+        voiceAgentName: selectedVoiceAgent?.name || undefined,
+        voiceAgentInstructions: selectedVoiceAgent?.voiceInstructions || undefined,
+        voiceAgentSkills: Array.isArray(selectedVoiceAgent?.skills) ? selectedVoiceAgent.skills : undefined,
+        voiceToolCapabilityPrompt: capabilityPrompt,
+        enabledMcpServers: Array.isArray(voiceToolCfg?.enabledMcpServers)
+          ? voiceToolCfg.enabledMcpServers
+          : undefined,
+      };
+      const tokenData = await createEphemeralToken(tools, voiceCallContext);
+      tokenData.voiceAgentId = activeVoiceAgentId;
+      tokenData.voiceAgentName = selectedVoiceAgent?.name || null;
+      tokenData.voiceAgentSkills = Array.isArray(selectedVoiceAgent?.skills) ? selectedVoiceAgent.skills : [];
+      tokenData.enabledMcpServers = Array.isArray(voiceToolCfg?.enabledMcpServers)
+        ? voiceToolCfg.enabledMcpServers
+        : [];
+      tokenData.tools = Array.isArray(tools) ? tools : [];
 
       // When client requests sdkMode, include extra fields for @openai/agents SDK
       if (body?.sdkMode === true) {
         const voiceCfg = getVoiceConfig();
-        tokenData.instructions = voiceCfg.instructions || undefined;
-        tokenData.tools = tools;
+        tokenData.instructions = [voiceCfg.instructions || "", capabilityPrompt]
+          .filter(Boolean)
+          .join("\n\n")
+          .trim() || undefined;
+        if (selectedVoiceAgent?.voiceInstructions) {
+          tokenData.instructions = `${tokenData.instructions || ""}\n\n${selectedVoiceAgent.voiceInstructions}`.trim();
+        }
         if (tokenData.provider === "azure") {
           tokenData.azureEndpoint = voiceCfg.azureEndpoint || undefined;
           tokenData.azureDeployment = voiceCfg.azureDeployment || undefined;
@@ -10031,6 +10779,7 @@ async function handleApi(req, res, url) {
         executor: String(body?.executor || "").trim() || undefined,
         mode: String(body?.mode || "").trim() || undefined,
         model: String(body?.model || "").trim() || undefined,
+        voiceAgentId: String(body?.voiceAgentId || "").trim() || undefined,
       };
       const options = {
         voiceId: String(body?.voiceId || "").trim() || undefined,
@@ -10049,6 +10798,7 @@ async function handleApi(req, res, url) {
   if (path === "/api/agents/tools" && req.method === "GET") {
     try {
       const { getVoiceToolDefinitions, getAllowedVoiceTools } = await import("./voice-relay.mjs");
+      const requestedVoiceAgentId = String(url.searchParams.get("voiceAgentId") || "").trim();
       const context = {
         sessionId: String(url.searchParams.get("sessionId") || "").trim() || undefined,
         executor: String(url.searchParams.get("executor") || "").trim() || undefined,
@@ -10059,14 +10809,23 @@ async function handleApi(req, res, url) {
       const allTools = await getVoiceToolDefinitions({ delegateOnly: false, context });
       const allowed = await getAllowedVoiceTools(context);
       const allowedTools = allowed instanceof Set ? allowed : null;
-      const tools = allowedTools
+      let tools = allowedTools
         ? (Array.isArray(allTools) ? allTools : []).filter((tool) => allowedTools.has(String(tool?.name || "").trim()))
         : allTools;
+      const libraryRoot = resolveVoiceLibraryRoot(context);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        requestedVoiceAgentId,
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+      tools = applyVoiceAgentToolFilters(tools, voiceToolCfg);
       jsonResponse(res, 200, {
         ok: true,
         tools: Array.isArray(tools) ? tools : [],
         allowedTools: allowedTools ? Array.from(allowedTools.values()).sort() : null,
         totalTools: Array.isArray(tools) ? tools.length : 0,
+        voiceAgentId: activeVoiceAgentId,
       });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -10092,6 +10851,7 @@ async function handleApi(req, res, url) {
         executor,
         mode,
         model,
+        voiceAgentId,
       } = body || {};
       const normalizedToolName = String(toolName || "").trim();
       if (!normalizedToolName) {
@@ -10129,8 +10889,16 @@ async function handleApi(req, res, url) {
         mode: String(mode || "").trim() || undefined,
         model: String(model || "").trim() || undefined,
         authSource: String(authResult?.source || "").trim() || undefined,
+        voiceAgentId: String(voiceAgentId || "").trim() || undefined,
       };
       const normalizedArgs = normalizeVoiceToolArgs(normalizedToolName, args || {});
+      const libraryRoot = resolveVoiceLibraryRoot(context);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        context.voiceAgentId || "",
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
       let tracker = null;
       let session = null;
       if (context.sessionId) {
@@ -10167,6 +10935,37 @@ async function handleApi(req, res, url) {
             jsonResponse(res, 400, { error: deniedMessage });
           } else {
             jsonResponse(res, 400, { ok: false, error: deniedMessage });
+          }
+          return;
+        }
+      }
+      const toolEnabledForAgent =
+        applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+      if (!toolEnabledForAgent) {
+        const deniedMessage = `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`;
+        if (isVoiceToolRoute) {
+          jsonResponse(res, 403, { error: deniedMessage });
+        } else {
+          jsonResponse(res, 403, { ok: false, error: deniedMessage });
+        }
+        return;
+      }
+      if (
+        normalizedToolName === "invoke_mcp_tool"
+        && Array.isArray(voiceToolCfg?.enabledMcpServers)
+        && voiceToolCfg.enabledMcpServers.length > 0
+      ) {
+        const requestedServer = String(
+          normalizedArgs?.server
+          || normalizedArgs?.serverId
+          || "",
+        ).trim();
+        if (requestedServer && !voiceToolCfg.enabledMcpServers.includes(requestedServer)) {
+          const deniedMessage = `MCP server "${requestedServer}" is not enabled for voice agent "${activeVoiceAgentId}"`;
+          if (isVoiceToolRoute) {
+            jsonResponse(res, 403, { error: deniedMessage });
+          } else {
+            jsonResponse(res, 403, { ok: false, error: deniedMessage });
           }
           return;
         }
@@ -10905,6 +11704,7 @@ export async function startTelegramUiServer(options = {}) {
               executor,
               mode,
               model,
+              voiceAgentId,
             } = message;
             const normalizedToolName = String(toolName || "").trim();
             if (!normalizedToolName) {
@@ -10926,6 +11726,7 @@ export async function startTelegramUiServer(options = {}) {
                   mode: String(mode || "").trim() || undefined,
                   model: String(model || "").trim() || undefined,
                   authSource: String(socket.__authSource || "").trim() || undefined,
+                  voiceAgentId: String(voiceAgentId || "").trim() || undefined,
                 };
                 const normalizedArgs = relay.normalizeVoiceToolArgs(normalizedToolName, args || {});
                 relay.getAllowedVoiceTools(context).then((allowed) => {
@@ -10937,6 +11738,44 @@ export async function startTelegramUiServer(options = {}) {
                       ts: Date.now(),
                     });
                     return;
+                  }
+                  const libraryRoot = resolveVoiceLibraryRoot(context);
+                  const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+                    libraryRoot,
+                    context.voiceAgentId || "",
+                  );
+                  const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+                  const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+                  const toolEnabledForAgent =
+                    applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+                  if (!toolEnabledForAgent) {
+                    sendWsMessage(socket, {
+                      type: "voice-tool-result",
+                      callId,
+                      error: `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                      ts: Date.now(),
+                    });
+                    return;
+                  }
+                  if (
+                    normalizedToolName === "invoke_mcp_tool"
+                    && Array.isArray(voiceToolCfg?.enabledMcpServers)
+                    && voiceToolCfg.enabledMcpServers.length > 0
+                  ) {
+                    const requestedServer = String(
+                      normalizedArgs?.server
+                      || normalizedArgs?.serverId
+                      || "",
+                    ).trim();
+                    if (requestedServer && !voiceToolCfg.enabledMcpServers.includes(requestedServer)) {
+                      sendWsMessage(socket, {
+                        type: "voice-tool-result",
+                        callId,
+                        error: `MCP server "${requestedServer}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                        ts: Date.now(),
+                      });
+                      return;
+                    }
                   }
                   // Tool is allowed — execute it
                   relay.executeVoiceTool(normalizedToolName, normalizedArgs, context).then((result) => {
@@ -10980,8 +11819,27 @@ export async function startTelegramUiServer(options = {}) {
                   mode: String(mode || "").trim() || undefined,
                   model: String(model || "").trim() || undefined,
                   authSource: String(socket.__authSource || "").trim() || undefined,
+                  voiceAgentId: String(voiceAgentId || "").trim() || undefined,
                 };
                 const normalizedArgs = relay.normalizeVoiceToolArgs(normalizedToolName, args || {});
+                const libraryRoot = resolveVoiceLibraryRoot(context);
+                const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+                  libraryRoot,
+                  context.voiceAgentId || "",
+                );
+                const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+                const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+                const toolEnabledForAgent =
+                  applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+                if (!toolEnabledForAgent) {
+                  sendWsMessage(socket, {
+                    type: "voice-tool-result",
+                    callId,
+                    error: `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                    ts: Date.now(),
+                  });
+                  return;
+                }
                 const result = await relay.executeVoiceTool(normalizedToolName, normalizedArgs, context);
                 sendWsMessage(socket, {
                   type: "voice-tool-result",

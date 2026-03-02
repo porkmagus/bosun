@@ -70,6 +70,7 @@ const VOICE_LAUNCH_QUERY_KEYS = [
   "executor",
   "mode",
   "model",
+  "voiceAgentId",
   "vision",
   "source",
   "chat_id",
@@ -127,6 +128,7 @@ function parseVoiceLaunchFromUrl() {
       executor: String(params.get("executor") || "").trim() || null,
       mode: String(params.get("mode") || "").trim() || null,
       model: String(params.get("model") || "").trim() || null,
+      voiceAgentId: String(params.get("voiceAgentId") || "").trim() || null,
     },
   };
 }
@@ -166,11 +168,13 @@ function buildBrowserFollowUrl(detail = {}) {
   const executor = String(detail?.executor || "").trim();
   const mode = String(detail?.mode || "").trim();
   const model = String(detail?.model || "").trim();
+  const voiceAgentId = String(detail?.voiceAgentId || "").trim();
   const vision = String(detail?.initialVisionSource || "").trim();
   if (sessionId) target.searchParams.set("sessionId", sessionId);
   if (executor) target.searchParams.set("executor", executor);
   if (mode) target.searchParams.set("mode", mode);
   if (model) target.searchParams.set("model", model);
+  if (voiceAgentId) target.searchParams.set("voiceAgentId", voiceAgentId);
   if (vision) target.searchParams.set("vision", vision);
   return target.toString();
 }
@@ -1464,12 +1468,14 @@ function App() {
   const [voiceExecutor, setVoiceExecutor] = useState(null);
   const [voiceAgentMode, setVoiceAgentMode] = useState(null);
   const [voiceModel, setVoiceModel] = useState(null);
+  const [voiceAgentId, setVoiceAgentId] = useState(null);
   const [voiceCallType, setVoiceCallType] = useState("voice");
   const [voiceInitialVisionSource, setVoiceInitialVisionSource] = useState(
     null,
   );
   const followWindowMode = isFollowWindowFromUrl();
   const followOverlayOpenedRef = useRef(false);
+  const externalizeInFlightRef = useRef(false);
   const [floatingCallState, setFloatingCallState] = useState(() =>
     readFloatingCallState(),
   );
@@ -1805,6 +1811,9 @@ function App() {
         const currentModel =
           String(event?.detail?.model || selectedModel.value || "").trim() ||
           null;
+        const currentVoiceAgentId =
+          String(event?.detail?.voiceAgentId || voiceAgentId || "").trim() ||
+          null;
         const explicitSessionId =
           String(event?.detail?.sessionId || "").trim() || null;
         let currentSessionId =
@@ -1836,6 +1845,7 @@ function App() {
         setVoiceExecutor(currentExecutor);
         setVoiceAgentMode(currentMode);
         setVoiceModel(currentModel);
+        setVoiceAgentId(currentVoiceAgentId);
         setVoiceCallType(requestedCallType);
         setVoiceInitialVisionSource(requestedVisionSource);
 
@@ -1859,6 +1869,7 @@ function App() {
             executor: currentExecutor || undefined,
             mode: currentMode || undefined,
             model: currentModel || undefined,
+            voiceAgentId: currentVoiceAgentId || undefined,
           });
           if (followResult?.ok) {
             const nextFloatingState = {
@@ -1868,6 +1879,7 @@ function App() {
               executor: currentExecutor,
               mode: currentMode,
               model: currentModel,
+              voiceAgentId: currentVoiceAgentId,
               initialVisionSource: requestedVisionSource,
             };
             setFloatingCallState(nextFloatingState);
@@ -1890,7 +1902,7 @@ function App() {
     globalThis.addEventListener?.("ve:open-voice-mode", handleOpenVoiceMode);
     return () =>
       globalThis.removeEventListener?.("ve:open-voice-mode", handleOpenVoiceMode);
-  }, [followWindowMode]);
+  }, [followWindowMode, voiceAgentId]);
 
   useEffect(() => {
     const onStorage = (event) => {
@@ -1912,6 +1924,7 @@ function App() {
       executor: voiceExecutor,
       mode: voiceAgentMode,
       model: voiceModel,
+      voiceAgentId,
       initialVisionSource: voiceInitialVisionSource,
     };
     setFloatingCallState(nextFloatingState);
@@ -1924,6 +1937,7 @@ function App() {
     voiceExecutor,
     voiceAgentMode,
     voiceModel,
+    voiceAgentId,
     voiceInitialVisionSource,
   ]);
 
@@ -1937,6 +1951,7 @@ function App() {
         executor: voiceExecutor,
         mode: voiceAgentMode,
         model: voiceModel,
+        voiceAgentId,
         initialVisionSource: voiceInitialVisionSource,
       };
       setFloatingCallState(nextFloatingState);
@@ -1951,6 +1966,7 @@ function App() {
     voiceExecutor,
     voiceAgentMode,
     voiceModel,
+    voiceAgentId,
     voiceInitialVisionSource,
   ]);
 
@@ -2002,7 +2018,10 @@ function App() {
           navigateTo("chat", { replace: true, skipGuard: true });
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      // Wait for UI components to mount before dispatching the voice launch
+      // event.  60 ms was too aggressive for cold-start Electron windows where
+      // JS bundles are still being parsed; 200 ms is reliably sufficient.
+      await new Promise((resolve) => setTimeout(resolve, 200));
       if (cancelled) return;
       globalThis.dispatchEvent?.(
         new CustomEvent("ve:open-voice-mode", { detail: launch.detail }),
@@ -2341,6 +2360,7 @@ function App() {
                   executor: floatingCallState?.executor,
                   mode: floatingCallState?.mode,
                   model: floatingCallState?.model,
+                  voiceAgentId: floatingCallState?.voiceAgentId,
                 });
                 if (!popupResult.ok) {
                   showToast(
@@ -2366,6 +2386,10 @@ function App() {
       onDismiss=${(detail = {}) => {
         const reason = String(detail?.reason || "").trim().toLowerCase();
         if (!followWindowMode && reason === "externalize") {
+          if (externalizeInFlightRef.current) {
+            return;
+          }
+          externalizeInFlightRef.current = true;
           const followDetail = {
             call: voiceCallType,
             sessionId: voiceSessionId,
@@ -2373,6 +2397,7 @@ function App() {
             executor: voiceExecutor,
             mode: voiceAgentMode,
             model: voiceModel,
+            voiceAgentId,
           };
           const desktopFollowApi = globalThis?.veDesktop?.follow;
           if (typeof desktopFollowApi?.open === "function") {
@@ -2390,13 +2415,17 @@ function App() {
                   executor: followDetail.executor,
                   mode: followDetail.mode,
                   model: followDetail.model,
+                  voiceAgentId: followDetail.voiceAgentId,
                   initialVisionSource: followDetail.initialVisionSource,
                 };
                 setFloatingCallState(nextFloatingState);
                 writeFloatingCallState(nextFloatingState);
                 setVoiceOverlayOpen(false);
               })
-              .catch(() => showToast("Could not open floating call window.", "error"));
+              .catch(() => showToast("Could not open floating call window.", "error"))
+              .finally(() => {
+                externalizeInFlightRef.current = false;
+              });
             return;
           }
           const popupResult = openBrowserFollowWindow(followDetail);
@@ -2405,6 +2434,7 @@ function App() {
               popupResult.reason || "Could not open floating browser call window.",
               "error",
             );
+            externalizeInFlightRef.current = false;
             return;
           }
           const nextFloatingState = {
@@ -2414,13 +2444,16 @@ function App() {
             executor: followDetail.executor,
             mode: followDetail.mode,
             model: followDetail.model,
+            voiceAgentId: followDetail.voiceAgentId,
             initialVisionSource: followDetail.initialVisionSource,
           };
           setFloatingCallState(nextFloatingState);
           writeFloatingCallState(nextFloatingState);
           setVoiceOverlayOpen(false);
+          externalizeInFlightRef.current = false;
           return;
         }
+        externalizeInFlightRef.current = false;
         if (followWindowMode && globalThis?.veDesktop?.follow?.hide) {
           globalThis.veDesktop.follow.hide().catch(() => {});
           return;
@@ -2432,6 +2465,10 @@ function App() {
       executor=${voiceExecutor}
       mode=${voiceAgentMode}
       model=${voiceModel}
+      voiceAgentId=${voiceAgentId}
+      onVoiceAgentChange=${(nextAgentId) => {
+        setVoiceAgentId(String(nextAgentId || "").trim() || null);
+      }}
       callType=${voiceCallType}
       initialVisionSource=${voiceInitialVisionSource}
       compact=${followWindowMode}

@@ -1006,6 +1006,9 @@ function App() {
   const [voiceTurnDetection, setVoiceTurnDetection] = useState("server_vad");
   const [voiceFallbackMode, setVoiceFallbackMode] = useState("browser");
   const [voiceDelegateExecutor, setVoiceDelegateExecutor] = useState("codex-sdk");
+  const [voiceTranscriptionEnabled, setVoiceTranscriptionEnabled] = useState(true);
+  const [voiceTranscriptionModel, setVoiceTranscriptionModel] = useState("gpt-4o-transcribe");
+  const [voiceAzureTranscriptionEnabled, setVoiceAzureTranscriptionEnabled] = useState(false);
   const [openaiRealtimeApiKey, setOpenaiRealtimeApiKey] = useState("");
   const [azureOpenaiRealtimeEndpoint, setAzureOpenaiRealtimeEndpoint] = useState("");
   const [azureOpenaiRealtimeApiKey, setAzureOpenaiRealtimeApiKey] = useState("");
@@ -1262,6 +1265,9 @@ function App() {
     const defaultModel = provider === "custom"
       ? (ALL_ENDPOINT_MODEL_OPTIONS[0] || "gpt-realtime-1.5")
       : (getVoiceProviderModelDefaults(provider).model || "gpt-realtime-1.5");
+    const transcriptionEnabled = ep.transcriptionEnabled == null
+      ? provider !== "azure"
+      : ep.transcriptionEnabled !== false;
     return {
       id: ep.id || `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: String(ep.name || "").trim(),
@@ -1274,6 +1280,8 @@ function App() {
       weight: typeof ep.weight === "number" ? ep.weight : 100,
       enabled: ep.enabled !== false,
       visionModel: String(ep.visionModel || "").trim(),
+      transcriptionModel: String(ep.transcriptionModel || "").trim(),
+      transcriptionEnabled,
       authSource,
     };
   };
@@ -1298,6 +1306,7 @@ function App() {
           ? String(next.endpoint || "")
           : getDefaultVoiceEndpointUrl(nextProvider, next.authSource || "apiKey");
         if (nextProvider !== "azure") next.deployment = "";
+        next.transcriptionEnabled = nextProvider === "azure" ? false : true;
       }
       if (field === "authSource" && !isEndpointUrlEditable(next.provider)) {
         next.endpoint = getDefaultVoiceEndpointUrl(next.provider, String(value || "apiKey"));
@@ -1550,6 +1559,9 @@ function App() {
       if (d.voiceTurnDetection) { setVoiceTurnDetection(d.voiceTurnDetection); }
       if (d.voiceFallbackMode) { setVoiceFallbackMode(d.voiceFallbackMode); }
       if (d.voiceDelegateExecutor) { setVoiceDelegateExecutor(d.voiceDelegateExecutor); }
+      if (d.voiceTranscriptionEnabled !== undefined) { setVoiceTranscriptionEnabled(d.voiceTranscriptionEnabled !== false); }
+      if (d.voiceTranscriptionModel) { setVoiceTranscriptionModel(d.voiceTranscriptionModel); }
+      if (d.voiceAzureTranscriptionEnabled !== undefined) { setVoiceAzureTranscriptionEnabled(d.voiceAzureTranscriptionEnabled === true); }
       if (d.openaiRealtimeApiKey) { setOpenaiRealtimeApiKey(d.openaiRealtimeApiKey); }
       if (d.azureOpenaiRealtimeEndpoint) { setAzureOpenaiRealtimeEndpoint(d.azureOpenaiRealtimeEndpoint); }
       if (d.azureOpenaiRealtimeApiKey) { setAzureOpenaiRealtimeApiKey(d.azureOpenaiRealtimeApiKey); }
@@ -1574,6 +1586,9 @@ function App() {
       if (existingVoice.turnDetection) { setVoiceTurnDetection(String(existingVoice.turnDetection)); envLoaded = true; }
       if (existingVoice.fallbackMode) { setVoiceFallbackMode(String(existingVoice.fallbackMode)); envLoaded = true; }
       if (existingVoice.delegateExecutor) { setVoiceDelegateExecutor(String(existingVoice.delegateExecutor)); envLoaded = true; }
+      if (existingVoice.transcriptionEnabled != null) { setVoiceTranscriptionEnabled(existingVoice.transcriptionEnabled !== false); envLoaded = true; }
+      if (existingVoice.transcriptionModel) { setVoiceTranscriptionModel(String(existingVoice.transcriptionModel)); envLoaded = true; }
+      if (existingVoice.azureTranscriptionEnabled != null) { setVoiceAzureTranscriptionEnabled(existingVoice.azureTranscriptionEnabled === true); envLoaded = true; }
       if (existingVoice.openaiApiKey) { setOpenaiRealtimeApiKey(String(existingVoice.openaiApiKey)); envLoaded = true; }
       if (existingVoice.azureEndpoint) { setAzureOpenaiRealtimeEndpoint(String(existingVoice.azureEndpoint)); envLoaded = true; }
       if (existingVoice.azureApiKey) { setAzureOpenaiRealtimeApiKey(String(existingVoice.azureApiKey)); envLoaded = true; }
@@ -1586,10 +1601,29 @@ function App() {
         // Auto-convert legacy flat fields to endpoint cards
         const legacyEndpoints = [];
         if (existingVoice.azureEndpoint || existingVoice.azureApiKey) {
-          legacyEndpoints.push(normalizeVoiceEndpoint({ name: "azure-primary", provider: "azure", endpoint: existingVoice.azureEndpoint || "", deployment: existingVoice.azureDeployment || "gpt-realtime-1.5", apiKey: existingVoice.azureApiKey || "", role: "primary", weight: 100 }));
+          legacyEndpoints.push(normalizeVoiceEndpoint({
+            name: "azure-primary",
+            provider: "azure",
+            endpoint: existingVoice.azureEndpoint || "",
+            deployment: existingVoice.azureDeployment || "gpt-realtime-1.5",
+            apiKey: existingVoice.azureApiKey || "",
+            role: "primary",
+            weight: 100,
+            transcriptionEnabled: existingVoice.azureTranscriptionEnabled === true,
+            transcriptionModel: existingVoice.transcriptionModel || "gpt-4o-transcribe",
+          }));
         }
         if (existingVoice.openaiApiKey) {
-          legacyEndpoints.push(normalizeVoiceEndpoint({ name: "openai-primary", provider: "openai", apiKey: existingVoice.openaiApiKey || "", model: existingVoice.model || "gpt-realtime-1.5", role: legacyEndpoints.length === 0 ? "primary" : "backup", weight: legacyEndpoints.length === 0 ? 100 : 50 }));
+          legacyEndpoints.push(normalizeVoiceEndpoint({
+            name: "openai-primary",
+            provider: "openai",
+            apiKey: existingVoice.openaiApiKey || "",
+            model: existingVoice.model || "gpt-realtime-1.5",
+            role: legacyEndpoints.length === 0 ? "primary" : "backup",
+            weight: legacyEndpoints.length === 0 ? 100 : 50,
+            transcriptionEnabled: existingVoice.transcriptionEnabled !== false,
+            transcriptionModel: existingVoice.transcriptionModel || "gpt-4o-transcribe",
+          }));
         }
         if (legacyEndpoints.length > 0) setVoiceEndpoints(legacyEndpoints);
       }
@@ -1723,6 +1757,9 @@ function App() {
       if (env.VOICE_TURN_DETECTION) { setVoiceTurnDetection(env.VOICE_TURN_DETECTION); envLoaded = true; }
       if (env.VOICE_FALLBACK_MODE) { setVoiceFallbackMode(env.VOICE_FALLBACK_MODE); envLoaded = true; }
       if (env.VOICE_DELEGATE_EXECUTOR) { setVoiceDelegateExecutor(env.VOICE_DELEGATE_EXECUTOR); envLoaded = true; }
+      if (env.VOICE_TRANSCRIPTION_ENABLED !== undefined) { setVoiceTranscriptionEnabled(env.VOICE_TRANSCRIPTION_ENABLED !== "false"); envLoaded = true; }
+      if (env.VOICE_TRANSCRIPTION_MODEL) { setVoiceTranscriptionModel(env.VOICE_TRANSCRIPTION_MODEL); envLoaded = true; }
+      if (env.VOICE_AZURE_TRANSCRIPTION_ENABLED !== undefined) { setVoiceAzureTranscriptionEnabled(env.VOICE_AZURE_TRANSCRIPTION_ENABLED === "true"); envLoaded = true; }
       if (env.OPENAI_REALTIME_API_KEY) { setOpenaiRealtimeApiKey(env.OPENAI_REALTIME_API_KEY); envLoaded = true; }
       if (env.AZURE_OPENAI_REALTIME_ENDPOINT) { setAzureOpenaiRealtimeEndpoint(env.AZURE_OPENAI_REALTIME_ENDPOINT); envLoaded = true; }
       if (env.AZURE_OPENAI_REALTIME_API_KEY) { setAzureOpenaiRealtimeApiKey(env.AZURE_OPENAI_REALTIME_API_KEY); envLoaded = true; }
@@ -1730,10 +1767,29 @@ function App() {
       // Build voiceEndpoints from env vars if not already populated from config
       const envEps = [];
       if (env.AZURE_OPENAI_REALTIME_ENDPOINT || env.AZURE_OPENAI_REALTIME_API_KEY) {
-        envEps.push(normalizeVoiceEndpoint({ name: "azure-primary", provider: "azure", endpoint: env.AZURE_OPENAI_REALTIME_ENDPOINT || "", deployment: env.AZURE_OPENAI_REALTIME_DEPLOYMENT || "gpt-realtime-1.5", apiKey: env.AZURE_OPENAI_REALTIME_API_KEY || "", role: "primary", weight: 100 }));
+        envEps.push(normalizeVoiceEndpoint({
+          name: "azure-primary",
+          provider: "azure",
+          endpoint: env.AZURE_OPENAI_REALTIME_ENDPOINT || "",
+          deployment: env.AZURE_OPENAI_REALTIME_DEPLOYMENT || "gpt-realtime-1.5",
+          apiKey: env.AZURE_OPENAI_REALTIME_API_KEY || "",
+          role: "primary",
+          weight: 100,
+          transcriptionEnabled: env.VOICE_AZURE_TRANSCRIPTION_ENABLED === "true",
+          transcriptionModel: env.VOICE_TRANSCRIPTION_MODEL || "gpt-4o-transcribe",
+        }));
       }
       if (env.OPENAI_REALTIME_API_KEY) {
-        envEps.push(normalizeVoiceEndpoint({ name: "openai-primary", provider: "openai", apiKey: env.OPENAI_REALTIME_API_KEY, model: env.VOICE_MODEL || "gpt-realtime-1.5", role: envEps.length === 0 ? "primary" : "backup", weight: envEps.length === 0 ? 100 : 50 }));
+        envEps.push(normalizeVoiceEndpoint({
+          name: "openai-primary",
+          provider: "openai",
+          apiKey: env.OPENAI_REALTIME_API_KEY,
+          model: env.VOICE_MODEL || "gpt-realtime-1.5",
+          role: envEps.length === 0 ? "primary" : "backup",
+          weight: envEps.length === 0 ? 100 : 50,
+          transcriptionEnabled: env.VOICE_TRANSCRIPTION_ENABLED !== "false",
+          transcriptionModel: env.VOICE_TRANSCRIPTION_MODEL || "gpt-4o-transcribe",
+        }));
       }
       if (envEps.length > 0) { setVoiceEndpoints((prev) => (prev.length > 0 ? prev : envEps)); envLoaded = true; }
       const resolvedVoiceProvider = String(env.VOICE_PROVIDER || existingVoice.provider || d.voiceProvider || voiceProvider || "openai").trim().toLowerCase();
@@ -2093,6 +2149,9 @@ function App() {
           voiceTurnDetection,
           voiceFallbackMode,
           voiceDelegateExecutor,
+          voiceTranscriptionEnabled,
+          voiceTranscriptionModel,
+          voiceAzureTranscriptionEnabled,
           openaiRealtimeApiKey,
           azureOpenaiRealtimeEndpoint,
           azureOpenaiRealtimeApiKey,
@@ -2167,12 +2226,29 @@ function App() {
             turnDetection: voiceTurnDetection,
             fallbackMode: voiceFallbackMode,
             delegateExecutor: voiceDelegateExecutor,
+            transcriptionEnabled: voiceTranscriptionEnabled !== false,
+            transcriptionModel: String(voiceTranscriptionModel || "").trim() || "gpt-4o-transcribe",
+            azureTranscriptionEnabled: voiceAzureTranscriptionEnabled === true,
             azureDeployment: primaryAzureEp?.deployment || primaryVoiceProvider.azureDeployment || azureOpenaiRealtimeDeployment,
             openaiApiKey: primaryOpenAIEp?.apiKey || openaiRealtimeApiKey,
             azureEndpoint: primaryAzureEp?.endpoint || azureOpenaiRealtimeEndpoint,
             azureApiKey: primaryAzureEp?.apiKey || azureOpenaiRealtimeApiKey,
             providers: normalizedVoiceProviders.slice(0, 5),
-            voiceEndpoints: voiceEndpoints.filter((ep) => ep.endpoint || ep.apiKey || ep.deployment || ep.model).map((ep) => ({ id: ep.id, name: ep.name, provider: ep.provider, endpoint: ep.endpoint, deployment: ep.deployment, apiKey: ep.apiKey, model: ep.model, visionModel: ep.visionModel, role: ep.role, weight: ep.weight, enabled: ep.enabled })),
+            voiceEndpoints: voiceEndpoints.filter((ep) => ep.endpoint || ep.apiKey || ep.deployment || ep.model).map((ep) => ({
+              id: ep.id,
+              name: ep.name,
+              provider: ep.provider,
+              endpoint: ep.endpoint,
+              deployment: ep.deployment,
+              apiKey: ep.apiKey,
+              model: ep.model,
+              visionModel: ep.visionModel,
+              transcriptionModel: ep.transcriptionModel,
+              transcriptionEnabled: ep.transcriptionEnabled !== false,
+              role: ep.role,
+              weight: ep.weight,
+              enabled: ep.enabled,
+            })),
             failover: {
               enabled: true,
               maxAttempts: voiceFailoverMaxAttempts,
@@ -3781,6 +3857,40 @@ function App() {
               </select>
               <div class="hint">Pick the same executor family you trust for task execution to keep behavior consistent.</div>
             </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+                <input
+                  type="checkbox"
+                  checked=${voiceTranscriptionEnabled}
+                  onchange=${(e) => setVoiceTranscriptionEnabled(e.target.checked)}
+                  style="width:auto;padding:0;margin:0;accent-color:var(--accent);cursor:pointer"
+                />
+                Enable Input Transcription (OpenAI-compatible)
+              </label>
+              <div class="hint">Controls VOICE_TRANSCRIPTION_ENABLED for default realtime sessions.</div>
+            </div>
+            <div class="form-group">
+              <label>Transcription Model</label>
+              <input
+                type="text"
+                value=${voiceTranscriptionModel}
+                oninput=${(e) => setVoiceTranscriptionModel(e.target.value)}
+                placeholder="gpt-4o-transcribe"
+              />
+              <div class="hint">Controls VOICE_TRANSCRIPTION_MODEL for OpenAI/Azure endpoint defaults.</div>
+            </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+                <input
+                  type="checkbox"
+                  checked=${voiceAzureTranscriptionEnabled}
+                  onchange=${(e) => setVoiceAzureTranscriptionEnabled(e.target.checked)}
+                  style="width:auto;padding:0;margin:0;accent-color:var(--accent);cursor:pointer"
+                />
+                Enable Azure Input Transcription
+              </label>
+              <div class="hint">Controls VOICE_AZURE_TRANSCRIPTION_ENABLED. Default is OFF to reduce Azure item-level transcription errors.</div>
+            </div>
           </div>
           <div class="form-group">
             <label style="font-weight:600;display:block;margin-bottom:4px">Voice Endpoints</label>
@@ -3850,9 +3960,14 @@ function App() {
                       <input type="text" value=${ep.endpoint} oninput=${(e) => updateVoiceEndpoint(i, "endpoint", e.target.value)} placeholder="https://&lt;resource&gt;.openai.azure.com" />
                     </div>
                     <div class="form-group">
-                      <label>Deployment</label>
-                      <input type="text" value=${ep.deployment} oninput=${(e) => updateVoiceEndpoint(i, "deployment", e.target.value)} placeholder="gpt-realtime-1.5" />
-                      <div class="hint">Connectivity tests use the endpoint URL exactly as entered. If you provide only a host, Bosun appends the default Azure OpenAI probe route.</div>
+                      <label>Deployment Name</label>
+                      <input type="text" value=${ep.deployment} oninput=${(e) => updateVoiceEndpoint(i, "deployment", e.target.value)} placeholder="my-gpt-4o-realtime" />
+                      <div class="hint">The deployment name from Azure AI Foundry (not the model name). Find it under your resource → Deployments. Leave empty to test credentials only.</div>
+                    </div>
+                    <div class="form-group">
+                      <label>Audio Model (Realtime)</label>
+                      <input type="text" value=${ep.model} oninput=${(e) => updateVoiceEndpoint(i, "model", e.target.value)} placeholder="gpt-4o-realtime-preview" />
+                      <div class="hint">The underlying model name (e.g. gpt-4o-realtime-preview). Used at runtime.</div>
                     </div>
                   `}
                   ${ep.provider === "custom" && html`
@@ -3933,6 +4048,34 @@ function App() {
                     <input type="text" value=${ep.visionModel || ""} oninput=${(e) => updateVoiceEndpoint(i, "visionModel", e.target.value)} placeholder="e.g. gpt-4.1-nano" />
                     <div class="hint">Optional model for vision/image tasks on this endpoint.</div>
                   </div>
+                  ${(ep.provider === "openai" || ep.provider === "azure") && html`
+                    <div class="form-group">
+                      <label>Transcription Model</label>
+                      <input
+                        type="text"
+                        value=${ep.transcriptionModel || ""}
+                        oninput=${(e) => updateVoiceEndpoint(i, "transcriptionModel", e.target.value)}
+                        placeholder="gpt-4o-transcribe"
+                      />
+                      <div class="hint">Leave blank to use global VOICE_TRANSCRIPTION_MODEL.</div>
+                    </div>
+                    <div class="form-group">
+                      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+                        <input
+                          type="checkbox"
+                          checked=${ep.transcriptionEnabled !== false}
+                          onchange=${(e) => updateVoiceEndpoint(i, "transcriptionEnabled", e.target.checked)}
+                          style="width:auto;padding:0;margin:0;accent-color:var(--accent);cursor:pointer"
+                        />
+                        Enable Input Transcription
+                      </label>
+                      <div class="hint">
+                        ${ep.provider === "azure"
+                          ? "Azure defaults to OFF unless explicitly enabled."
+                          : "OpenAI defaults to ON unless explicitly disabled."}
+                      </div>
+                    </div>
+                  `}
                 </div>
                 <!-- Test Connection -->
                 <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
@@ -4333,4 +4476,3 @@ render(html`<${App} />`, document.getElementById("app"));
 </body>
 <script defer src="https://cloud.umami.is/script.js" data-website-id="24c5d605-7f25-4be5-875e-25c8f3cb4059"></script>
 </html>
-

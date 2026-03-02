@@ -1225,6 +1225,58 @@ describe("WorkflowEngine trigger evaluation", () => {
     });
     expect(nonMeetingHits).toHaveLength(0);
   });
+
+  it("evaluateScheduleTriggers fires workflows whose interval has elapsed", () => {
+    const wf = makeSimpleWorkflow(
+      [
+        {
+          id: "sched-trigger",
+          type: "trigger.schedule",
+          label: "Every 5min",
+          config: { intervalMs: 300000 },
+        },
+        {
+          id: "act",
+          type: "action.set_variable",
+          label: "Set",
+          config: { key: "ran", value: "yes" },
+        },
+      ],
+      [{ source: "sched-trigger", target: "act" }],
+      { id: "sched-wf", name: "Scheduled Workflow" },
+    );
+    engine.save(wf);
+
+    // No previous runs → should trigger
+    const hits = engine.evaluateScheduleTriggers();
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      workflowId: "sched-wf",
+      triggeredBy: "sched-trigger",
+    });
+  });
+
+  it("evaluateScheduleTriggers skips disabled workflows", () => {
+    const wf = {
+      id: "sched-disabled",
+      name: "Disabled Sched",
+      enabled: false,
+      nodes: [
+        {
+          id: "sched-trigger",
+          type: "trigger.schedule",
+          label: "Every 5min",
+          config: { intervalMs: 300000 },
+        },
+      ],
+      edges: [],
+      variables: {},
+    };
+    engine.save(wf);
+
+    const hits = engine.evaluateScheduleTriggers();
+    expect(hits.some((h) => h.workflowId === "sched-disabled")).toBe(false);
+  });
 });
 
 describe("Session chaining - action.run_agent", () => {

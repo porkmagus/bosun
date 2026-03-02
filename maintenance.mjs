@@ -28,6 +28,26 @@ import {
 } from "./worktree-manager.mjs";
 
 const isWindows = process.platform === "win32";
+
+// ── Workflow event bridge ─────────────────────────────────────────────────
+// Lazy-loaded to avoid circular imports (monitor → maintenance → monitor).
+let _queueWorkflowEvent = null;
+function emitMaintenanceEvent(eventType, data = {}) {
+  if (_queueWorkflowEvent) {
+    _queueWorkflowEvent(eventType, data);
+    return;
+  }
+  import("./monitor.mjs")
+    .then((mod) => {
+      if (typeof mod.queueWorkflowEvent === "function") {
+        _queueWorkflowEvent = mod.queueWorkflowEvent;
+        _queueWorkflowEvent(eventType, data);
+      }
+    })
+    .catch(() => {
+      /* best-effort — monitor not available during tests */
+    });
+}
 const BRANCH_SYNC_LOG_THROTTLE_MS = Math.max(
   5_000,
   Number(process.env.BRANCH_SYNC_LOG_THROTTLE_MS || "300000") || 300000,
@@ -1318,11 +1338,7 @@ export async function runMaintenanceSweep(opts = {}) {
     /* best-effort */
   }
 
-  console.log(
-    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted`,
-  );
-
-  return {
+  const result = {
     staleKilled,
     pushesReaped,
     worktreesPruned,
@@ -1330,4 +1346,13 @@ export async function runMaintenanceSweep(opts = {}) {
     tasksArchived,
     branchesDeleted,
   };
+
+  console.log(
+    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted`,
+  );
+
+  // Emit workflow event so event-driven workflows can react to sweep results
+  emitMaintenanceEvent("maintenance.sweep_complete", result);
+
+  return result;
 }

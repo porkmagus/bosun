@@ -100,6 +100,12 @@ import {
   VE_ORCHESTRATOR_LITE_TEMPLATE,
 } from "./workflow-templates/task-lifecycle.mjs";
 
+// Task Batch (parallel dispatch)
+import {
+  TASK_BATCH_PROCESSOR_TEMPLATE,
+  TASK_BATCH_PR_TEMPLATE,
+} from "./workflow-templates/task-batch.mjs";
+
 // ── Re-export individual templates for direct import ────────────────────────
 
 export {
@@ -139,6 +145,8 @@ export {
   SECRET_SCANNER_TEMPLATE,
   TASK_LIFECYCLE_TEMPLATE,
   VE_ORCHESTRATOR_LITE_TEMPLATE,
+  TASK_BATCH_PROCESSOR_TEMPLATE,
+  TASK_BATCH_PR_TEMPLATE,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -201,6 +209,9 @@ export const WORKFLOW_TEMPLATES = Object.freeze([
   // ── Task Lifecycle (workflow-first core) ──
   TASK_LIFECYCLE_TEMPLATE,
   VE_ORCHESTRATOR_LITE_TEMPLATE,
+  // ── Task Batch (parallel dispatch) ──
+  TASK_BATCH_PROCESSOR_TEMPLATE,
+  TASK_BATCH_PR_TEMPLATE,
 ]);
 
 const _TEMPLATE_BY_ID = new Map(
@@ -490,6 +501,7 @@ export const WORKFLOW_SETUP_PROFILES = Object.freeze({
       "template-task-archiver",
       "template-sync-engine",
       "template-sdk-conflict-resolver",
+      "template-task-batch-processor",
     ]),
   }),
   workflowFirst: Object.freeze({
@@ -534,6 +546,9 @@ export const WORKFLOW_SETUP_PROFILES = Object.freeze({
       "template-release-pipeline",
       // Security
       "template-dependency-audit",
+      // Batch dispatch
+      "template-task-batch-processor",
+      "template-task-batch-pr",
     ]),
   }),
 });

@@ -14,6 +14,13 @@
  */
 
 import { signal, computed } from "@preact/signals";
+import {
+  ensureMicTrackingPatched,
+  registerMicStream,
+  stopTrackedMicStreams,
+} from "./mic-track-registry.js";
+import { shouldAutoBargeIn } from "./voice-barge-in.js";
+import { isVoiceMicMuted } from "./voice-client.js";
 
 // ── State Signals (same shape as voice-client.js) ───────────────────────────
 
@@ -49,6 +56,7 @@ let _callContext = {
   executor: null,
   mode: null,
   model: null,
+  voiceAgentId: null,
 };
 let _sdkConfig = null;
 let _usingLegacyFallback = false;
@@ -64,6 +72,13 @@ let _pendingAssistantTranscriptText = "";
 let _awaitingToolCompletionAck = false;
 let _toolCompletionAckTimer = null;
 let _assistantBaselineBeforeToolAck = "";
+const _sdkCapturedMicStreams = new Set();
+let _lastAutoBargeInAt = 0;
+const AUTO_BARGE_IN_COOLDOWN_MS = 700;
+// Set to true by stopSdkVoiceSession() so that any in-flight getUserMedia
+// call in startAgentsSdkSession / startGeminiMicCapture releases the track
+// immediately instead of leaving the browser mic indicator active.
+let _sdkExplicitStop = false;
 
 // ── Event System ────────────────────────────────────────────────────────────
 
@@ -86,12 +101,31 @@ function emit(event, data) {
   }
 }
 
+function maybeAutoInterruptSdkResponse(reason = "speech-started") {
+  const now = Date.now();
+  if (!shouldAutoBargeIn({
+    muted: isVoiceMicMuted.value,
+    audioActive: Boolean(_session),
+    now,
+    lastTriggeredAt: _lastAutoBargeInAt,
+    minIntervalMs: AUTO_BARGE_IN_COOLDOWN_MS,
+  })) {
+    return false;
+  }
+  _lastAutoBargeInAt = now;
+  interruptSdkResponse();
+  sdkVoiceState.value = "listening";
+  emit("auto-barge-in", { reason });
+  return true;
+}
+
 function _normalizeCallContext(options = {}) {
   return {
     sessionId: String(options?.sessionId || "").trim() || null,
     executor: String(options?.executor || "").trim() || null,
     mode: String(options?.mode || "").trim() || null,
     model: String(options?.model || "").trim() || null,
+    voiceAgentId: String(options?.voiceAgentId || "").trim() || null,
   };
 }
 
@@ -120,6 +154,14 @@ function isNonFatalSdkSessionError(err) {
   if (!message) return false;
   // Seen during transient renegotiation on some browsers even when stream remains active.
   if (/setRemoteDescription/i.test(message) && /SessionDescription/i.test(message)) {
+    return true;
+  }
+  // Runtime item-level transcription failures should not hard-fail the live call.
+  if (
+    lower.includes("input transcription failed")
+    || lower.includes("transcription failed for item")
+    || lower.includes("input_audio_transcription")
+  ) {
     return true;
   }
   return false;
@@ -367,6 +409,7 @@ async function startAgentsSdkSession(config, options = {}) {
       executor: _callContext.executor || undefined,
       mode: _callContext.mode || undefined,
       model: _callContext.model || undefined,
+      voiceAgentId: _callContext.voiceAgentId || undefined,
       delegateOnly: false,
       sdkMode: true,
     }),
@@ -399,6 +442,7 @@ async function startAgentsSdkSession(config, options = {}) {
               executor: _callContext.executor || undefined,
               mode: _callContext.mode || undefined,
               model: _callContext.model || undefined,
+              voiceAgentId: _callContext.voiceAgentId || undefined,
             }),
           });
         } catch (fetchErr) {
@@ -459,6 +503,12 @@ async function startAgentsSdkSession(config, options = {}) {
   const model = String(tokenData.model || resolvedConfig.model || "gpt-realtime-1.5").trim();
   const voiceId = String(tokenData.voiceId || resolvedConfig.voiceId || "alloy").trim();
   const turnDetection = String(resolvedConfig.turnDetection || "semantic_vad").trim();
+  // Use server-provided transcription model from sessionConfig, fall back to default
+  const serverSessionConfig = tokenData?.sessionConfig || {};
+  const transcriptionModel =
+    serverSessionConfig?.input_audio_transcription?.model || "gpt-4o-transcribe";
+  const transcriptionEnabled =
+    serverSessionConfig?.input_audio_transcription !== undefined;
   const turnDetectionConfig = {
     type: turnDetection,
     ...(turnDetection === "server_vad"
@@ -491,13 +541,13 @@ async function startAgentsSdkSession(config, options = {}) {
       audio: {
         input: {
           format: "pcm16",
-          transcription: { model: "gpt-4o-transcribe" },
+          ...(transcriptionEnabled ? { transcription: { model: transcriptionModel } } : {}),
           turnDetection: turnDetectionConfig,
         },
         output: {
           format: "pcm16",
           voice: voiceId,
-          transcription: { model: "gpt-4o-transcribe" },
+          ...(transcriptionEnabled ? { transcription: { model: transcriptionModel } } : {}),
         },
       },
     },
@@ -538,6 +588,11 @@ async function startAgentsSdkSession(config, options = {}) {
   session.on("audio_interrupted", () => {
     sdkVoiceState.value = "listening";
     emit("interrupt", {});
+  });
+
+  session.on("speech_started", () => {
+    maybeAutoInterruptSdkResponse("speech-started");
+    emit("speech-started", {});
   });
 
   session.on("tool_call_start", (event) => {
@@ -630,7 +685,35 @@ async function startAgentsSdkSession(config, options = {}) {
     // ignore URL logging issues
   }
 
-  await session.connect(connectOpts);
+  // Attempt WebRTC connection first. For Azure, if it fails (404 — WebRTC not
+  // supported), retry with the WebSocket URL so the SDK uses WS transport.
+  // Wrap getUserMedia during connect so we can always stop SDK-owned mic tracks
+  // on teardown, even if the SDK keeps hidden stream references.
+  await _withGetUserMediaCapture(async () => {
+    try {
+      await session.connect(connectOpts);
+    } catch (connectErr) {
+      const errMsg = String(connectErr?.message || "");
+      const isWebRtc404 = /404|not found|SDP/i.test(errMsg);
+      const hasWsUrl = Boolean(String(tokenData?.wsUrl || "").trim());
+      if (isWebRtc404 && hasWsUrl && tokenData.provider === "azure") {
+        console.warn("[voice-client-sdk] WebRTC connect failed (404) — retrying via Azure WebSocket");
+        await session.connect({ ...connectOpts, url: tokenData.wsUrl });
+      } else {
+        throw connectErr;
+      }
+    }
+  });
+
+  // Guard: stopSdkVoiceSession() may have been called while session.connect()
+  // was awaiting.  Release any mic streams captured during connect so that the
+  // browser indicator goes away, then abort this session setup.
+  if (_sdkExplicitStop) {
+    _stopCapturedSdkMicStreams();
+    stopTrackedMicStreams();
+    try { session.close?.(); } catch { /* ignore */ }
+    throw new Error("SDK session was stopped during connection");
+  }
 
   if (_agentsRealtimeModuleSource) {
     console.info(`[voice-client-sdk] using OpenAI Realtime SDK from ${_agentsRealtimeModuleSource}`);
@@ -689,6 +772,7 @@ async function startGeminiLiveSession(config, options = {}) {
         executor: _callContext.executor,
         mode: _callContext.mode,
         model: resolvedConfig.model,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
       }));
 
       _session = ws;
@@ -757,6 +841,17 @@ async function startGeminiMicCapture(ws) {
       channelCount: 1,
     },
   });
+  registerMicStream(_geminiMicStream);
+
+  // Guard: stopSdkVoiceSession() may have raced with this getUserMedia await.
+  // Release the mic immediately instead of leaving the indicator active.
+  if (_sdkExplicitStop) {
+    for (const track of _geminiMicStream.getTracks()) {
+      try { track.stop(); } catch { /* ignore */ }
+    }
+    _geminiMicStream = null;
+    throw new Error("SDK session was stopped during microphone acquisition");
+  }
 
   // Use MediaRecorder to stream chunks to server
   const recorder = new MediaRecorder(_geminiMicStream, {
@@ -776,45 +871,118 @@ async function startGeminiMicCapture(ws) {
   sdkVoiceState.value = "listening";
 }
 
+function forEachAudioTrackInSource(source, cb) {
+  if (!source || typeof cb !== "function") return;
+  const seenObjects = new Set();
+  const seenTracks = new Set();
+  const queue = [{ node: source, depth: 0 }];
+  let visited = 0;
+
+  while (queue.length) {
+    const { node, depth } = queue.shift();
+    if (!node || (typeof node !== "object" && typeof node !== "function")) continue;
+    if (seenObjects.has(node)) continue;
+    seenObjects.add(node);
+    visited += 1;
+    if (visited > 220 || depth > 4) continue;
+
+    if (typeof node?.getTracks === "function") {
+      try {
+        for (const track of node.getTracks()) {
+          if (!track || String(track?.kind || "").toLowerCase() !== "audio") continue;
+          if (seenTracks.has(track)) continue;
+          seenTracks.add(track);
+          cb(track);
+        }
+      } catch {
+        // ignore stream enumeration failures
+      }
+    }
+
+    if (typeof node?.getSenders === "function") {
+      try {
+        for (const sender of node.getSenders()) {
+          const track = sender?.track;
+          if (!track || String(track?.kind || "").toLowerCase() !== "audio") continue;
+          if (seenTracks.has(track)) continue;
+          seenTracks.add(track);
+          cb(track);
+        }
+      } catch {
+        // ignore pc sender failures
+      }
+    }
+
+    let values = null;
+    try {
+      values = Object.values(node);
+    } catch {
+      values = null;
+    }
+    if (!values) continue;
+    for (const next of values) {
+      if (!next || (typeof next !== "object" && typeof next !== "function")) continue;
+      queue.push({ node: next, depth: depth + 1 });
+    }
+  }
+}
+
 function stopMicLikeTracks(source) {
-  if (!source) return;
-  const streams = [
-    source,
-    source?.stream,
-    source?.localStream,
-    source?.mediaStream,
-    source?._mediaStream,
-    source?.audioInputStream,
-    source?.transport?.stream,
-    source?.transport?.localStream,
-    source?.transport?.mediaStream,
-    source?.transport?._mediaStream,
-  ].filter(Boolean);
+  forEachAudioTrackInSource(source, (track) => {
+    try { track.stop(); } catch { /* ignore */ }
+  });
+}
 
-  for (const stream of streams) {
-    if (typeof stream?.getTracks !== "function") continue;
-    for (const track of stream.getTracks()) {
-      if (String(track?.kind || "").toLowerCase() !== "audio") continue;
-      try { track.stop(); } catch { /* ignore */ }
+function _captureSdkMicStream(stream) {
+  if (!stream || typeof stream.getTracks !== "function") return;
+  const hasAudio = (stream.getAudioTracks?.() || []).length > 0;
+  if (!hasAudio) return;
+  _sdkCapturedMicStreams.add(stream);
+}
+
+function _stopCapturedSdkMicStreams() {
+  for (const stream of _sdkCapturedMicStreams) {
+    try {
+      for (const track of stream.getTracks()) {
+        if (String(track?.kind || "").toLowerCase() !== "audio") continue;
+        try { track.stop(); } catch { /* ignore */ }
+      }
+    } catch {
+      // best effort
     }
   }
+  _sdkCapturedMicStreams.clear();
+}
 
-  const pcs = [
-    source?.pc,
-    source?._pc,
-    source?.peerConnection,
-    source?.transport?.pc,
-    source?.transport?._pc,
-    source?.transport?.peerConnection,
-  ].filter(Boolean);
-  for (const pc of pcs) {
-    if (typeof pc?.getSenders !== "function") continue;
-    for (const sender of pc.getSenders()) {
-      const track = sender?.track;
-      if (!track || String(track.kind || "").toLowerCase() !== "audio") continue;
-      try { track.stop(); } catch { /* ignore */ }
-    }
+async function _withGetUserMediaCapture(fn) {
+  const mediaDevices = globalThis?.navigator?.mediaDevices;
+  const original = mediaDevices?.getUserMedia;
+  if (!mediaDevices || typeof original !== "function") {
+    return await fn();
   }
+  mediaDevices.getUserMedia = async (...args) => {
+    const stream = await original.apply(mediaDevices, args);
+    _captureSdkMicStream(stream);
+    return stream;
+  };
+  try {
+    return await fn();
+  } finally {
+    mediaDevices.getUserMedia = original;
+  }
+}
+
+function setMicLikeTracksEnabled(source, enabled) {
+  let updated = false;
+  forEachAudioTrackInSource(source, (track) => {
+    try {
+      track.enabled = Boolean(enabled);
+      updated = true;
+    } catch {
+      // ignore per-track failures
+    }
+  });
+  return updated;
 }
 
 function handleGeminiServerEvent(msg) {
@@ -849,6 +1017,7 @@ function handleGeminiServerEvent(msg) {
       break;
 
     case "speech_started":
+      maybeAutoInterruptSdkResponse("speech-started");
       sdkVoiceState.value = "listening";
       emit("speech-started", {});
       break;
@@ -888,6 +1057,7 @@ async function handleGeminiToolCall(msg) {
         executor: _callContext.executor || undefined,
         mode: _callContext.mode || undefined,
         model: _callContext.model || undefined,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
       }),
     });
     const result = await res.json();
@@ -955,11 +1125,14 @@ function playGeminiAudio(data) {
  * @returns {Promise<{ sdk: boolean, provider: string }>}
  */
 export async function startSdkVoiceSession(options = {}) {
+  ensureMicTrackingPatched();
+  _sdkExplicitStop = false; // reset before each new session attempt
   if (_session) {
     console.warn("[voice-client-sdk] Session already active");
     return { sdk: sdkVoiceSdkActive.value, provider: sdkVoiceProvider.value };
   }
 
+  isVoiceMicMuted.value = false;
   _callContext = _normalizeCallContext(options);
   sdkVoiceBoundSessionId.value = _callContext.sessionId;
   sdkVoiceState.value = "connecting";
@@ -968,6 +1141,7 @@ export async function startSdkVoiceSession(options = {}) {
   sdkVoiceResponse.value = "";
   sdkVoiceToolCalls.value = [];
   _usingLegacyFallback = false;
+  _lastAutoBargeInAt = 0;
   _resetTranscriptPersistenceState();
 
   try {
@@ -1018,6 +1192,7 @@ export async function startSdkVoiceSession(options = {}) {
     sdkVoiceSdkActive.value = false;
     sdkVoiceState.value = "idle";
     sdkVoiceError.value = null; // Don't show error — we'll fallback
+    _stopCapturedSdkMicStreams();
     emit("sdk-unavailable", {
       reason: reason || "SDK unavailable",
       provider: _sdkConfig?.provider || "unknown",
@@ -1035,6 +1210,9 @@ export async function startSdkVoiceSession(options = {}) {
  * Stop the current SDK voice session.
  */
 export function stopSdkVoiceSession() {
+  // Set before any cleanup so in-flight getUserMedia / session.connect awaiters
+  // detect the cancellation and release acquired mic tracks immediately.
+  _sdkExplicitStop = true;
   emit("session-ending", { sessionId: sdkVoiceSessionId.value });
   _flushPendingTranscriptBuffers();
   if (_geminiRecorder) {
@@ -1055,6 +1233,7 @@ export function stopSdkVoiceSession() {
     }
     _session = null;
   }
+  _stopCapturedSdkMicStreams();
 
   // Stop Gemini mic stream if active
   if (_geminiMicStream) {
@@ -1063,6 +1242,9 @@ export function stopSdkVoiceSession() {
     }
     _geminiMicStream = null;
   }
+  // Force-stop any tracked audio input streams to avoid stale browser mic
+  // capture indicators after call close (covers async/race teardown paths).
+  stopTrackedMicStreams();
 
   clearInterval(_durationTimer);
   _durationTimer = null;
@@ -1076,7 +1258,14 @@ export function stopSdkVoiceSession() {
   sdkVoiceDuration.value = 0;
   sdkVoiceProvider.value = null;
   sdkVoiceSdkActive.value = false;
-  _callContext = { sessionId: null, executor: null, mode: null, model: null };
+  isVoiceMicMuted.value = false;
+  _callContext = {
+    sessionId: null,
+    executor: null,
+    mode: null,
+    model: null,
+    voiceAgentId: null,
+  };
   _usingLegacyFallback = false;
   _resetTranscriptPersistenceState();
 
@@ -1097,6 +1286,39 @@ export function interruptSdkResponse() {
     }
     emit("interrupt", {});
   }
+}
+
+/**
+ * Toggle microphone mute state for SDK-driven voice sessions.
+ * Returns the new muted state.
+ */
+export function toggleSdkMicMute() {
+  const willBeMuted = !isVoiceMicMuted.value;
+  const enabled = !willBeMuted;
+
+  if (_session) {
+    // Try SDK-native controls first when available.
+    try {
+      if (enabled && typeof _session.unmute === "function") {
+        _session.unmute();
+      } else if (!enabled && typeof _session.mute === "function") {
+        _session.mute();
+      }
+    } catch {
+      // fall through to track-level toggles
+    }
+    setMicLikeTracksEnabled(_session, enabled);
+  }
+
+  if (_geminiMicStream) {
+    for (const track of _geminiMicStream.getTracks()) {
+      if (String(track?.kind || "").toLowerCase() !== "audio") continue;
+      try { track.enabled = enabled; } catch { /* ignore */ }
+    }
+  }
+
+  isVoiceMicMuted.value = willBeMuted;
+  return isVoiceMicMuted.value;
 }
 
 /**

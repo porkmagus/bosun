@@ -12235,11 +12235,65 @@ runGuarded("startup-maintenance-sweep", () =>
 safeSetInterval("flush-error-queue", () => flushErrorQueue(), 60 * 1000);
 
 // ── Periodic maintenance: every 5 min, reap stuck pushes & prune worktrees ──
+// If a workflow replaces maintenance.mjs, skip the direct call and let
+// the workflow engine handle it via trigger.schedule evaluation.
 const maintenanceIntervalMs = 5 * 60 * 1000;
 safeSetInterval("maintenance-sweep", () => {
+  if (isWorkflowReplacingModule("maintenance.mjs")) return;
   const childPid = currentChild ? currentChild.pid : undefined;
   return runMaintenanceSweep({ repoRoot, childPid });
 }, maintenanceIntervalMs);
+
+// ── Workflow schedule trigger polling ───────────────────────────────────────
+// Check all installed workflows that use trigger.schedule and fire any whose
+// interval has elapsed. This makes schedule-based templates (workspace hygiene,
+// nightly reports, etc.) actually execute without hardcoded safeSetInterval calls.
+const scheduleCheckIntervalMs = 60 * 1000; // check every 60s
+safeSetInterval("workflow-schedule-check", async () => {
+  try {
+    const engine = await ensureWorkflowAutomationEngine();
+    if (!engine?.evaluateScheduleTriggers) return;
+
+    const triggered = engine.evaluateScheduleTriggers();
+    if (!Array.isArray(triggered) || triggered.length === 0) return;
+
+    for (const match of triggered) {
+      const workflowId = String(match?.workflowId || "").trim();
+      if (!workflowId) continue;
+      void engine
+        .execute(workflowId, {
+          _triggerSource: "schedule-poll",
+          _triggeredBy: match?.triggeredBy || null,
+          _lastRunAt: Date.now(),
+          repoRoot,
+        })
+        .then((ctx) => {
+          const runId = ctx?.id || "unknown";
+          const runStatus =
+            Array.isArray(ctx?.errors) && ctx.errors.length > 0
+              ? "failed"
+              : "completed";
+          console.log(
+            `[workflows] schedule-run ${runStatus} workflow=${workflowId} runId=${runId}`,
+          );
+        })
+        .catch((err) => {
+          console.warn(
+            `[workflows] schedule-run failed workflow=${workflowId}: ${err?.message || err}`,
+          );
+        });
+    }
+
+    if (triggered.length > 0) {
+      console.log(
+        `[workflows] schedule poll triggered ${triggered.length} workflow run(s)`,
+      );
+    }
+  } catch (err) {
+    // Schedule evaluation must not crash the monitor
+    console.warn(`[workflows] schedule-check error: ${err?.message || err}`);
+  }
+}, scheduleCheckIntervalMs);
 
 // ── Periodic merged PR check: every 10 min, move merged PRs to done ─────────
 const mergedPRCheckIntervalMs = 10 * 60 * 1000;
@@ -13307,4 +13361,6 @@ export {
   // Container runner re-exports
   getContainerStatus,
   isContainerEnabled,
+  // Workflow event bridge — for fleet/kanban modules to emit events
+  queueWorkflowEvent,
 };

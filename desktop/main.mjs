@@ -89,6 +89,7 @@ let shuttingDown = false;
 let uiServerStarted = false;
 let uiOrigin = null;
 let uiApi = null;
+let desktopAuthHeaderBridgeInstalled = false;
 let runtimeConfigLoaded = false;
 /** True when the app is running as a persistent background / tray resident. */
 let trayMode = false;
@@ -152,6 +153,38 @@ function isTrustedCaptureOrigin(originLike) {
   } catch {
     return false;
   }
+}
+
+function isTrustedDesktopRequestUrl(urlLike) {
+  return isTrustedCaptureOrigin(urlLike);
+}
+
+function installDesktopAuthHeaderBridge() {
+  if (desktopAuthHeaderBridgeInstalled) return;
+  const ses = session.defaultSession;
+  if (!ses) return;
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    try {
+      const desktopKey = String(process.env.BOSUN_DESKTOP_API_KEY || "").trim();
+      if (!desktopKey) {
+        callback({ requestHeaders: details.requestHeaders });
+        return;
+      }
+      if (!isTrustedDesktopRequestUrl(details?.url || "")) {
+        callback({ requestHeaders: details.requestHeaders });
+        return;
+      }
+      const headers = { ...(details.requestHeaders || {}) };
+      const existingAuth = String(headers.Authorization || headers.authorization || "").trim();
+      if (!existingAuth) {
+        headers.Authorization = `Bearer ${desktopKey}`;
+      }
+      callback({ requestHeaders: headers });
+    } catch {
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  });
+  desktopAuthHeaderBridgeInstalled = true;
 }
 
 function installDesktopMediaHandlers() {
@@ -583,20 +616,25 @@ async function fetchWorkspaces({ force = false } = {}) {
  * @param {string} workspaceId
  */
 async function switchWorkspace(workspaceId) {
-  if (!uiOrigin || !workspaceId) return;
+  if (!uiOrigin || !workspaceId) return { ok: false, error: "workspace unavailable" };
   const body = JSON.stringify({ workspaceId });
   const data = await uiServerRequest(`${uiOrigin}/api/workspaces/active`, {
     method: "POST",
     body,
   });
-  if (data?.ok) {
-    _cachedActiveWorkspaceId = workspaceId;
-    _workspaceCacheAt = 0; // force re-fetch next time
+  if (!data?.ok) {
+    return {
+      ok: false,
+      error: String(data?.error || "workspace switch failed"),
+    };
   }
+  _cachedActiveWorkspaceId = String(data?.activeId || workspaceId);
+  _workspaceCacheAt = 0; // force re-fetch next time
   await fetchWorkspaces({ force: true });
   Menu.setApplicationMenu(buildAppMenu());
   refreshTrayMenu();
   navigateMainWindow("/");
+  return { ok: true, activeId: _cachedActiveWorkspaceId };
 }
 
 /**
@@ -1265,14 +1303,15 @@ async function openFollowWindow(detail = {}) {
   const win = await createFollowWindow();
   const baseUiUrl = await buildUiUrl();
   const target = buildFollowWindowUrl(baseUiUrl, detail);
+  // Append a cache-buster timestamp so every Call press produces a unique URL.
+  // Without this, a second Call press with the same parameters would match
+  // followWindowLaunchSignature and skip loadURL — leaving the follow window
+  // in its previous dead state (launch params already scrubbed, voice overlay
+  // closed, useEffect([], []) already fired and won't re-run).
+  target.searchParams.set("t", String(Date.now()));
   const signature = target.toString();
-  if (!win.webContents.getURL() || followWindowLaunchSignature !== signature) {
-    followWindowLaunchSignature = signature;
-    await win.loadURL(signature);
-    anchorFollowWindow(win);
-    setWindowVisible(win);
-    return;
-  }
+  followWindowLaunchSignature = signature;
+  await win.loadURL(signature);
   anchorFollowWindow(win);
   setWindowVisible(win);
 }
@@ -1727,8 +1766,7 @@ function registerDesktopIpc() {
    */
   ipcMain.handle("bosun:workspaces:switch", async (_event, { workspaceId } = {}) => {
     if (!workspaceId) return { ok: false, error: "workspaceId required" };
-    await switchWorkspace(workspaceId);
-    return { ok: true, activeId: workspaceId };
+    return switchWorkspace(workspaceId);
   });
 }
 
@@ -1745,6 +1783,7 @@ async function bootstrap() {
       }
       callback(-3); // -3 = use Chromium default chain verification
     });
+    installDesktopAuthHeaderBridge();
     installDesktopMediaHandlers();
 
     if (process.env.ELECTRON_DISABLE_SANDBOX === "1") {

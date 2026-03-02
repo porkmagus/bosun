@@ -2723,6 +2723,55 @@
         return { data: STATE.executors.map((e) => ({ ...e, status: e.enabled ? 'active' : 'disabled' })) };
       if (route === '/api/telemetry/alerts')
         return { data: [] };
+      if (route === '/api/analytics/usage') {
+        const daysParam = Number(params.get('days') || '30');
+        // Build mock usage analytics from demo STATE
+        const now = Date.now();
+        const dayMs = 86400000;
+        const numDays = Math.min(daysParam || 30, 30);
+        // Generate synthetic daily trend data
+        const dates = [];
+        const agentDaily = { codex: [], copilot: [], claude: [] };
+        const skillDaily = { 'background-task-execution': [], 'pr-workflow': [], 'error-recovery': [] };
+        const mcpDaily = { execute_bash: [], read_file: [], write_file: [], list_directory: [] };
+        for (let i = numDays - 1; i >= 0; i--) {
+          const d = new Date(now - i * dayMs);
+          dates.push(d.toISOString().slice(0, 10));
+          const active = (i < (numDays * 0.6)) ? 1 : 0;
+          agentDaily.codex.push(active ? Math.floor(Math.random() * 8 + 2) : 0);
+          agentDaily.copilot.push(active ? Math.floor(Math.random() * 5 + 1) : 0);
+          agentDaily.claude.push(active ? Math.floor(Math.random() * 4) : 0);
+          skillDaily['background-task-execution'].push(active ? Math.floor(Math.random() * 6 + 1) : 0);
+          skillDaily['pr-workflow'].push(active ? Math.floor(Math.random() * 4) : 0);
+          skillDaily['error-recovery'].push(active ? Math.floor(Math.random() * 3) : 0);
+          mcpDaily.execute_bash.push(active ? Math.floor(Math.random() * 12 + 2) : 0);
+          mcpDaily.read_file.push(active ? Math.floor(Math.random() * 8 + 1) : 0);
+          mcpDaily.write_file.push(active ? Math.floor(Math.random() * 6) : 0);
+          mcpDaily.list_directory.push(active ? Math.floor(Math.random() * 5) : 0);
+        }
+        const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+        const agentRuns = sum(agentDaily.codex) + sum(agentDaily.copilot) + sum(agentDaily.claude);
+        const skillInvocations = Object.values(skillDaily).reduce((t, a) => t + sum(a), 0);
+        const mcpToolCalls = Object.values(mcpDaily).reduce((t, a) => t + sum(a), 0);
+        return { ok: true, data: {
+          agentRuns, skillInvocations, mcpToolCalls,
+          avgPerDay: Math.round((agentRuns + skillInvocations + mcpToolCalls) / (numDays || 1)),
+          lastActiveAt: new Date(now - 7200000).toISOString(),
+          sinceAt: new Date(now - numDays * dayMs).toISOString(),
+          topAgents: [
+            { name: 'codex', count: sum(agentDaily.codex) },
+            { name: 'copilot', count: sum(agentDaily.copilot) },
+            { name: 'claude', count: sum(agentDaily.claude) },
+          ].filter(a => a.count > 0).sort((a, b) => b.count - a.count),
+          topSkills: Object.entries(skillDaily)
+            .map(([name, v]) => ({ name, count: sum(v) }))
+            .filter(s => s.count > 0).sort((a, b) => b.count - a.count),
+          topMcpTools: Object.entries(mcpDaily)
+            .map(([name, v]) => ({ name, count: sum(v) }))
+            .filter(t => t.count > 0).sort((a, b) => b.count - a.count),
+          trend: { dates, agents: agentDaily, skills: skillDaily, mcpTools: mcpDaily },
+        }};
+      }
       if (route === '/api/executor/pause') {
         STATE.paused = true; addLog('info', 'executor', 'Executor paused');
         return { ok: true, paused: true };
@@ -3543,6 +3592,67 @@
         return { data: buildProjectSnapshot() };
 
       // ── Voice ──
+      if (route === '/api/voice/agents' && method === 'GET') {
+        const fromLibrary = (STATE.libraryEntries || [])
+          .filter((entry) => {
+            if (!entry || entry.type !== 'agent') return false;
+            const id = String(entry.id || '').toLowerCase();
+            const tags = Array.isArray(entry.tags) ? entry.tags.map((t) => String(t || '').toLowerCase()) : [];
+            return id.includes('voice-agent') || tags.includes('voice') || tags.includes('audio-agent');
+          })
+          .map((entry) => ({
+            id: entry.id,
+            name: entry.name || entry.id,
+            description: entry.description || '',
+            tags: Array.isArray(entry.tags) ? entry.tags : [],
+            model: null,
+            voicePersona: String(entry.id || '').includes('female')
+              ? 'female'
+              : (String(entry.id || '').includes('male') ? 'male' : 'neutral'),
+            voiceInstructions: '',
+            skills: [],
+            promptOverride: null,
+          }));
+
+        const defaults = [
+          {
+            id: 'voice-agent-female',
+            name: 'Voice Agent (Female)',
+            description: 'Conversational voice specialist with concise guidance and call-friendly pacing.',
+            tags: ['voice', 'audio-agent', 'female', 'realtime'],
+            model: null,
+            voicePersona: 'female',
+            voiceInstructions: 'You are Nova, a concise and practical female voice agent.',
+            skills: ['concise-voice-guidance', 'conversation-memory'],
+            promptOverride: null,
+          },
+          {
+            id: 'voice-agent-male',
+            name: 'Voice Agent (Male)',
+            description: 'Operational voice specialist focused on diagnostics and execution.',
+            tags: ['voice', 'audio-agent', 'male', 'realtime'],
+            model: null,
+            voicePersona: 'male',
+            voiceInstructions: 'You are Atlas, a direct and execution-oriented male voice agent.',
+            skills: ['ops-diagnostics', 'task-execution'],
+            promptOverride: null,
+          },
+        ];
+
+        const seen = new Set();
+        const agents = [...fromLibrary, ...defaults].filter((agent) => {
+          const id = String(agent?.id || '').trim();
+          if (!id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+        return {
+          ok: true,
+          agents,
+          defaultAgentId: agents[0]?.id || 'voice-agent-female',
+        };
+      }
+
       if (route === '/api/voice/audio/respond' && method === 'POST') {
         const inputText = String(body?.inputText || body?.text || '').trim();
         if (!inputText) {

@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const sharedEngine = {
+  evaluateTriggers: vi.fn(async () => []),
+  execute: vi.fn(async () => ({})),
+  load: vi.fn(),
+  listWorkflows: vi.fn(() => []),
+};
+
 vi.mock("../voice-relay.mjs", () => ({
   analyzeVisionFrame: vi.fn(async () => ({
     summary: "Editor with a failing test output is visible.",
@@ -25,7 +32,7 @@ describe("ui-server voice + vision routes", () => {
   ];
   let envSnapshot = {};
 
-  beforeEach(() => {
+  beforeEach(async () => {
     envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
     process.env.TELEGRAM_UI_TLS_DISABLE = "true";
     process.env.TELEGRAM_UI_ALLOW_UNSAFE = "true";
@@ -37,6 +44,10 @@ describe("ui-server voice + vision routes", () => {
     process.env.WORKFLOW_AUTOMATION_ENABLED = "true";
     process.env.WORKFLOW_EVENT_DEDUP_WINDOW_MS = "1";
     vi.mocked(analyzeVisionFrame).mockClear();
+    // Inject the shared mock engine so dispatchWorkflowEvent uses it
+    const mod = await import("../ui-server.mjs");
+    const wfMock = { WorkflowEngine: vi.fn(() => sharedEngine) };
+    mod._testInjectWorkflowEngine(wfMock, sharedEngine);
   });
 
   afterEach(async () => {
@@ -111,9 +122,10 @@ describe("ui-server voice + vision routes", () => {
   it("queues workflow trigger evaluation for transcript and wake phrase events", async () => {
     const { port } = await startServer();
     const sessionId = `primary-workflow-transcript-${Date.now()}`;
-    const { getWorkflowEngine } = await import("../workflow-engine.mjs");
-    const engine = getWorkflowEngine();
-    const evaluateSpy = vi.spyOn(engine, "evaluateTriggers").mockResolvedValue([]);
+    // Use the shared mock engine that is returned by the mocked WorkflowEngine
+    // constructor (and thus used by dispatchWorkflowEvent's per-workspace engine).
+    sharedEngine.evaluateTriggers.mockClear();
+    sharedEngine.evaluateTriggers.mockResolvedValue([]);
 
     try {
       const res = await fetch(`http://127.0.0.1:${port}/api/voice/transcript`, {
@@ -132,7 +144,7 @@ describe("ui-server voice + vision routes", () => {
       expect(data.ok).toBe(true);
 
       await vi.waitFor(() => {
-        expect(evaluateSpy).toHaveBeenCalledWith(
+        expect(sharedEngine.evaluateTriggers).toHaveBeenCalledWith(
           "meeting.transcript",
           expect.objectContaining({
             sessionId,
@@ -148,7 +160,7 @@ describe("ui-server voice + vision routes", () => {
       });
 
       await vi.waitFor(() => {
-        expect(evaluateSpy).toHaveBeenCalledWith(
+        expect(sharedEngine.evaluateTriggers).toHaveBeenCalledWith(
           "meeting.wake_phrase",
           expect.objectContaining({
             sessionId,
@@ -160,7 +172,7 @@ describe("ui-server voice + vision routes", () => {
         );
       });
     } finally {
-      evaluateSpy.mockRestore();
+      sharedEngine.evaluateTriggers.mockClear();
     }
   });
 

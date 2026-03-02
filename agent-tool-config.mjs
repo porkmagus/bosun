@@ -286,12 +286,23 @@ export function getEffectiveTools(rootDir, agentId) {
   const agentConfig = config.agents[agentId] || {};
   const disabledSet = new Set(agentConfig.disabledBuiltinTools || []);
   const defaultIds = new Set(config.defaults?.builtinTools || DEFAULT_BUILTIN_TOOLS.filter((t) => t.default).map((t) => t.id));
+  const builtinIdSet = new Set(DEFAULT_BUILTIN_TOOLS.map((tool) => tool.id));
+  const explicitEnabled = Array.isArray(agentConfig.enabledTools)
+    ? agentConfig.enabledTools.map((id) => String(id || "").trim()).filter(Boolean)
+    : null;
+  const explicitBuiltinEnabled = explicitEnabled
+    ? explicitEnabled.filter((id) => builtinIdSet.has(id))
+    : [];
+  const useBuiltinAllowlist = explicitBuiltinEnabled.length > 0;
+  const explicitBuiltinSet = new Set(explicitBuiltinEnabled);
 
   const builtinTools = DEFAULT_BUILTIN_TOOLS.map((tool) => ({
     ...tool,
-    enabled: !disabledSet.has(tool.id) && (agentConfig.enabledTools === null || agentConfig.enabledTools === undefined
-      ? defaultIds.has(tool.id)
-      : agentConfig.enabledTools.includes(tool.id)),
+    enabled: !disabledSet.has(tool.id) && (
+      useBuiltinAllowlist
+        ? explicitBuiltinSet.has(tool.id)
+        : defaultIds.has(tool.id)
+    ),
   }));
 
   return {
