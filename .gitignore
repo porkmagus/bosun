@@ -45,3 +45,4 @@ __e2e-results.json
 tests/__e2e-out.txt
 tests/__e2e-results.txt
 __e2e-verbose.txt
+.codex/config.toml
