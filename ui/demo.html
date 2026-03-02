@@ -3543,6 +3543,67 @@
         return { data: buildProjectSnapshot() };
 
       // ── Voice ──
+      if (route === '/api/voice/agents' && method === 'GET') {
+        const fromLibrary = (STATE.libraryEntries || [])
+          .filter((entry) => {
+            if (!entry || entry.type !== 'agent') return false;
+            const id = String(entry.id || '').toLowerCase();
+            const tags = Array.isArray(entry.tags) ? entry.tags.map((t) => String(t || '').toLowerCase()) : [];
+            return id.includes('voice-agent') || tags.includes('voice') || tags.includes('audio-agent');
+          })
+          .map((entry) => ({
+            id: entry.id,
+            name: entry.name || entry.id,
+            description: entry.description || '',
+            tags: Array.isArray(entry.tags) ? entry.tags : [],
+            model: null,
+            voicePersona: String(entry.id || '').includes('female')
+              ? 'female'
+              : (String(entry.id || '').includes('male') ? 'male' : 'neutral'),
+            voiceInstructions: '',
+            skills: [],
+            promptOverride: null,
+          }));
+
+        const defaults = [
+          {
+            id: 'voice-agent-female',
+            name: 'Voice Agent (Female)',
+            description: 'Conversational voice specialist with concise guidance and call-friendly pacing.',
+            tags: ['voice', 'audio-agent', 'female', 'realtime'],
+            model: null,
+            voicePersona: 'female',
+            voiceInstructions: 'You are Nova, a concise and practical female voice agent.',
+            skills: ['concise-voice-guidance', 'conversation-memory'],
+            promptOverride: null,
+          },
+          {
+            id: 'voice-agent-male',
+            name: 'Voice Agent (Male)',
+            description: 'Operational voice specialist focused on diagnostics and execution.',
+            tags: ['voice', 'audio-agent', 'male', 'realtime'],
+            model: null,
+            voicePersona: 'male',
+            voiceInstructions: 'You are Atlas, a direct and execution-oriented male voice agent.',
+            skills: ['ops-diagnostics', 'task-execution'],
+            promptOverride: null,
+          },
+        ];
+
+        const seen = new Set();
+        const agents = [...fromLibrary, ...defaults].filter((agent) => {
+          const id = String(agent?.id || '').trim();
+          if (!id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+        return {
+          ok: true,
+          agents,
+          defaultAgentId: agents[0]?.id || 'voice-agent-female',
+        };
+      }
+
       if (route === '/api/voice/audio/respond' && method === 'POST') {
         const inputText = String(body?.inputText || body?.text || '').trim();
         if (!inputText) {
