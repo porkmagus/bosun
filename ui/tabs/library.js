@@ -377,6 +377,30 @@ async function fetchBuiltinToolDefaults() {
 const TYPE_ICONS = { prompt: ":edit:", agent: ":bot:", skill: ":cpu:", mcp: ":plug:" };
 const TYPE_LABELS = { prompt: "Prompt", agent: "Agent Profile", skill: "Skill", mcp: "MCP Server" };
 const TYPE_COLORS = { prompt: "#58a6ff", agent: "#af7bff", skill: "#3fb950", mcp: "#f59e0b" };
+const AGENT_TYPE_OPTIONS = Object.freeze([
+  { value: "voice", label: "Voice" },
+  { value: "task", label: "Task" },
+  { value: "chat", label: "Chat" },
+]);
+
+function normalizeAgentType(rawType) {
+  const value = String(rawType || "").trim().toLowerCase();
+  if (value === "voice" || value === "task" || value === "chat") return value;
+  return "task";
+}
+
+function inferAgentTypeFromEntry(entry, parsedContent) {
+  const explicit = normalizeAgentType(parsedContent?.agentType);
+  if (parsedContent?.agentType) return explicit;
+  if (parsedContent?.voiceAgent === true) return "voice";
+  const id = String(entry?.id || "").trim().toLowerCase();
+  const tags = Array.isArray(entry?.tags)
+    ? entry.tags.map((tag) => String(tag || "").trim().toLowerCase())
+    : [];
+  if (id.startsWith("voice-agent")) return "voice";
+  if (tags.includes("voice") || tags.includes("audio-agent") || tags.includes("realtime")) return "voice";
+  return "task";
+}
 
 const AUDIO_AGENT_TEMPLATES = Object.freeze({
   female: {
@@ -393,6 +417,7 @@ const AUDIO_AGENT_TEMPLATES = Object.freeze({
       model: null,
       promptOverride: null,
       skills: ["concise-voice-guidance", "conversation-memory"],
+      agentType: "voice",
       voiceAgent: true,
       voicePersona: "female",
       voiceInstructions: "You are Nova, a female voice agent. Be concise, warm, and practical. Use tools for facts and execution. Keep spoken responses short and clear.",
@@ -412,6 +437,7 @@ const AUDIO_AGENT_TEMPLATES = Object.freeze({
       model: null,
       promptOverride: null,
       skills: ["ops-diagnostics", "task-execution"],
+      agentType: "voice",
       voiceAgent: true,
       voicePersona: "male",
       voiceInstructions: "You are Atlas, a male voice agent. Be direct and execution-oriented. Prefer actionable status updates. Use tools proactively for diagnostics.",
@@ -517,6 +543,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
     description: entry?.description || "",
     tags: (entry?.tags || []).join(", "),
     scope: entry?.scope || "global",
+    agentType: inferAgentTypeFromEntry(entry, null),
     content: typeof entry?.content === "string" ? entry.content : "",
   };
   const [form, setForm] = useState(initialFormSnapshot);
@@ -537,6 +564,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
       description: entry?.description || "",
       tags: (entry?.tags || []).join(", "),
       scope: entry?.scope || "global",
+      agentType: inferAgentTypeFromEntry(entry, null),
       content: "",
     };
     setForm(next);
@@ -554,8 +582,13 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
         if (cancelled) return;
         let contentStr = detail?.content ?? "";
         if (typeof contentStr === "object") contentStr = JSON.stringify(contentStr, null, 2);
+        const parsed = detail?.content && typeof detail.content === "object" ? detail.content : null;
         setForm((f) => {
-          const next = { ...f, content: contentStr };
+          const next = {
+            ...f,
+            content: contentStr,
+            agentType: inferAgentTypeFromEntry(detail || entry, parsed),
+          };
           setBaseline(next);
           return next;
         });
@@ -592,7 +625,19 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
       const tags = form.tags.split(/[,\s]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
       let content = form.content;
       if (form.type === "agent") {
-        try { content = JSON.parse(content); } catch { /* keep as string if invalid JSON */ }
+        try {
+          content = JSON.parse(content);
+        } catch {
+          showToast("Agent profile content must be valid JSON", "error");
+          return false;
+        }
+        const agentType = normalizeAgentType(form.agentType);
+        content.agentType = agentType;
+        if (agentType === "voice") {
+          content.voiceAgent = true;
+        } else if (content.voiceAgent === true) {
+          content.voiceAgent = false;
+        }
       }
       const res = await saveEntry({
         id: form.id || undefined,
@@ -652,6 +697,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
           model: null,
           promptOverride: null,
           skills: [],
+          agentType: "task",
           tags: [],
         }, null, 2)
       : "# Skill Title\n\n## Purpose\nDescribe what this skill teaches agents.\n\n## Instructions\n...";
@@ -702,6 +748,16 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
             <option value="workspace">Workspace</option>
           </select>
         </label>
+        ${form.type === "agent" && html`
+          <label>
+            Agent Type
+            <select value=${normalizeAgentType(form.agentType)} onChange=${updateField("agentType")}>
+              ${AGENT_TYPE_OPTIONS.map((opt) => html`
+                <option key=${opt.value} value=${opt.value}>${opt.label}</option>
+              `)}
+            </select>
+          </label>
+        `}
         <label>
           Content
           ${loadingContent
@@ -713,7 +769,7 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
         </label>
         <div style="font-size:0.78em;color:var(--text-tertiary,#666);margin-top:-8px;">
           ${form.type === "prompt" ? "Use {{VARIABLE_NAME}} for template variables. Reference in workflows as {{prompt:name}}."
-            : form.type === "agent" ? "JSON format. Referenced in workflows as {{agent:name}}."
+          : form.type === "agent" ? "JSON format. Referenced in workflows as {{agent:name}}."
             : form.type === "mcp" ? "MCP server configuration. Managed via the MCP Servers panel."
             : "Markdown format. Referenced in workflows as {{skill:name}}."}
         </div>
