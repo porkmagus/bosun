@@ -1481,14 +1481,12 @@ async function handleVoiceEndpointTest(body) {
       // Strip path suffix so users can paste full URLs without double-path 404s.
       let base = String(azureEndpoint).replace(/\/+$/, "");
       try { const u = new URL(base); base = `${u.protocol}//${u.host}`; } catch { /* keep as-is */ }
-      // Single-deployment GET only requires Cognitive Services User role.
-      // Use the GA api-version (2024-10-21) for broad compatibility across
-      // classic Azure OpenAI and Azure AI Foundry resources.
-      const dep = String(deployment || "").trim();
-      testUrl = dep
-        ? `${base}/openai/deployments/${encodeURIComponent(dep)}?api-version=2024-10-21`
-        : `${base}/openai/models?api-version=2024-10-21`;
+      // Prefer /openai/models as a credential check — it works on both classic
+      // Azure OpenAI resources AND Azure AI Foundry "Global Standard" deployments.
+      // If a deployment name is provided, we verify it separately after confirming
+      // the endpoint + key are valid.
       headers["api-key"] = apiKey;
+      testUrl = `${base}/openai/models?api-version=2024-10-21`;
     } else if (normalizedProvider === "claude") {
       testUrl = "https://api.anthropic.com/v1/models";
       headers["anthropic-version"] = "2023-06-01";
@@ -1525,6 +1523,36 @@ async function handleVoiceEndpointTest(body) {
     clearTimeout(timer);
     const latencyMs = Date.now() - start;
     if (resp.ok || resp.status === 200) {
+      // For Azure with a deployment name, do a secondary check to verify the
+      // deployment exists. We try chat/completions with max_tokens=1 — realtime
+      // deployments return 400 (wrong endpoint type) which still confirms existence.
+      if (normalizedProvider === "azure" && deployment) {
+        const dep = String(deployment).trim();
+        try {
+          let base = String(azureEndpoint).replace(/\/+$/, "");
+          try { const u = new URL(base); base = `${u.protocol}//${u.host}`; } catch { /* keep */ }
+          const depUrl = `${base}/openai/deployments/${encodeURIComponent(dep)}/chat/completions?api-version=2024-10-21`;
+          const depCtrl = new AbortController();
+          const depTimer = setTimeout(() => depCtrl.abort(), 8_000);
+          const depResp = await fetch(depUrl, {
+            method: "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
+            signal: depCtrl.signal,
+          });
+          clearTimeout(depTimer);
+          // 200 = chat model works, 400 = realtime model (expected), both confirm deployment exists
+          if (depResp.ok || depResp.status === 400) {
+            return { ok: true, latencyMs, deployment: dep };
+          }
+          if (depResp.status === 404) {
+            return { ok: false, error: `Credentials valid but deployment "${dep}" not found — check the deployment name in Azure AI Foundry`, latencyMs };
+          }
+          return { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (HTTP ${depResp.status})` };
+        } catch {
+          return { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (timeout)` };
+        }
+      }
       return { ok: true, latencyMs };
     }
     const text = await resp.text().catch(() => "");
@@ -1535,33 +1563,12 @@ async function handleVoiceEndpointTest(body) {
     } catch {
       // Keep generic HTTP status message.
     }
-    // Azure-specific: when the deployment probe 404s, try a generic list to
-    // distinguish "bad credentials / unreachable" from "deployment not found".
-    if (resp.status === 404 && normalizedProvider === "azure" && deployment) {
-      try {
-        let base = String(azureEndpoint).replace(/\/+$/, "");
-        try { const u = new URL(base); base = `${u.protocol}//${u.host}`; } catch { /* keep */ }
-        const listUrl = `${base}/openai/deployments?api-version=2024-10-21`;
-        const listCtrl = new AbortController();
-        const listTimer = setTimeout(() => listCtrl.abort(), 8_000);
-        const listResp = await fetch(listUrl, { headers, signal: listCtrl.signal });
-        clearTimeout(listTimer);
-        if (listResp.ok) {
-          // Credentials work — the deployment name is wrong
-          let availableHint = "";
-          try {
-            const listBody = await listResp.json();
-            const names = (listBody?.data || []).map((d) => d?.id).filter(Boolean);
-            if (names.length > 0) availableHint = ` Available deployments: ${names.join(", ")}`;
-          } catch { /* ignore parse errors */ }
-          error = `Deployment "${deployment}" not found — check the deployment name in Azure AI Foundry.${availableHint}`;
-        } else if (listResp.status === 401 || listResp.status === 403) {
-          error = `Authentication failed (HTTP ${listResp.status}) — check API key and endpoint`;
-        } else {
-          error = `Deployment "${deployment}" not found (HTTP 404) — check deployment name in Azure AI Foundry`;
-        }
-      } catch {
-        error = `Deployment "${deployment}" not found — check deployment name in Azure AI Foundry`;
+    // Azure-specific: provide helpful messages for common errors
+    if (normalizedProvider === "azure") {
+      if (resp.status === 401 || resp.status === 403) {
+        error = `Authentication failed (HTTP ${resp.status}) — check API key and endpoint URL`;
+      } else if (resp.status === 404) {
+        error = `Endpoint not found (HTTP 404) — check the Azure endpoint URL. Use https://<resource>.openai.azure.com`;
       }
     }
     return { ok: false, error, latencyMs };

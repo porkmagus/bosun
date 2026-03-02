@@ -239,6 +239,20 @@ const _wfEngineByWorkspace = new Map();
 let _wfInitPromise = null;
 let _wfInitDone = false;
 let _wfLoadedBase = null;
+
+/**
+ * Test-only: inject a mock workflow engine module and pre-seed the per-workspace
+ * engine cache so that dispatchWorkflowEvent uses the specified mock.
+ */
+let _testDefaultEngine = null;
+export function _testInjectWorkflowEngine(mockModule, mockEngine) {
+  _wfEngine = mockModule;
+  _wfInitDone = true;
+  _wfInitPromise = null;
+  _testDefaultEngine = mockEngine || null;
+  _wfEngineByWorkspace.clear();
+}
+
 let workflowEventDedupWindowMs = (() => {
   const parsed = Number.parseInt(process.env.WORKFLOW_EVENT_DEDUP_WINDOW_MS || "15000", 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 15_000;
@@ -607,12 +621,16 @@ async function getWorkflowRequestContext(reqUrl) {
   const workspaceKey = getWorkflowWorkspaceKey(paths.workspaceRoot);
   let engine = _wfEngineByWorkspace.get(workspaceKey) || null;
   if (!engine) {
-    engine = new wfMod.WorkflowEngine({
-      workflowDir: paths.workflowDir,
-      runsDir: paths.runsDir,
-      services: _wfServices || {},
-    });
-    engine.load();
+    if (_testDefaultEngine) {
+      engine = _testDefaultEngine;
+    } else {
+      engine = new wfMod.WorkflowEngine({
+        workflowDir: paths.workflowDir,
+        runsDir: paths.runsDir,
+        services: _wfServices || {},
+      });
+      engine.load();
+    }
     _wfEngineByWorkspace.set(workspaceKey, engine);
   }
   maybeBootstrapWorkspaceWorkflowTemplates(
@@ -9269,9 +9287,10 @@ async function handleApi(req, res, url) {
       const statusFilter = url.searchParams.get("status");
       if (typeFilter) sessions = sessions.filter((s) => s.type === typeFilter);
       if (statusFilter) sessions = sessions.filter((s) => s.status === statusFilter);
-      sessions = sessions.filter((session) =>
-        sessionMatchesWorkspaceContext(session, workspaceContext),
-      );
+      sessions = sessions.filter((session) => {
+        const detailed = tracker.getSessionById(session.id) || session;
+        return sessionMatchesWorkspaceContext(detailed, workspaceContext);
+      });
       jsonResponse(res, 200, { ok: true, sessions });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -9922,9 +9941,10 @@ async function handleApi(req, res, url) {
             // Respect it as final and issue the probe directly.
             testUrl = base;
           } else {
-            testUrl = dep
-              ? `${base}/openai/deployments/${encodeURIComponent(dep)}?api-version=2024-10-21`
-              : `${base}/openai/models?api-version=2024-10-21`;
+            // Always use /openai/models — works on both classic Azure OpenAI and
+            // Azure AI Foundry (Global Standard) where /openai/deployments/{name}
+            // returns 404.
+            testUrl = `${base}/openai/models?api-version=2024-10-21`;
           }
           if (apiKey) headers["api-key"] = apiKey;
           else {
@@ -9982,8 +10002,37 @@ async function handleApi(req, res, url) {
         clearTimeout(timer);
         const latencyMs = Date.now() - start;
         if (resp.ok || resp.status === 200) {
-          // Single-deployment GET: a 200 means both key and deployment are valid.
-          jsonResponse(res, 200, { ok: true, latencyMs });
+          // Credentials verified via /openai/models. If a deployment name was
+          // provided, do a secondary check to confirm the deployment exists.
+          if (provider === "azure" && deployment) {
+            const dep = String(deployment).trim();
+            try {
+              let base2 = String(azureEndpoint || "").replace(/\/+$/, "");
+              try { const u2 = new URL(base2); base2 = `${u2.protocol}//${u2.host}`; } catch { /* keep */ }
+              const depUrl = `${base2}/openai/deployments/${encodeURIComponent(dep)}/chat/completions?api-version=2024-10-21`;
+              const depCtrl = new AbortController();
+              const depTimer = setTimeout(() => depCtrl.abort(), 8_000);
+              const depResp = await fetch(depUrl, {
+                method: "POST",
+                headers: { ...headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
+                signal: depCtrl.signal,
+              });
+              clearTimeout(depTimer);
+              // 200 = chat model works, 400 = realtime model (expected), both confirm deployment exists
+              if (depResp.ok || depResp.status === 400) {
+                jsonResponse(res, 200, { ok: true, latencyMs, deployment: dep });
+              } else if (depResp.status === 404) {
+                jsonResponse(res, 200, { ok: false, error: `Credentials valid but deployment "${dep}" not found — check the deployment name in Azure AI Foundry`, latencyMs });
+              } else {
+                jsonResponse(res, 200, { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (HTTP ${depResp.status})` });
+              }
+            } catch {
+              jsonResponse(res, 200, { ok: true, latencyMs, warning: `Credentials valid. Could not verify deployment "${dep}" (timeout)` });
+            }
+          } else {
+            jsonResponse(res, 200, { ok: true, latencyMs });
+          }
         } else {
           const text = await resp.text().catch(() => "");
           let errMsg = `HTTP ${resp.status}`;
@@ -9992,32 +10041,12 @@ async function handleApi(req, res, url) {
             const missing = String(errMsg || "").match(/Missing scopes?:\s*([A-Za-z0-9._:\s-]+)/i)?.[1]?.trim() || "required scopes";
             errMsg = `OpenAI Connected Account token is missing scopes (${missing}). Sign out and reconnect OpenAI in Connected Accounts. Also verify role access: org Owner/Reader, project Owner/Member, and workspace RBAC API/dashboard permissions.`;
           }
-          // Friendly message when the deployment name itself is not found (key is fine)
-          if (resp.status === 404 && deployment) {
-            // Try listing deployments to confirm credentials work
-            try {
-              let base2 = String(azureEndpoint || "").replace(/\/+$/, "");
-              try { const u2 = new URL(base2); base2 = `${u2.protocol}//${u2.host}`; } catch { /* keep */ }
-              const listUrl = `${base2}/openai/deployments?api-version=2024-10-21`;
-              const listCtrl = new AbortController();
-              const listTimer = setTimeout(() => listCtrl.abort(), 8_000);
-              const listResp = await fetch(listUrl, { headers, signal: listCtrl.signal });
-              clearTimeout(listTimer);
-              if (listResp.ok) {
-                let availableHint = "";
-                try {
-                  const listBody = await listResp.json();
-                  const names = (listBody?.data || []).map((d) => d?.id).filter(Boolean);
-                  if (names.length > 0) availableHint = ` Available deployments: ${names.join(", ")}`;
-                } catch { /* ignore */ }
-                errMsg = `Deployment "${deployment}" not found — check the deployment name in Azure AI Foundry.${availableHint}`;
-              } else if (listResp.status === 401 || listResp.status === 403) {
-                errMsg = `Authentication failed (HTTP ${listResp.status}) — check API key and endpoint`;
-              } else {
-                errMsg = `Deployment "${deployment}" not found (HTTP 404) — check deployment name in Azure AI Foundry`;
-              }
-            } catch {
-              errMsg = `Deployment "${deployment}" not found — check deployment name in Azure AI Foundry`;
+          // Azure-specific: provide helpful messages for common errors
+          if (provider === "azure") {
+            if (resp.status === 401 || resp.status === 403) {
+              errMsg = `Authentication failed (HTTP ${resp.status}) — check API key and endpoint URL`;
+            } else if (resp.status === 404) {
+              errMsg = `Endpoint not found (HTTP 404) — check the Azure endpoint URL. Use https://<resource>.openai.azure.com`;
             }
           }
           jsonResponse(res, 200, { ok: false, error: errMsg, latencyMs });

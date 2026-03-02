@@ -2126,6 +2126,8 @@ function VoiceEndpointsEditor() {
     deployment: String(ep.deployment || ""),
     model: String(ep.model || ""),
     visionModel: String(ep.visionModel || ""),
+    transcriptionModel: String(ep.transcriptionModel || ""),
+    transcriptionEnabled: ep.transcriptionEnabled !== false,
     apiKey: String(ep.apiKey || ""),
     voiceId: String(ep.voiceId || ""),
     role: ["primary", "backup"].includes(ep.role) ? ep.role : "primary",
@@ -2459,6 +2461,24 @@ function VoiceEndpointsEditor() {
                 onInput=${(e) => updateEndpoint(ep._id, "visionModel", e.target.value)} />
               <div class="meta-text" style="margin-top:3px">Model used for screenshot / image analysis tasks.</div>
             </div>
+            ${(ep.provider === "openai" || ep.provider === "azure") && html`
+            <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end">
+              <div>
+                <div class="setting-row-label">Transcription Model</div>
+                <input type="text" value=${ep.transcriptionModel || ""}
+                  placeholder="gpt-4o-transcribe"
+                  onInput=${(e) => updateEndpoint(ep._id, "transcriptionModel", e.target.value)} />
+                <div class="meta-text" style="margin-top:3px">Model used for input audio transcription. Leave blank for default (gpt-4o-transcribe).</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;padding-bottom:22px">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:13px">
+                  <input type="checkbox" checked=${ep.transcriptionEnabled !== false}
+                    onChange=${(e) => updateEndpoint(ep._id, "transcriptionEnabled", e.target.checked)} />
+                  Enable
+                </label>
+              </div>
+            </div>
+            `}
           </div>
           <!-- Test Connection -->
           <div style="display:flex;align-items:center;gap:10px;margin-top:8px">

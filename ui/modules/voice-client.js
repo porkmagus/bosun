@@ -608,6 +608,12 @@ function sendSessionUpdate(tokenData = {}) {
       : {}),
   };
 
+  // Use server-provided transcription model from sessionConfig, fall back to default
+  const transcriptionModel =
+    sessionConfig?.input_audio_transcription?.model || "gpt-4o-transcribe";
+  const transcriptionEnabled =
+    sessionConfig?.input_audio_transcription !== undefined;
+
   sendRealtimeEvent({
     type: "session.update",
     session: {
@@ -615,7 +621,9 @@ function sendSessionUpdate(tokenData = {}) {
       voice: voiceId,
       input_audio_format: "pcm16",
       output_audio_format: "pcm16",
-      input_audio_transcription: { model: "gpt-4o-transcribe" },
+      ...(transcriptionEnabled
+        ? { input_audio_transcription: { model: transcriptionModel } }
+        : {}),
       turn_detection: turnDetectionConfig,
     },
   });

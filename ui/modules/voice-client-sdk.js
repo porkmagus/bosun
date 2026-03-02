@@ -459,6 +459,12 @@ async function startAgentsSdkSession(config, options = {}) {
   const model = String(tokenData.model || resolvedConfig.model || "gpt-realtime-1.5").trim();
   const voiceId = String(tokenData.voiceId || resolvedConfig.voiceId || "alloy").trim();
   const turnDetection = String(resolvedConfig.turnDetection || "semantic_vad").trim();
+  // Use server-provided transcription model from sessionConfig, fall back to default
+  const serverSessionConfig = tokenData?.sessionConfig || {};
+  const transcriptionModel =
+    serverSessionConfig?.input_audio_transcription?.model || "gpt-4o-transcribe";
+  const transcriptionEnabled =
+    serverSessionConfig?.input_audio_transcription !== undefined;
   const turnDetectionConfig = {
     type: turnDetection,
     ...(turnDetection === "server_vad"
@@ -491,13 +497,13 @@ async function startAgentsSdkSession(config, options = {}) {
       audio: {
         input: {
           format: "pcm16",
-          transcription: { model: "gpt-4o-transcribe" },
+          ...(transcriptionEnabled ? { transcription: { model: transcriptionModel } } : {}),
           turnDetection: turnDetectionConfig,
         },
         output: {
           format: "pcm16",
           voice: voiceId,
-          transcription: { model: "gpt-4o-transcribe" },
+          ...(transcriptionEnabled ? { transcription: { model: transcriptionModel } } : {}),
         },
       },
     },
