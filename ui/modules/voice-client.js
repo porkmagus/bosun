@@ -211,6 +211,7 @@ let _callContext = {
   executor: null,
   mode: null,
   model: null,
+  voiceAgentId: null,
 };
 let _lastPersistedUserTranscript = "";
 let _lastPersistedAssistantTranscript = "";
@@ -237,7 +238,8 @@ function _normalizeCallContext(options = {}) {
   const executor = String(options?.executor || "").trim() || null;
   const mode = String(options?.mode || "").trim() || null;
   const model = String(options?.model || "").trim() || null;
-  return { sessionId, executor, mode, model };
+  const voiceAgentId = String(options?.voiceAgentId || "").trim() || null;
+  return { sessionId, executor, mode, model, voiceAgentId };
 }
 
 function _isResponsesAudioTransport(tokenData) {

@@ -70,6 +70,7 @@ import {
   matchAgentProfile,
   loadManifest,
   getManifestPath,
+  scaffoldAgentProfiles,
 } from "./library-manager.mjs";
 import {
   listCatalog,
@@ -222,9 +223,147 @@ function ensureLibraryInitialized(rootDir = repoRoot) {
         console.log(`[ui] Library initialized (${count} entries) at ${normalizedRoot}.`);
       }
     }
+    const scaffoldResult = scaffoldAgentProfiles(normalizedRoot);
+    if (Array.isArray(scaffoldResult?.written) && scaffoldResult.written.length > 0) {
+      rebuildManifest(normalizedRoot);
+    }
   } catch (err) {
     console.warn(`[ui] Library init failed for ${normalizedRoot}: ${err.message}`);
   }
+}
+
+const VOICE_TOOL_ID_MAP = Object.freeze({
+  "search-files": ["search_code"],
+  "read-file": ["read_file_content"],
+  "edit-file": ["update_task_status", "comment_on_task"],
+  "run-command": ["run_command", "run_workspace_command"],
+  "web-search": ["get_recent_logs"],
+  "code-search": ["search_code", "get_workspace_context"],
+  "git-operations": ["get_pr_status"],
+  "create-task": ["create_task"],
+  "delegate-task": ["delegate_to_agent", "ask_agent_context"],
+  "fetch-url": ["get_recent_logs"],
+  "list-directory": ["list_directory"],
+  "grep-search": ["search_code"],
+  "task-management": ["list_tasks", "get_task", "search_tasks", "get_task_stats", "delete_task", "comment_on_task"],
+  "notifications": [],
+  "vision-analysis": ["query_live_view"],
+});
+
+function mapToolConfigIdsToVoiceToolNames(enabledIds = []) {
+  const resolved = new Set();
+  for (const rawId of Array.isArray(enabledIds) ? enabledIds : []) {
+    const id = String(rawId || "").trim();
+    if (!id) continue;
+    const mapped = VOICE_TOOL_ID_MAP[id];
+    if (Array.isArray(mapped) && mapped.length > 0) {
+      for (const toolName of mapped) resolved.add(String(toolName || "").trim());
+      continue;
+    }
+    resolved.add(id);
+  }
+  return resolved;
+}
+
+function isVoiceAgentProfileEntry(entry, profile) {
+  if (!entry || entry.type !== "agent") return false;
+  const id = String(entry.id || "").trim().toLowerCase();
+  const tags = Array.isArray(entry.tags) ? entry.tags.map((t) => String(t || "").trim().toLowerCase()) : [];
+  if (id.startsWith("voice-agent")) return true;
+  if (tags.includes("voice") || tags.includes("audio-agent") || tags.includes("realtime")) return true;
+  if (profile && typeof profile === "object" && profile.voiceAgent === true) return true;
+  return false;
+}
+
+function resolveVoiceLibraryRoot(callContext = {}) {
+  const sessionId = String(callContext?.sessionId || "").trim();
+  if (!sessionId) return repoRoot;
+  try {
+    const tracker = getSessionTracker();
+    const session = tracker.getSessionById
+      ? tracker.getSessionById(sessionId)
+      : (tracker.getSession ? tracker.getSession(sessionId) : null);
+    const workspaceDir = String(
+      session?.workspaceDir
+      || session?.metadata?.workspaceDir
+      || "",
+    ).trim();
+    if (workspaceDir) return workspaceDir;
+  } catch {
+    // best effort
+  }
+  return repoRoot;
+}
+
+function listVoiceAgentProfiles(rootDir = repoRoot) {
+  const libraryRoot = rootDir || repoRoot;
+  ensureLibraryInitialized(libraryRoot);
+  const entries = listEntries(libraryRoot, { type: "agent" }) || [];
+  const profiles = [];
+  for (const entry of entries) {
+    const profile = getEntryContent(libraryRoot, entry);
+    if (!isVoiceAgentProfileEntry(entry, profile)) continue;
+    profiles.push({
+      id: entry.id,
+      name: entry.name || entry.id,
+      description: entry.description || "",
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
+      model: String(profile?.model || "").trim() || null,
+      voicePersona: String(profile?.voicePersona || "").trim() || "neutral",
+      voiceInstructions: String(profile?.voiceInstructions || "").trim() || "",
+      skills: Array.isArray(profile?.skills) ? profile.skills.map((s) => String(s || "").trim()).filter(Boolean) : [],
+      promptOverride: String(profile?.promptOverride || "").trim() || null,
+    });
+  }
+
+  profiles.sort((a, b) => {
+    const rank = (id) => {
+      if (id === "voice-agent-female") return 0;
+      if (id === "voice-agent-male") return 1;
+      if (id === "voice-agent") return 2;
+      return 3;
+    };
+    const ra = rank(a.id);
+    const rb = rank(b.id);
+    if (ra !== rb) return ra - rb;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id));
+  });
+  return profiles;
+}
+
+function resolveActiveVoiceAgent(rootDir = repoRoot, requestedAgentId = "") {
+  const agents = listVoiceAgentProfiles(rootDir);
+  if (agents.length === 0) return { agents: [], selected: null };
+  const requested = String(requestedAgentId || "").trim();
+  const selected = agents.find((a) => a.id === requested)
+    || agents.find((a) => a.id === "voice-agent-female")
+    || agents[0];
+  return { agents, selected };
+}
+
+function applyVoiceAgentToolFilters(allTools, toolConfig = null) {
+  const tools = Array.isArray(allTools) ? [...allTools] : [];
+  if (!toolConfig || typeof toolConfig !== "object") return tools;
+
+  const disabledBuiltinIds = Array.isArray(toolConfig.disabledBuiltinTools)
+    ? toolConfig.disabledBuiltinTools
+    : [];
+  const enabledIds = Array.isArray(toolConfig.enabledTools) ? toolConfig.enabledTools : null;
+  const enabledServers = Array.isArray(toolConfig.enabledMcpServers) ? toolConfig.enabledMcpServers : [];
+
+  const disabledNames = mapToolConfigIdsToVoiceToolNames(disabledBuiltinIds);
+  const enabledNames = enabledIds ? mapToolConfigIdsToVoiceToolNames(enabledIds) : null;
+
+  return tools.filter((tool) => {
+    const name = String(tool?.name || "").trim();
+    if (!name) return false;
+    if (name === "invoke_mcp_tool" && enabledServers.length === 0) return false;
+    if (enabledNames && enabledNames.size > 0) {
+      return enabledNames.has(name);
+    }
+    if (disabledNames.has(name)) return false;
+    return true;
+  });
 }
 
 // ── Workflow engine lazy-loader (module-scope cache) ──────────────────────────
@@ -10274,10 +10413,33 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // GET /api/voice/agents
+  if (path === "/api/voice/agents" && req.method === "GET") {
+    try {
+      const callContext = {
+        sessionId: String(url.searchParams.get("sessionId") || "").trim() || undefined,
+      };
+      const libraryRoot = resolveVoiceLibraryRoot(callContext);
+      const { agents, selected } = resolveActiveVoiceAgent(
+        libraryRoot,
+        String(url.searchParams.get("voiceAgentId") || "").trim(),
+      );
+      jsonResponse(res, 200, {
+        ok: true,
+        agents,
+        defaultAgentId: selected?.id || null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   // POST /api/voice/token
   if (path === "/api/voice/token" && req.method === "POST") {
     try {
       const body = await readJsonBody(req).catch(() => ({}));
+      const requestedVoiceAgentId = String(body?.voiceAgentId || "").trim();
       const callContext = {
         sessionId: String(body?.sessionId || "").trim() || undefined,
         executor: String(body?.executor || "").trim() || undefined,
@@ -10285,31 +10447,47 @@ async function handleApi(req, res, url) {
         model: String(body?.model || "").trim() || undefined,
         authSource: String(authResult?.source || "").trim() || undefined,
       };
+      const libraryRoot = resolveVoiceLibraryRoot(callContext);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        requestedVoiceAgentId,
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
       const { createEphemeralToken, getVoiceToolDefinitions, getVoiceConfig, isPrivilegedVoiceContext } = await import("./voice-relay.mjs");
       const privileged = isPrivilegedVoiceContext(callContext);
       const delegateOnly =
         body?.delegateOnly === true && !privileged;
       let tools = await getVoiceToolDefinitions({ delegateOnly, context: callContext });
 
-      // Apply voice-agent tool config if present
-      try {
-        const { getAgentToolConfig } = await import("./agent-tool-config.mjs");
-        const voiceToolCfg = getAgentToolConfig(repoRoot, "voice-agent");
-        if (voiceToolCfg) {
-          const disabled = voiceToolCfg.disabledBuiltinTools || [];
-          if (disabled.length > 0 && Array.isArray(tools)) {
-            tools = tools.filter(t => !disabled.includes(String(t?.name || "")));
-          }
-        }
-      } catch { /* agent-tool-config not critical */ }
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+      tools = applyVoiceAgentToolFilters(tools, voiceToolCfg);
 
-      const tokenData = await createEphemeralToken(tools, callContext);
+      const voiceCallContext = {
+        ...callContext,
+        voiceAgentId: activeVoiceAgentId,
+        voiceAgentName: selectedVoiceAgent?.name || undefined,
+        voiceAgentInstructions: selectedVoiceAgent?.voiceInstructions || undefined,
+        voiceAgentSkills: Array.isArray(selectedVoiceAgent?.skills) ? selectedVoiceAgent.skills : undefined,
+        enabledMcpServers: Array.isArray(voiceToolCfg?.enabledMcpServers)
+          ? voiceToolCfg.enabledMcpServers
+          : undefined,
+      };
+      const tokenData = await createEphemeralToken(tools, voiceCallContext);
+      tokenData.voiceAgentId = activeVoiceAgentId;
+      tokenData.voiceAgentName = selectedVoiceAgent?.name || null;
+      tokenData.voiceAgentSkills = Array.isArray(selectedVoiceAgent?.skills) ? selectedVoiceAgent.skills : [];
+      tokenData.enabledMcpServers = Array.isArray(voiceToolCfg?.enabledMcpServers)
+        ? voiceToolCfg.enabledMcpServers
+        : [];
+      tokenData.tools = Array.isArray(tools) ? tools : [];
 
       // When client requests sdkMode, include extra fields for @openai/agents SDK
       if (body?.sdkMode === true) {
         const voiceCfg = getVoiceConfig();
         tokenData.instructions = voiceCfg.instructions || undefined;
-        tokenData.tools = tools;
+        if (selectedVoiceAgent?.voiceInstructions) {
+          tokenData.instructions = `${tokenData.instructions || ""}\n\n${selectedVoiceAgent.voiceInstructions}`.trim();
+        }
         if (tokenData.provider === "azure") {
           tokenData.azureEndpoint = voiceCfg.azureEndpoint || undefined;
           tokenData.azureDeployment = voiceCfg.azureDeployment || undefined;
@@ -10357,6 +10535,7 @@ async function handleApi(req, res, url) {
   if (path === "/api/agents/tools" && req.method === "GET") {
     try {
       const { getVoiceToolDefinitions, getAllowedVoiceTools } = await import("./voice-relay.mjs");
+      const requestedVoiceAgentId = String(url.searchParams.get("voiceAgentId") || "").trim();
       const context = {
         sessionId: String(url.searchParams.get("sessionId") || "").trim() || undefined,
         executor: String(url.searchParams.get("executor") || "").trim() || undefined,
@@ -10367,14 +10546,23 @@ async function handleApi(req, res, url) {
       const allTools = await getVoiceToolDefinitions({ delegateOnly: false, context });
       const allowed = await getAllowedVoiceTools(context);
       const allowedTools = allowed instanceof Set ? allowed : null;
-      const tools = allowedTools
+      let tools = allowedTools
         ? (Array.isArray(allTools) ? allTools : []).filter((tool) => allowedTools.has(String(tool?.name || "").trim()))
         : allTools;
+      const libraryRoot = resolveVoiceLibraryRoot(context);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        requestedVoiceAgentId,
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
+      tools = applyVoiceAgentToolFilters(tools, voiceToolCfg);
       jsonResponse(res, 200, {
         ok: true,
         tools: Array.isArray(tools) ? tools : [],
         allowedTools: allowedTools ? Array.from(allowedTools.values()).sort() : null,
         totalTools: Array.isArray(tools) ? tools.length : 0,
+        voiceAgentId: activeVoiceAgentId,
       });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -10400,6 +10588,7 @@ async function handleApi(req, res, url) {
         executor,
         mode,
         model,
+        voiceAgentId,
       } = body || {};
       const normalizedToolName = String(toolName || "").trim();
       if (!normalizedToolName) {
@@ -10437,8 +10626,16 @@ async function handleApi(req, res, url) {
         mode: String(mode || "").trim() || undefined,
         model: String(model || "").trim() || undefined,
         authSource: String(authResult?.source || "").trim() || undefined,
+        voiceAgentId: String(voiceAgentId || "").trim() || undefined,
       };
       const normalizedArgs = normalizeVoiceToolArgs(normalizedToolName, args || {});
+      const libraryRoot = resolveVoiceLibraryRoot(context);
+      const { selected: selectedVoiceAgent } = resolveActiveVoiceAgent(
+        libraryRoot,
+        context.voiceAgentId || "",
+      );
+      const activeVoiceAgentId = selectedVoiceAgent?.id || "voice-agent";
+      const voiceToolCfg = getAgentToolConfig(libraryRoot, activeVoiceAgentId);
       let tracker = null;
       let session = null;
       if (context.sessionId) {
@@ -10475,6 +10672,37 @@ async function handleApi(req, res, url) {
             jsonResponse(res, 400, { error: deniedMessage });
           } else {
             jsonResponse(res, 400, { ok: false, error: deniedMessage });
+          }
+          return;
+        }
+      }
+      const toolEnabledForAgent =
+        applyVoiceAgentToolFilters([{ name: normalizedToolName }], voiceToolCfg).length > 0;
+      if (!toolEnabledForAgent) {
+        const deniedMessage = `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`;
+        if (isVoiceToolRoute) {
+          jsonResponse(res, 403, { error: deniedMessage });
+        } else {
+          jsonResponse(res, 403, { ok: false, error: deniedMessage });
+        }
+        return;
+      }
+      if (
+        normalizedToolName === "invoke_mcp_tool"
+        && Array.isArray(voiceToolCfg?.enabledMcpServers)
+        && voiceToolCfg.enabledMcpServers.length > 0
+      ) {
+        const requestedServer = String(
+          normalizedArgs?.server
+          || normalizedArgs?.serverId
+          || "",
+        ).trim();
+        if (requestedServer && !voiceToolCfg.enabledMcpServers.includes(requestedServer)) {
+          const deniedMessage = `MCP server "${requestedServer}" is not enabled for voice agent "${activeVoiceAgentId}"`;
+          if (isVoiceToolRoute) {
+            jsonResponse(res, 403, { error: deniedMessage });
+          } else {
+            jsonResponse(res, 403, { ok: false, error: deniedMessage });
           }
           return;
         }

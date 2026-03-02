@@ -49,6 +49,7 @@ let _callContext = {
   executor: null,
   mode: null,
   model: null,
+  voiceAgentId: null,
 };
 let _sdkConfig = null;
 let _usingLegacyFallback = false;
@@ -92,6 +93,7 @@ function _normalizeCallContext(options = {}) {
     executor: String(options?.executor || "").trim() || null,
     mode: String(options?.mode || "").trim() || null,
     model: String(options?.model || "").trim() || null,
+    voiceAgentId: String(options?.voiceAgentId || "").trim() || null,
   };
 }
 
@@ -367,6 +369,7 @@ async function startAgentsSdkSession(config, options = {}) {
       executor: _callContext.executor || undefined,
       mode: _callContext.mode || undefined,
       model: _callContext.model || undefined,
+      voiceAgentId: _callContext.voiceAgentId || undefined,
       delegateOnly: false,
       sdkMode: true,
     }),
@@ -399,6 +402,7 @@ async function startAgentsSdkSession(config, options = {}) {
               executor: _callContext.executor || undefined,
               mode: _callContext.mode || undefined,
               model: _callContext.model || undefined,
+              voiceAgentId: _callContext.voiceAgentId || undefined,
             }),
           });
         } catch (fetchErr) {
@@ -709,6 +713,7 @@ async function startGeminiLiveSession(config, options = {}) {
         executor: _callContext.executor,
         mode: _callContext.mode,
         model: resolvedConfig.model,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
       }));
 
       _session = ws;
@@ -908,6 +913,7 @@ async function handleGeminiToolCall(msg) {
         executor: _callContext.executor || undefined,
         mode: _callContext.mode || undefined,
         model: _callContext.model || undefined,
+        voiceAgentId: _callContext.voiceAgentId || undefined,
       }),
     });
     const result = await res.json();
@@ -1096,7 +1102,13 @@ export function stopSdkVoiceSession() {
   sdkVoiceDuration.value = 0;
   sdkVoiceProvider.value = null;
   sdkVoiceSdkActive.value = false;
-  _callContext = { sessionId: null, executor: null, mode: null, model: null };
+  _callContext = {
+    sessionId: null,
+    executor: null,
+    mode: null,
+    model: null,
+    voiceAgentId: null,
+  };
   _usingLegacyFallback = false;
   _resetTranscriptPersistenceState();
 
