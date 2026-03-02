@@ -202,15 +202,18 @@ export function PullToRefresh({ onRefresh, children, disabled = false }) {
           class="ptr-indicator"
           style="height: ${refreshing ? THRESHOLD : pullDistance}px;
             display:flex;align-items:center;justify-content:center;
+            overflow:hidden;
             transition: ${pullingRef.current ? "none" : "height 0.2s ease"}"
         >
-          <div
-            class="ptr-spinner-icon ${refreshing ? "spinning" : ""}"
-            style="transform: rotate(${pullDistance * 4}deg);
-              opacity: ${Math.min(1, pullDistance / THRESHOLD)}"
-          >
-            ${ICONS.refresh}
-          </div>
+          ${refreshing
+            ? html`<div class="ptr-spinner-icon"></div>`
+            : html`<div
+                class="ptr-pull-icon"
+                style="transform: rotate(${Math.min(pullDistance / THRESHOLD, 1) * 360}deg);
+                  opacity: ${Math.min(1, pullDistance / (THRESHOLD * 0.5))}"
+              >
+                ${ICONS.refresh}
+              </div>`}
         </div>
       `}
       ${children}
