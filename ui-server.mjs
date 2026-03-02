@@ -1081,9 +1081,19 @@ async function handleVendor(req, res, url) {
     return;
   }
 
+  // MUI/Emotion vendor bundles in ui/vendor can drift into CJS runtime variants
+  // ("Dynamic require of react"). Route these names through the esm proxy path,
+  // which enforces ESM-safe payloads and URL-rewritten nested imports.
+  if (Object.prototype.hasOwnProperty.call(ESM_CDN_FILES, name)) {
+    const esmUrl = new URL(url.toString());
+    esmUrl.pathname = `/esm/${name}`;
+    await handleEsmProxy(req, res, esmUrl);
+    return;
+  }
+
   const headers = {
     "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": "max-age=86400, stale-while-revalidate=604800",
+    "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
   };
 
@@ -1131,10 +1141,48 @@ async function handleVendor(req, res, url) {
 const ESM_CACHE_DIR = resolve(repoRoot, ".cache", "esm-vendor");
 
 const ESM_CDN_FILES = {
-  "mui-material.js": "https://esm.sh/@mui/material@5?bundle",
+  "mui-material.js":
+    "https://esm.sh/@mui/material@5.15.20?target=es2022&external=react,react-dom,react/jsx-runtime",
   "emotion-react.js": "https://esm.sh/@emotion/react@11?bundle&external=react",
   "emotion-styled.js": "https://esm.sh/@emotion/styled@11?bundle&external=react,react-dom",
 };
+
+function normalizeEsmProxyBody(bodyText = "") {
+  let body = String(bodyText || "");
+  // esm.sh module entrypoints often include absolute specifiers like:
+  //   import "/react@..."; export * from "/@mui/material@.../..."
+  // When proxied from our origin these incorrectly resolve to our server.
+  // Rewrite to absolute esm.sh URLs so nested deps resolve correctly.
+  body = body.replace(
+    /(import\s+(?:[^"'`]*?\s+from\s+)?["'])\/(?!\/)/g,
+    "$1https://esm.sh/",
+  );
+  body = body.replace(
+    /(export\s+(?:\*|\{[^}]*\})\s+from\s+["'])\/(?!\/)/g,
+    "$1https://esm.sh/",
+  );
+  return body;
+}
+
+function hasUnsupportedCjsRuntime(bodyText = "") {
+  const body = String(bodyText || "");
+  return (
+    body.includes('Dynamic require of "react"') ||
+    body.includes("require(\"react\")") ||
+    body.includes("require('react')")
+  );
+}
+
+function getEsmCachePath(name, cdnUrl) {
+  const safeName = String(name || "module.js").replace(/[^a-z0-9_.-]/gi, "_");
+  const urlHash = createHash("sha256")
+    .update(String(cdnUrl || ""))
+    .digest("hex")
+    .slice(0, 12);
+  const ext = extname(safeName) || ".js";
+  const base = safeName.slice(0, safeName.length - ext.length) || "module";
+  return resolve(ESM_CACHE_DIR, `${base}.${urlHash}${ext}`);
+}
 
 async function handleEsmProxy(req, res, url) {
   const name = url.pathname.replace(/^\/esm\//, "");
@@ -1146,17 +1194,30 @@ async function handleEsmProxy(req, res, url) {
 
   const headers = {
     "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": "max-age=86400, stale-while-revalidate=604800",
+    "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
   };
 
   // ── 1. Disk cache ──────────────────────────────────────────────────────────
-  const cachePath = resolve(ESM_CACHE_DIR, name);
+  const cachePath = getEsmCachePath(name, cdnUrl);
   if (existsSync(cachePath)) {
     try {
-      const data = await readFile(cachePath);
+      const cached = String(await readFile(cachePath, "utf8"));
+      const normalized = normalizeEsmProxyBody(cached);
+      const finalBody = normalized;
+      if (cached !== normalized) {
+        try {
+          mkdirSync(ESM_CACHE_DIR, { recursive: true });
+          writeFileSync(cachePath, normalized, "utf8");
+        } catch {
+          // best effort
+        }
+      }
+      if (hasUnsupportedCjsRuntime(finalBody)) {
+        throw new Error("cached ESM bundle contains unsupported dynamic require runtime");
+      }
       res.writeHead(200, { ...headers, "X-Bosun-Esm": "cached" });
-      res.end(data);
+      res.end(finalBody);
       return;
     } catch { /* fall through to live fetch */ }
   }
@@ -1173,7 +1234,11 @@ async function handleEsmProxy(req, res, url) {
     if (!response.ok) {
       throw new Error(`esm.sh returned HTTP ${response.status}`);
     }
-    const body = await response.text();
+    const rawBody = await response.text();
+    const body = normalizeEsmProxyBody(rawBody);
+    if (hasUnsupportedCjsRuntime(body)) {
+      throw new Error("esm payload contains unsupported dynamic require runtime");
+    }
 
     // Cache to disk (best-effort, don't fail the request)
     try {

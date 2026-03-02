@@ -6,6 +6,11 @@
 
 import { h } from "preact";
 import htm from "htm";
+import {
+  createTheme as createMuiTheme,
+  ThemeProvider as MuiThemeProvider,
+  SvgIcon as MuiSvgIcon,
+} from "@mui/material";
 
 const html = htm.bind(h);
 
@@ -134,7 +139,7 @@ export {
  * VirtEngine dark theme — matches the existing CSS custom properties.
  * Uses Bosun brand colors (#da7756 primary, warm dark palette).
  */
-export const veTheme = createTheme({
+export const veTheme = createMuiTheme({
   palette: {
     mode: "dark",
     primary: {
@@ -488,7 +493,7 @@ export const veTheme = createTheme({
  * Usage in htm: html`<${VeTheme}> ...children... </${VeTheme}>`
  */
 export function VeTheme({ children }) {
-  return html`<${ThemeProvider} theme=${veTheme}>${children}</${ThemeProvider}>`;
+  return html`<${MuiThemeProvider} theme=${veTheme}>${children}</${MuiThemeProvider}>`;
 }
 
 /**
@@ -496,5 +501,5 @@ export function VeTheme({ children }) {
  * Wraps an existing inline SVG in MUI SvgIcon for consistency.
  */
 export function MuiIcon({ children, ...props }) {
-  return html`<${SvgIcon} ...${props} sx=${{ fontSize: "inherit", ...props.sx }}>${children}</${SvgIcon}>`;
+  return html`<${MuiSvgIcon} ...${props} sx=${{ fontSize: "inherit", ...props.sx }}>${children}</${MuiSvgIcon}>`;
 }

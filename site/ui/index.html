@@ -146,14 +146,6 @@
         throw new Error("Session expired or unauthorized (received HTML instead of JavaScript module).");
       }
     };
-    const applyFallbackImportMap = () => {
-      const fallback = document.getElementById("importmap-fallback");
-      if (!fallback) return;
-      const script = document.createElement("script");
-      script.type = "importmap-shim";
-      script.textContent = fallback.textContent;
-      document.head.appendChild(script);
-    };
     const waitForShim = (timeoutMs = 1200) =>
       new Promise((resolve) => {
         if (window.importShim) return resolve(true);
@@ -194,21 +186,16 @@
           }
           return;
         }
-        console.warn("[ui] Primary CDN failed, switching to fallback.", err);
-        applyFallbackImportMap();
+        console.warn("[ui] Primary CDN failed, switching to native import.", err);
         try {
-          await loadApp(true);
-        } catch (fallbackErr) {
-          console.error("[ui] Fallback CDN failed. Retrying with native import.", fallbackErr);
-          try {
-            await loadAppNative();
-          } catch (nativeErr) {
-            const detail = formatLoadError(nativeErr);
-            if (isLikelyAuthError(nativeErr)) {
-              bootErr(`:lock: Authentication expired.<br><small style="color:#888">${detail}<br>Re-open Bosun using a fresh authenticated URL or desktop session.</small>`);
-            } else {
-              bootErr(`:alert: Failed to load app modules.<br><small style="color:#888">${detail}<br>Local vendor and CDN fallback both failed. Run <code>npm install</code> in the bosun directory or check your connection.</small>`);
-            }
+          await loadAppNative();
+        } catch (nativeErr) {
+          console.error("[ui] Native import failed after primary import error.", nativeErr);
+          const detail = formatLoadError(nativeErr);
+          if (isLikelyAuthError(nativeErr)) {
+            bootErr(`:lock: Authentication expired.<br><small style="color:#888">${detail}<br>Re-open Bosun using a fresh authenticated URL or desktop session.</small>`);
+          } else {
+            bootErr(`:alert: Failed to load app modules.<br><small style="color:#888">${detail}<br>Local vendor and CDN fallback both failed. Run <code>npm install</code> in the bosun directory or check your connection.</small>`);
           }
         }
       }
