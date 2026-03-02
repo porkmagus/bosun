@@ -653,19 +653,20 @@ function WorkflowCanvas({ workflow, onSave }) {
 
       <!-- Toolbar -->
       <div class="wf-toolbar" style="position: absolute; top: 12px; left: 12px; right: 12px; z-index: 20; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-        <button class="wf-btn wf-btn-ghost" onClick=${returnToWorkflowList}>
+        <${Button} variant="text" size="small" onClick=${returnToWorkflowList}>
           ← Back to Workflows
-        </button>
-        <button class="wf-btn wf-btn-primary" onClick=${() => setShowNodePalette(!showNodePalette)} style="display: flex; align-items: center; gap: 6px;">
+        <//>
+        <${Button} variant="contained" size="small" onClick=${() => setShowNodePalette(!showNodePalette)} sx=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <span style="font-size: 18px;">+</span> Add Node
-        </button>
-        <button class="wf-btn" onClick=${() => { if (workflow) saveWorkflow({ ...workflow, nodes, edges }); }}>
+        <//>
+        <${Button} variant="outlined" size="small" onClick=${() => { if (workflow) saveWorkflow({ ...workflow, nodes, edges }); }}>
           <span class="btn-icon">${resolveIcon("save")}</span>
           Save
-        </button>
-        <button
-          class="wf-btn"
-          style=${workflow?.enabled === false ? "opacity: 0.65;" : ""}
+        <//>
+        <${Button}
+          variant="outlined"
+          size="small"
+          sx=${workflow?.enabled === false ? { opacity: 0.65 } : {}}
           onClick=${() => {
             if (!workflow?.id) return;
             if (workflow?.enabled === false) {
@@ -677,9 +678,10 @@ function WorkflowCanvas({ workflow, onSave }) {
         >
           <span class="btn-icon">${resolveIcon("play")}</span>
           Run
-        </button>
-        <button
-          class="wf-btn"
+        <//>
+        <${Button}
+          variant="outlined"
+          size="small"
           onClick=${() => {
             if (!workflow?.id) return;
             setWorkflowEnabled(workflow.id, workflow?.enabled === false);
@@ -687,7 +689,7 @@ function WorkflowCanvas({ workflow, onSave }) {
         >
           <span class="btn-icon">${resolveIcon(workflow?.enabled === false ? "play" : "pause")}</span>
           ${workflow?.enabled === false ? "Resume" : "Pause"}
-        </button>
+        <//>
         <div style="flex:1;"></div>
         <span class="wf-badge" style="font-size: 11px; opacity: 0.7;">
           ${nodes.length} nodes · ${edges.length} edges · Zoom: ${Math.round(zoom * 100)}%
@@ -695,9 +697,9 @@ function WorkflowCanvas({ workflow, onSave }) {
         <span class="wf-badge" style="font-size: 11px; opacity: 0.75;">
           ${workflow?.enabled === false ? "Paused" : "Active"} · Pan: touch drag, Ctrl/Space + drag
         </span>
-        <button class="wf-btn wf-btn-sm" onClick=${() => setZoom(1)}>Reset Zoom</button>
-        <button class="wf-btn wf-btn-sm" onClick=${() => setPan({ x: 0, y: 0 })}>Reset Pan</button>
-        <button class="wf-btn wf-btn-sm" onClick=${returnToWorkflowList}>← Back to Workflows</button>
+        <${Button} variant="text" size="small" onClick=${() => setZoom(1)}>Reset Zoom<//>
+        <${Button} variant="text" size="small" onClick=${() => setPan({ x: 0, y: 0 })}>Reset Pan<//>
+        <${Button} variant="text" size="small" onClick=${returnToWorkflowList}>← Back to Workflows<//>
       </div>
 
       <!-- Node Palette (dropdown) -->
@@ -896,18 +898,18 @@ function WorkflowCanvas({ workflow, onSave }) {
       <!-- Context Menu -->
       ${contextMenu && html`
         <div class="wf-context-menu" style="position: fixed; left: ${contextMenu.x}px; top: ${contextMenu.y}px; z-index: 50;">
-          <button onClick=${() => { setEditingNode(contextMenu.nodeId); setContextMenu(null); }}>
+          <${MenuItem} onClick=${() => { setEditingNode(contextMenu.nodeId); setContextMenu(null); }}>
             <span class="btn-icon">${resolveIcon("settings")}</span>
             Edit Config
-          </button>
-          <button onClick=${() => { const n = nodes.find(n => n.id === contextMenu.nodeId); if (n) { const clone = { ...n, id: `node-${Date.now()}`, position: { x: n.position.x + 40, y: n.position.y + 40 } }; setNodes(p => [...p, clone]); } setContextMenu(null); }}>
+          <//>
+          <${MenuItem} onClick=${() => { const n = nodes.find(n => n.id === contextMenu.nodeId); if (n) { const clone = { ...n, id: `node-${Date.now()}`, position: { x: n.position.x + 40, y: n.position.y + 40 } }; setNodes(p => [...p, clone]); } setContextMenu(null); }}>
             <span class="btn-icon">${resolveIcon("clipboard")}</span>
             Duplicate
-          </button>
-          <button onClick=${() => { deleteNode(contextMenu.nodeId); }} style="color: #ef4444;">
+          <//>
+          <${MenuItem} onClick=${() => { deleteNode(contextMenu.nodeId); }} sx=${{ color: '#ef4444' }}>
             <span class="btn-icon">${resolveIcon("trash")}</span>
             Delete
-          </button>
+          <//>
         </div>
       `}
 
@@ -970,9 +972,9 @@ function NodePalette({ nodeTypes: types, onSelect, onClose }) {
           sx=${{ flex: 1 }}
           autoFocus
         />
-        <button onClick=${onClose} class="wf-btn wf-btn-sm" style="font-size: 16px; line-height: 1;">
+        <${IconButton} size="small" onClick=${onClose} sx=${{ fontSize: '16px', lineHeight: 1 }}>
           <span class="icon-inline">${resolveIcon("✕")}</span>
-        </button>
+        <//>
       </div>
 
       ${Object.entries(filtered).map(([cat, items]) => {
@@ -989,15 +991,16 @@ function NodePalette({ nodeTypes: types, onSelect, onClose }) {
               <span style="font-size: 10px;">${expandedCat === cat ? ICONS.chevronDown : ICONS.arrowRight}</span>
             </div>
             ${(expandedCat === cat || search.trim()) && items.map(nt => html`
-              <button
+              <${Button}
                 key=${nt.type}
                 onClick=${() => { onSelect(nt.type); haptic("light"); }}
-                class="wf-palette-item"
-                style="display: block; width: 100%; text-align: left; padding: 8px 12px 8px 28px; background: none; border: none; color: var(--color-text, white); font-size: 13px; cursor: pointer; border-radius: 6px; margin: 1px 0;"
+                variant="text"
+                size="small"
+                sx=${{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px 8px 28px', background: 'none', border: 'none', color: 'var(--color-text, white)', fontSize: '13px', cursor: 'pointer', borderRadius: '6px', margin: '1px 0', textTransform: 'none' }}
               >
                 <div style="font-weight: 500;">${nt.type.split(".").pop()?.replace(/_/g, " ")}</div>
                 <div style="font-size: 11px; opacity: 0.6; margin-top: 2px;">${(nt.description || "").slice(0, 60)}</div>
-              </button>
+              <//>
             `)}
           </div>
         `;
@@ -1144,23 +1147,27 @@ function WorkflowAgentLibraryPicker({ config, onUpdate }) {
 
   return html`
     <div style="margin-top: 10px; margin-bottom: 6px;">
-      <button
+      <${Button}
         onClick=${loadAgents}
-        style="width: 100%; padding: 7px 10px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: #1a1f2e; color: #c9d1d9; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+        variant="outlined"
+        size="small"
+        sx=${{ width: '100%', padding: '7px 10px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: '#1a1f2e', color: '#c9d1d9', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', textTransform: 'none' }}
       >
         <span class="btn-icon" style="color: #60a5fa;">${resolveIcon("users")}</span>
         <span style="flex: 1; text-align: left; font-weight: 500;">Library Agent Profiles</span>
         ${selected && html`<span style="font-size: 10px; background: #1e3a5f; color: #60a5fa; padding: 1px 6px; border-radius: 4px;">${selected}</span>`}
         <span style="font-size: 10px; color: #6b7280;">${loading ? "…" : (expanded ? ICONS.chevronDown : ICONS.arrowRight)}</span>
-      </button>
+      <//>
       ${expanded && html`
         <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; padding-right: 4px;">
           ${agents.length === 0 && html`<div style="font-size: 11px; color: #6b7280; padding: 6px;">No agent profiles in library.</div>`}
           ${agents.map(a => html`
-            <button
+            <${Button}
               key=${a.id}
               onClick=${() => selectAgent(a)}
-              style="padding: 6px 10px; font-size: 11px; border: 1px solid ${selected === a.id ? '#2563eb' : '#2a3040'}; border-radius: 6px; background: ${selected === a.id ? '#1e3a5f' : '#161b22'}; color: #c9d1d9; cursor: pointer; text-align: left; transition: all 0.15s;"
+              variant="outlined"
+              size="small"
+              sx=${{ padding: '6px 10px', fontSize: '11px', border: '1px solid ' + (selected === a.id ? '#2563eb' : '#2a3040'), borderRadius: '6px', background: selected === a.id ? '#1e3a5f' : '#161b22', color: '#c9d1d9', cursor: 'pointer', textAlign: 'left', transition: 'all 0.15s', textTransform: 'none', display: 'block', width: '100%' }}
             >
               <div style="font-weight: 500; display: flex; align-items: center; gap: 6px;">
                 <span class="btn-icon" style="color: ${selected === a.id ? '#60a5fa' : '#6b7280'};">${resolveIcon("user")}</span>
@@ -1168,7 +1175,7 @@ function WorkflowAgentLibraryPicker({ config, onUpdate }) {
                 ${selected === a.id && html`<span style="margin-left: auto; font-size: 9px; color: #60a5fa;">● active</span>`}
               </div>
               ${a.description && html`<div style="font-size: 10px; color: #6b7280; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${a.description}</div>`}
-            </button>
+            <//>
           `)}
         </div>
       `}
@@ -1219,9 +1226,9 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           />
           <div style="font-size: 11px; color: ${meta.color}; font-family: monospace;">${node.type}</div>
         </div>
-        <button onClick=${onClose} class="wf-btn wf-btn-sm">
+        <${IconButton} size="small" onClick=${onClose}>
           <span class="icon-inline">${resolveIcon("✕")}</span>
-        </button>
+        <//>
       </div>
 
       <!-- Description -->
@@ -1247,16 +1254,17 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
               <div style="font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px; padding-left: 4px;">${group}</div>
               <div style="display: flex; flex-wrap: wrap; gap: 4px;">
                 ${items.map(p => html`
-                  <button
+                  <${Button}
                     key=${p.label}
                     onClick=${() => applyPreset({ command: p.cmd })}
-                    class="wf-preset-btn"
+                    variant="outlined"
+                    size="small"
                     title=${p.cmd}
-                    style="padding: 3px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.command === p.cmd ? '#1e3a5f' : '#1a1f2e'}; color: ${config.command === p.cmd ? '#60a5fa' : '#c9d1d9'}; cursor: pointer; white-space: nowrap; transition: all 0.1s;"
+                    sx=${{ padding: '3px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.command === p.cmd ? '#1e3a5f' : '#1a1f2e', color: config.command === p.cmd ? '#60a5fa' : '#c9d1d9', cursor: 'pointer', whiteSpace: 'nowrap', transition: 'all 0.1s', textTransform: 'none' }}
                   >
                     <span class="btn-icon">${resolveIcon(p.icon)}</span>
                     ${p.label}
-                  </button>
+                  <//>
                 `)}
               </div>
             </div>
@@ -1278,18 +1286,19 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           ${presetExpanded && html`
             <div style="display: flex; flex-direction: column; gap: 3px; max-height: 200px; overflow-y: auto; padding-right: 4px;">
               ${AGENT_PROMPT_PRESETS.map(p => html`
-                <button
+                <${Button}
                   key=${p.label}
                   onClick=${() => applyPreset({ prompt: p.prompt })}
-                  class="wf-preset-btn"
-                  style="padding: 6px 10px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: #1a1f2e; color: #c9d1d9; cursor: pointer; text-align: left; transition: all 0.1s; line-height: 1.3;"
+                  variant="outlined"
+                  size="small"
+                  sx=${{ padding: '6px 10px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: '#1a1f2e', color: '#c9d1d9', cursor: 'pointer', textAlign: 'left', transition: 'all 0.1s', lineHeight: 1.3, textTransform: 'none', display: 'block', width: '100%' }}
                 >
                   <div style="font-weight: 500; display: flex; align-items: center; gap: 6px;">
                     <span class="btn-icon">${resolveIcon(p.icon)}</span>
                     <span>${p.label}</span>
                   </div>
                   <div style="font-size: 10px; color: #6b7280; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${p.prompt.split("\n")[0].slice(0, 60)}…</div>
-                </button>
+                <//>
               `)}
             </div>
           `}
@@ -1319,14 +1328,16 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           </div>
           <div style="display: flex; flex-wrap: wrap; gap: 4px;">
             ${TRIGGER_EVENT_PRESETS.map(p => html`
-              <button
+              <${Button}
                 key=${p.value}
                 onClick=${() => applyPreset({ eventType: p.value })}
-                style="padding: 3px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.eventType === p.value ? '#0d3320' : '#1a1f2e'}; color: ${config.eventType === p.value ? '#34d399' : '#c9d1d9'}; cursor: pointer; white-space: nowrap;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '3px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.eventType === p.value ? '#0d3320' : '#1a1f2e', color: config.eventType === p.value ? '#34d399' : '#c9d1d9', cursor: 'pointer', whiteSpace: 'nowrap', textTransform: 'none' }}
               >
                 <span class="btn-icon">${resolveIcon(p.icon)}</span>
                 ${p.label}
-              </button>
+              <//>
             `)}
           </div>
         </div>
@@ -1341,13 +1352,15 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           </div>
           <div style="display: flex; flex-wrap: wrap; gap: 4px;">
             ${CRON_PRESETS.map(p => html`
-              <button
+              <${Button}
                 key=${p.value}
                 onClick=${() => applyPreset({ cron: p.value })}
-                style="padding: 3px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.cron === p.value ? '#0d3320' : '#1a1f2e'}; color: ${config.cron === p.value ? '#34d399' : '#c9d1d9'}; cursor: pointer; white-space: nowrap;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '3px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.cron === p.value ? '#0d3320' : '#1a1f2e', color: config.cron === p.value ? '#34d399' : '#c9d1d9', cursor: 'pointer', whiteSpace: 'nowrap', textTransform: 'none' }}
               >
                 ${p.label}
-              </button>
+              <//>
             `)}
           </div>
         </div>
@@ -1362,13 +1375,15 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           </div>
           <div style="display: flex; flex-wrap: wrap; gap: 4px;">
             ${["opened", "merged", "review_requested", "changes_requested", "approved", "closed"].map(ev => html`
-              <button
+              <${Button}
                 key=${ev}
                 onClick=${() => applyPreset({ event: ev })}
-                style="padding: 3px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.event === ev ? '#0d3320' : '#1a1f2e'}; color: ${config.event === ev ? '#34d399' : '#c9d1d9'}; cursor: pointer; white-space: nowrap;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '3px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.event === ev ? '#0d3320' : '#1a1f2e', color: config.event === ev ? '#34d399' : '#c9d1d9', cursor: 'pointer', whiteSpace: 'nowrap', textTransform: 'none' }}
               >
                 ${ev.replace(/_/g, " ")}
-              </button>
+              <//>
             `)}
           </div>
         </div>
@@ -1383,14 +1398,16 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
           </div>
           <div style="display: flex; flex-direction: column; gap: 3px;">
             ${EXPRESSION_PRESETS.map(p => html`
-              <button
+              <${Button}
                 key=${p.label}
                 onClick=${() => applyPreset({ expression: p.expr })}
-                style="padding: 4px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: #1a1f2e; color: #c9d1d9; cursor: pointer; text-align: left;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '4px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: '#1a1f2e', color: '#c9d1d9', cursor: 'pointer', textAlign: 'left', textTransform: 'none', display: 'block', width: '100%' }}
               >
                 <span style="font-weight: 500;">${p.label}</span>
                 <span style="font-size: 10px; color: #6b7280; margin-left: 6px; font-family: monospace;">${p.expr.slice(0, 45)}${p.expr.length > 45 ? "…" : ""}</span>
-              </button>
+              <//>
             `)}
           </div>
           <div style="margin-top: 6px; padding: 6px 8px; background: #1a1f2e; border-radius: 6px; border-left: 3px solid #f472b6;">
@@ -1434,16 +1451,18 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
               { label: "Needs Review", icon: "eye", msg: "PR needs manual review: {{reason}}" },
               { label: "Rate Limited", icon: "alert", msg: "Agent rate limited. Cooling down for {{cooldownSec}}s. Provider: {{provider}}" },
             ].map(p => html`
-              <button
+              <${Button}
                 key=${p.label}
                 onClick=${() => applyPreset({ message: p.msg })}
-                style="padding: 4px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: #1a1f2e; color: #c9d1d9; cursor: pointer; text-align: left;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '4px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: '#1a1f2e', color: '#c9d1d9', cursor: 'pointer', textAlign: 'left', textTransform: 'none', display: 'block', width: '100%' }}
               >
                 <span style="display: inline-flex; align-items: center; gap: 6px;">
                   <span class="btn-icon">${resolveIcon(p.icon)}</span>
                   <span>${p.label}</span>
                 </span>
-              </button>
+              <//>
             `)}
           </div>
         </div>
@@ -1453,13 +1472,15 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
       ${node.type === "notify.log" && html`
         <div style="margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 4px;">
           ${["info", "warn", "error", "debug"].map(lv => html`
-            <button
+            <${Button}
               key=${lv}
               onClick=${() => applyPreset({ level: lv })}
-              style="padding: 3px 10px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.level === lv ? '#1e293b' : '#1a1f2e'}; color: ${lv === 'error' ? '#ef4444' : lv === 'warn' ? '#f59e0b' : lv === 'debug' ? '#6b7280' : '#60a5fa'}; cursor: pointer;"
+              variant="outlined"
+              size="small"
+              sx=${{ padding: '3px 10px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.level === lv ? '#1e293b' : '#1a1f2e', color: lv === 'error' ? '#ef4444' : lv === 'warn' ? '#f59e0b' : lv === 'debug' ? '#6b7280' : '#60a5fa', cursor: 'pointer', textTransform: 'none' }}
             >
               ${lv.toUpperCase()}
-            </button>
+            <//>
           `)}
         </div>
       `}
@@ -1487,13 +1508,15 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
                 { label: "ESLint", cmd: "npx eslint ." },
               ] : []),
             ].map(p => html`
-              <button
+              <${Button}
                 key=${p.label}
                 onClick=${() => applyPreset({ command: p.cmd, ...(p.extra || {}) })}
-                style="padding: 3px 8px; font-size: 11px; border: 1px solid #2a3040; border-radius: 6px; background: ${config.command === p.cmd ? '#0d3320' : '#1a1f2e'}; color: ${config.command === p.cmd ? '#34d399' : '#c9d1d9'}; cursor: pointer;"
+                variant="outlined"
+                size="small"
+                sx=${{ padding: '3px 8px', fontSize: '11px', border: '1px solid #2a3040', borderRadius: '6px', background: config.command === p.cmd ? '#0d3320' : '#1a1f2e', color: config.command === p.cmd ? '#34d399' : '#c9d1d9', cursor: 'pointer', textTransform: 'none' }}
               >
                 ${p.label}
-              </button>
+              <//>
             `)}
           </div>
         </div>
@@ -1609,14 +1632,15 @@ function NodeConfigEditor({ node, nodeTypes: types, onUpdate, onUpdateLabel, onC
       </div>
 
       <!-- Delete button -->
-      <button
+      <${Button}
         onClick=${() => { if (confirm("Delete this node?")) onDelete(); }}
-        class="wf-btn"
-        style="width: 100%; margin-top: 20px; background: #dc262620; color: #ef4444; border-color: #ef444440;"
+        variant="outlined"
+        size="small"
+        sx=${{ width: '100%', marginTop: '20px', background: '#dc262620', color: '#ef4444', borderColor: '#ef444440', textTransform: 'none' }}
       >
         <span class="btn-icon">${resolveIcon("trash")}</span>
         Delete Node
-      </button>
+      <//>
 
       <!-- Raw JSON -->
       <details style="margin-top: 16px;">
@@ -1650,9 +1674,10 @@ function WorkflowListView() {
       <!-- Header -->
       <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
         <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Workflows</h2>
-        <button
+        <${Button}
           type="button"
-          class="wf-btn wf-btn-primary"
+          variant="contained"
+          size="small"
           onClick=${() => {
             const newWf = {
               name: "New Workflow",
@@ -1673,11 +1698,11 @@ function WorkflowListView() {
         >
           <span class="btn-icon">${resolveIcon("plus")}</span>
           Create Workflow
-        </button>
-        <button type="button" class="wf-btn" onClick=${() => { selectedRunId.value = null; selectedRunDetail.value = null; workflowRunsLimit.value = WORKFLOW_RUN_PAGE_SIZE; viewMode.value = "runs"; loadRuns(); }}>
+        <//>
+        <${Button} type="button" variant="outlined" size="small" onClick=${() => { selectedRunId.value = null; selectedRunDetail.value = null; workflowRunsLimit.value = WORKFLOW_RUN_PAGE_SIZE; viewMode.value = "runs"; loadRuns(); }}>
           <span class="btn-icon">${resolveIcon("chart")}</span>
           Run History
-        </button>
+        <//>
       </div>
 
       <!-- Active Workflows -->
@@ -1741,9 +1766,10 @@ function WorkflowListView() {
                   <span>${wf.category || "custom"}</span>
                   <div style="flex: 1;"></div>
                   ${hasTemplateUpdate && html`
-                    <button
-                      class="wf-btn wf-btn-sm"
-                      style="font-size: 11px; border-color: #f59e0b80; color: #f59e0b;"
+                    <${Button}
+                      variant="text"
+                      size="small"
+                      sx=${{ fontSize: '11px', borderColor: '#f59e0b80', color: '#f59e0b', textTransform: 'none' }}
                       onClick=${async (e) => {
                         e.stopPropagation();
                         if (!isCustomizedTemplate) {
@@ -1768,11 +1794,12 @@ function WorkflowListView() {
                     >
                       <span class="icon-inline">${resolveIcon("refresh")}</span>
                       Update
-                    </button>
+                    <//>
                   `}
-                  <button
-                    class="wf-btn wf-btn-sm"
-                    style="font-size: 11px;"
+                  <${Button}
+                    variant="text"
+                    size="small"
+                    sx=${{ fontSize: '11px', textTransform: 'none' }}
                     onClick=${(e) => {
                       e.stopPropagation();
                       setWorkflowEnabled(wf.id, !wf.enabled);
@@ -1780,10 +1807,11 @@ function WorkflowListView() {
                   >
                     <span class="icon-inline">${resolveIcon(wf.enabled ? "pause" : "play")}</span>
                     ${wf.enabled ? "Pause" : "Resume"}
-                  </button>
-                  <button
-                    class="wf-btn wf-btn-sm"
-                    style=${`font-size: 11px; ${wf.enabled ? "" : "opacity: 0.65;"}`}
+                  <//>
+                  <${Button}
+                    variant="text"
+                    size="small"
+                    sx=${{ fontSize: '11px', textTransform: 'none', ...(wf.enabled ? {} : { opacity: 0.65 }) }}
                     onClick=${(e) => {
                       e.stopPropagation();
                       if (!wf.enabled) {
@@ -1794,10 +1822,10 @@ function WorkflowListView() {
                     }}
                   >
                     <span class="icon-inline">${resolveIcon("play")}</span>
-                  </button>
-                  <button class="wf-btn wf-btn-sm wf-btn-danger" style="font-size: 11px;" onClick=${(e) => { e.stopPropagation(); if (confirm("Delete " + wf.name + "?")) deleteWorkflow(wf.id); }}>
+                  <//>
+                  <${Button} variant="text" size="small" sx=${{ fontSize: '11px', color: '#ef4444', textTransform: 'none' }} onClick=${(e) => { e.stopPropagation(); if (confirm("Delete " + wf.name + "?")) deleteWorkflow(wf.id); }}>
                     <span class="icon-inline">${resolveIcon("trash")}</span>
-                  </button>
+                  <//>
                 </div>
               </div>
             `;
@@ -1818,15 +1846,15 @@ function WorkflowListView() {
             to error recovery. Install a template below or create one from scratch.
           </div>
           <div style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
-            <button class="wf-btn wf-btn-primary" onClick=${() => {
+            <${Button} variant="contained" size="small" onClick=${() => {
               const newWf = { name: "New Workflow", description: "", category: "custom", enabled: true, nodes: [], edges: [], variables: {} };
               saveWorkflow(newWf).then(wf => { if (wf) { activeWorkflow.value = wf; viewMode.value = "canvas"; } });
-            }}>+ Create Blank</button>
+            }}>+ Create Blank<//>
             ${availableTemplates.length > 0 && html`
-              <button class="wf-btn" style="border-color: #f59e0b60; color: #f59e0b;" onClick=${() => installTemplate(availableTemplates[0]?.id)}>
+              <${Button} variant="outlined" size="small" sx=${{ borderColor: '#f59e0b60', color: '#f59e0b', textTransform: 'none' }} onClick=${() => installTemplate(availableTemplates[0]?.id)}>
                 <span class="btn-icon">${resolveIcon("zap")}</span>
                 Quick Install: ${availableTemplates[0]?.name}
-              </button>
+              <//>
             `}
           </div>
         </div>
@@ -1883,12 +1911,13 @@ function WorkflowListView() {
                     <div style="display: flex; gap: 8px; align-items: center;">
                       <span style="font-size: 11px; color: var(--color-text-secondary, #6b7280);">${t.nodeCount} nodes</span>
                       <div style="flex: 1;"></div>
-                      <button
-                        class="wf-btn wf-btn-primary wf-btn-sm"
+                      <${Button}
+                        variant="contained"
+                        size="small"
                         onClick=${() => installTemplate(t.id)}
                       >
                         Install →
-                      </button>
+                      <//>
                     </div>
                   </div>
                 `)}
@@ -2097,11 +2126,11 @@ function RunHistoryView() {
     return html`
       <div style="padding: 0 4px;">
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
-          <button class="wf-btn wf-btn-sm" onClick=${() => { selectedRunId.value = null; selectedRunDetail.value = null; }}>
+          <${Button} variant="text" size="small" onClick=${() => { selectedRunId.value = null; selectedRunDetail.value = null; }}>
             ← Back to Run History
-          </button>
+          <//>
           <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Run Details</h2>
-          <button class="wf-btn wf-btn-sm" onClick=${() => loadRunDetail(selectedRun.runId)}>Refresh</button>
+          <${Button} variant="text" size="small" onClick=${() => loadRunDetail(selectedRun.runId)}>Refresh<//>
         </div>
 
         <div style="background: var(--color-bg-secondary, #1a1f2e); border-radius: 10px; border: 1px solid var(--color-border, #2a3040); padding: 14px; margin-bottom: 12px;">
@@ -2181,12 +2210,13 @@ function RunHistoryView() {
   return html`
     <div style="padding: 0 4px;">
       <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
-        <button class="wf-btn wf-btn-sm" onClick=${returnToWorkflowList}>← Back to Workflows</button>
+        <${Button} variant="text" size="small" onClick=${returnToWorkflowList}>← Back to Workflows<//>
         <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Run History</h2>
-        <button class="wf-btn wf-btn-sm" onClick=${() => loadRuns()}>Refresh</button>
+        <${Button} variant="text" size="small" onClick=${() => loadRuns()}>Refresh<//>
         ${canLoadMoreRuns && html`
-          <button
-            class="wf-btn wf-btn-sm"
+          <${Button}
+            variant="text"
+            size="small"
             onClick=${() => {
               const nextLimit = Math.min(
                 runsLimit + WORKFLOW_RUN_PAGE_SIZE,
@@ -2196,7 +2226,7 @@ function RunHistoryView() {
             }}
           >
             Load older
-          </button>
+          <//>
         `}
         ${hasRunningRuns && html`<span class="wf-badge" style="background: #3b82f630; color: #60a5fa;">Live</span>`}
       </div>
@@ -2228,34 +2258,30 @@ function RunHistoryView() {
       </div>
 
       <div class="wf-runs-filters">
-        <button
-          class=${`wf-chip ${statusFilter === "all" ? "active" : ""}`}
+        <${Chip}
+          label=${`All ${runCounts.all}`}
           onClick=${() => setStatusFilter("all")}
-          type="button"
-        >
-          All ${runCounts.all}
-        </button>
-        <button
-          class=${`wf-chip ${statusFilter === "running" ? "active" : ""}`}
+          variant=${statusFilter === "all" ? "filled" : "outlined"}
+          size="small"
+        />
+        <${Chip}
+          label=${`Running ${runCounts.running}`}
           onClick=${() => setStatusFilter("running")}
-          type="button"
-        >
-          Running ${runCounts.running}
-        </button>
-        <button
-          class=${`wf-chip ${statusFilter === "failed" ? "active" : ""}`}
+          variant=${statusFilter === "running" ? "filled" : "outlined"}
+          size="small"
+        />
+        <${Chip}
+          label=${`Failed ${runCounts.failed}`}
           onClick=${() => setStatusFilter("failed")}
-          type="button"
-        >
-          Failed ${runCounts.failed}
-        </button>
-        <button
-          class=${`wf-chip ${statusFilter === "completed" ? "active" : ""}`}
+          variant=${statusFilter === "failed" ? "filled" : "outlined"}
+          size="small"
+        />
+        <${Chip}
+          label=${`Completed ${runCounts.completed}`}
           onClick=${() => setStatusFilter("completed")}
-          type="button"
-        >
-          Completed ${runCounts.completed}
-        </button>
+          variant=${statusFilter === "completed" ? "filled" : "outlined"}
+          size="small"
+        />
         <span class="wf-runs-count">${filteredRuns.length} shown</span>
         <span class="wf-runs-count">${runs.length} loaded</span>
       </div>
@@ -2285,12 +2311,13 @@ function RunHistoryView() {
             ? `event:${run.triggerEvent || "unknown"}`
             : (run.triggerSource || "manual");
           return html`
-            <button
+            <${Button}
               key=${run.runId}
               type="button"
-              class="wf-card wf-run-row"
+              variant="text"
+              size="small"
               onClick=${() => loadRunDetail(run.runId)}
-              style="text-align: left; width: 100%; background: var(--color-bg-secondary, #1a1f2e); border-radius: 8px; padding: 12px; border: 1px solid ${borderColor}; display: flex; align-items: center; gap: 12px; cursor: pointer;"
+              sx=${{ textAlign: 'left', width: '100%', background: 'var(--color-bg-secondary, #1a1f2e)', borderRadius: '8px', padding: '12px', border: '1px solid ' + borderColor, display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', textTransform: 'none' }}
             >
               <span class="icon-inline" style="font-size: 16px;">
                 ${run.status === "completed" ? resolveIcon("check") : run.status === "failed" ? resolveIcon("close") : resolveIcon("clock")}
@@ -2318,7 +2345,7 @@ function RunHistoryView() {
                 </span>
                 ${run.isStuck && html`<span class="wf-badge" style="background: #f59e0b2f; color: #f59e0b; border-color: #f59e0b50;">stuck</span>`}
               </div>
-            </button>
+            <//>
           `;
         })}
       </div>
