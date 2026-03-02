@@ -14,6 +14,12 @@
  */
 
 import { signal, computed } from "@preact/signals";
+import {
+  ensureMicTrackingPatched,
+  registerMicStream,
+  stopTrackedMicStreams,
+} from "./mic-track-registry.js";
+import { shouldAutoBargeIn } from "./voice-barge-in.js";
 import { isVoiceMicMuted } from "./voice-client.js";
 
 // ── State Signals (same shape as voice-client.js) ───────────────────────────
@@ -66,6 +72,13 @@ let _pendingAssistantTranscriptText = "";
 let _awaitingToolCompletionAck = false;
 let _toolCompletionAckTimer = null;
 let _assistantBaselineBeforeToolAck = "";
+const _sdkCapturedMicStreams = new Set();
+let _lastAutoBargeInAt = 0;
+const AUTO_BARGE_IN_COOLDOWN_MS = 700;
+// Set to true by stopSdkVoiceSession() so that any in-flight getUserMedia
+// call in startAgentsSdkSession / startGeminiMicCapture releases the track
+// immediately instead of leaving the browser mic indicator active.
+let _sdkExplicitStop = false;
 
 // ── Event System ────────────────────────────────────────────────────────────
 
@@ -86,6 +99,24 @@ function emit(event, data) {
       }
     }
   }
+}
+
+function maybeAutoInterruptSdkResponse(reason = "speech-started") {
+  const now = Date.now();
+  if (!shouldAutoBargeIn({
+    muted: isVoiceMicMuted.value,
+    audioActive: Boolean(_session),
+    now,
+    lastTriggeredAt: _lastAutoBargeInAt,
+    minIntervalMs: AUTO_BARGE_IN_COOLDOWN_MS,
+  })) {
+    return false;
+  }
+  _lastAutoBargeInAt = now;
+  interruptSdkResponse();
+  sdkVoiceState.value = "listening";
+  emit("auto-barge-in", { reason });
+  return true;
 }
 
 function _normalizeCallContext(options = {}) {
@@ -559,6 +590,11 @@ async function startAgentsSdkSession(config, options = {}) {
     emit("interrupt", {});
   });
 
+  session.on("speech_started", () => {
+    maybeAutoInterruptSdkResponse("speech-started");
+    emit("speech-started", {});
+  });
+
   session.on("tool_call_start", (event) => {
     const callId = event?.callId || event?.call_id || `tc-${Date.now()}`;
     const name = event?.name || event?.toolName || "unknown";
@@ -651,18 +687,32 @@ async function startAgentsSdkSession(config, options = {}) {
 
   // Attempt WebRTC connection first. For Azure, if it fails (404 — WebRTC not
   // supported), retry with the WebSocket URL so the SDK uses WS transport.
-  try {
-    await session.connect(connectOpts);
-  } catch (connectErr) {
-    const errMsg = String(connectErr?.message || "");
-    const isWebRtc404 = /404|not found|SDP/i.test(errMsg);
-    const hasWsUrl = Boolean(String(tokenData?.wsUrl || "").trim());
-    if (isWebRtc404 && hasWsUrl && tokenData.provider === "azure") {
-      console.warn("[voice-client-sdk] WebRTC connect failed (404) — retrying via Azure WebSocket");
-      await session.connect({ ...connectOpts, url: tokenData.wsUrl });
-    } else {
-      throw connectErr;
+  // Wrap getUserMedia during connect so we can always stop SDK-owned mic tracks
+  // on teardown, even if the SDK keeps hidden stream references.
+  await _withGetUserMediaCapture(async () => {
+    try {
+      await session.connect(connectOpts);
+    } catch (connectErr) {
+      const errMsg = String(connectErr?.message || "");
+      const isWebRtc404 = /404|not found|SDP/i.test(errMsg);
+      const hasWsUrl = Boolean(String(tokenData?.wsUrl || "").trim());
+      if (isWebRtc404 && hasWsUrl && tokenData.provider === "azure") {
+        console.warn("[voice-client-sdk] WebRTC connect failed (404) — retrying via Azure WebSocket");
+        await session.connect({ ...connectOpts, url: tokenData.wsUrl });
+      } else {
+        throw connectErr;
+      }
     }
+  });
+
+  // Guard: stopSdkVoiceSession() may have been called while session.connect()
+  // was awaiting.  Release any mic streams captured during connect so that the
+  // browser indicator goes away, then abort this session setup.
+  if (_sdkExplicitStop) {
+    _stopCapturedSdkMicStreams();
+    stopTrackedMicStreams();
+    try { session.close?.(); } catch { /* ignore */ }
+    throw new Error("SDK session was stopped during connection");
   }
 
   if (_agentsRealtimeModuleSource) {
@@ -791,6 +841,17 @@ async function startGeminiMicCapture(ws) {
       channelCount: 1,
     },
   });
+  registerMicStream(_geminiMicStream);
+
+  // Guard: stopSdkVoiceSession() may have raced with this getUserMedia await.
+  // Release the mic immediately instead of leaving the indicator active.
+  if (_sdkExplicitStop) {
+    for (const track of _geminiMicStream.getTracks()) {
+      try { track.stop(); } catch { /* ignore */ }
+    }
+    _geminiMicStream = null;
+    throw new Error("SDK session was stopped during microphone acquisition");
+  }
 
   // Use MediaRecorder to stream chunks to server
   const recorder = new MediaRecorder(_geminiMicStream, {
@@ -872,6 +933,45 @@ function stopMicLikeTracks(source) {
   });
 }
 
+function _captureSdkMicStream(stream) {
+  if (!stream || typeof stream.getTracks !== "function") return;
+  const hasAudio = (stream.getAudioTracks?.() || []).length > 0;
+  if (!hasAudio) return;
+  _sdkCapturedMicStreams.add(stream);
+}
+
+function _stopCapturedSdkMicStreams() {
+  for (const stream of _sdkCapturedMicStreams) {
+    try {
+      for (const track of stream.getTracks()) {
+        if (String(track?.kind || "").toLowerCase() !== "audio") continue;
+        try { track.stop(); } catch { /* ignore */ }
+      }
+    } catch {
+      // best effort
+    }
+  }
+  _sdkCapturedMicStreams.clear();
+}
+
+async function _withGetUserMediaCapture(fn) {
+  const mediaDevices = globalThis?.navigator?.mediaDevices;
+  const original = mediaDevices?.getUserMedia;
+  if (!mediaDevices || typeof original !== "function") {
+    return await fn();
+  }
+  mediaDevices.getUserMedia = async (...args) => {
+    const stream = await original.apply(mediaDevices, args);
+    _captureSdkMicStream(stream);
+    return stream;
+  };
+  try {
+    return await fn();
+  } finally {
+    mediaDevices.getUserMedia = original;
+  }
+}
+
 function setMicLikeTracksEnabled(source, enabled) {
   let updated = false;
   forEachAudioTrackInSource(source, (track) => {
@@ -917,6 +1017,7 @@ function handleGeminiServerEvent(msg) {
       break;
 
     case "speech_started":
+      maybeAutoInterruptSdkResponse("speech-started");
       sdkVoiceState.value = "listening";
       emit("speech-started", {});
       break;
@@ -1024,6 +1125,8 @@ function playGeminiAudio(data) {
  * @returns {Promise<{ sdk: boolean, provider: string }>}
  */
 export async function startSdkVoiceSession(options = {}) {
+  ensureMicTrackingPatched();
+  _sdkExplicitStop = false; // reset before each new session attempt
   if (_session) {
     console.warn("[voice-client-sdk] Session already active");
     return { sdk: sdkVoiceSdkActive.value, provider: sdkVoiceProvider.value };
@@ -1038,6 +1141,7 @@ export async function startSdkVoiceSession(options = {}) {
   sdkVoiceResponse.value = "";
   sdkVoiceToolCalls.value = [];
   _usingLegacyFallback = false;
+  _lastAutoBargeInAt = 0;
   _resetTranscriptPersistenceState();
 
   try {
@@ -1088,6 +1192,7 @@ export async function startSdkVoiceSession(options = {}) {
     sdkVoiceSdkActive.value = false;
     sdkVoiceState.value = "idle";
     sdkVoiceError.value = null; // Don't show error — we'll fallback
+    _stopCapturedSdkMicStreams();
     emit("sdk-unavailable", {
       reason: reason || "SDK unavailable",
       provider: _sdkConfig?.provider || "unknown",
@@ -1105,6 +1210,9 @@ export async function startSdkVoiceSession(options = {}) {
  * Stop the current SDK voice session.
  */
 export function stopSdkVoiceSession() {
+  // Set before any cleanup so in-flight getUserMedia / session.connect awaiters
+  // detect the cancellation and release acquired mic tracks immediately.
+  _sdkExplicitStop = true;
   emit("session-ending", { sessionId: sdkVoiceSessionId.value });
   _flushPendingTranscriptBuffers();
   if (_geminiRecorder) {
@@ -1125,6 +1233,7 @@ export function stopSdkVoiceSession() {
     }
     _session = null;
   }
+  _stopCapturedSdkMicStreams();
 
   // Stop Gemini mic stream if active
   if (_geminiMicStream) {
@@ -1133,6 +1242,9 @@ export function stopSdkVoiceSession() {
     }
     _geminiMicStream = null;
   }
+  // Force-stop any tracked audio input streams to avoid stale browser mic
+  // capture indicators after call close (covers async/race teardown paths).
+  stopTrackedMicStreams();
 
   clearInterval(_durationTimer);
   _durationTimer = null;

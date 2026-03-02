@@ -8,6 +8,15 @@
  */
 
 import { signal, computed } from "@preact/signals";
+import {
+  ensureMicTrackingPatched,
+  registerMicStream,
+  stopTrackedMicStreams,
+} from "./mic-track-registry.js";
+import {
+  shouldAutoBargeIn,
+  shouldAutoBargeInFromMicLevel,
+} from "./voice-barge-in.js";
 
 // ── State Signals ───────────────────────────────────────────────────────────
 
@@ -72,6 +81,7 @@ export async function switchAudioInput(deviceId) {
   selectedAudioInput.value = deviceId;
   if (!_mediaStream) return;
   try {
+    ensureMicTrackingPatched();
     // Stop existing mic tracks
     for (const track of _mediaStream.getAudioTracks()) {
       track.stop();
@@ -86,6 +96,7 @@ export async function switchAudioInput(deviceId) {
         sampleRate: settings.sampleRate,
       },
     });
+    registerMicStream(newStream);
     const newTrack = newStream.getAudioTracks()[0];
     if (!newTrack) return;
 
@@ -159,7 +170,15 @@ function _startMicLevelMonitor(stream) {
       _micLevelAnalyser.analyser.getByteFrequencyData(_micLevelAnalyser.buffer);
       const sum = _micLevelAnalyser.buffer.reduce((a, v) => a + v, 0);
       const avg = sum / _micLevelAnalyser.buffer.length;
-      micInputLevel.value = Math.min(1, avg / 128);
+      const level = Math.min(1, avg / 128);
+      micInputLevel.value = level;
+      if (shouldAutoBargeInFromMicLevel({
+        speaking: voiceState.value === "speaking",
+        level,
+        threshold: AUTO_BARGE_IN_MIC_LEVEL_THRESHOLD,
+      })) {
+        triggerAutoBargeIn("mic-level");
+      }
     }, 100);
   } catch {
     // AudioContext might not be available
@@ -220,9 +239,14 @@ let _lastPersistedAssistantAt = 0;
 let _awaitingToolCompletionAck = false;
 let _assistantRespondedAfterTool = false;
 let _toolCompletionAckTimer = null;
+let _lastAutoBargeInAt = 0;
+let _autoBargeInTimer = null;
 
 const RECONNECT_AT_MS = 28 * 60 * 1000; // 28 minutes
 const MAX_RECONNECT_ATTEMPTS = 3;
+const AUTO_BARGE_IN_COOLDOWN_MS = 700;
+const AUTO_BARGE_IN_MIC_LEVEL_THRESHOLD = 0.08;
+const AUTO_BARGE_IN_FADE_MS = 220;
 // Noise-control default: disable user-side live ASR transcript output/persistence.
 // Assistant response text remains enabled.
 const ENABLE_USER_TRANSCRIPT = false;
@@ -900,6 +924,7 @@ async function _startWebSocketTransport(tokenData, mediaStream) {
  * 5. Create offer, set remote answer
  */
 export async function startVoiceSession(options = {}) {
+  ensureMicTrackingPatched();
   if (_pc) {
     console.warn("[voice-client] Session already active");
     return;
@@ -975,6 +1000,21 @@ export async function startVoiceSession(options = {}) {
         sampleRate: audioSettings.value.sampleRate,
       },
     });
+    registerMicStream(_mediaStream);
+
+    // Guard: stopVoiceSession() may have been called while getUserMedia() was
+    // still awaiting (e.g. the user pressed hang-up during the permission
+    // prompt or network delay).  cleanup() already ran without this stream
+    // in the registry — release the mic immediately so the browser indicator
+    // goes away instead of staying lit indefinitely.
+    if (_explicitStop) {
+      for (const track of _mediaStream.getTracks()) {
+        try { track.stop(); } catch { /* ignore */ }
+      }
+      _mediaStream = null;
+      throw new Error("voice session was stopped during microphone acquisition");
+    }
+
     await enumerateAudioDevices();
     _startMicLevelMonitor(_mediaStream);
 
@@ -1168,6 +1208,7 @@ function handleServerEvent(event) {
       break;
 
     case "input_audio_buffer.speech_started":
+      triggerAutoBargeIn("speech-started");
       voiceState.value = "listening";
       emit("speech-started", {});
       break;
@@ -1432,6 +1473,73 @@ async function handleToolCall(event) {
 
 // ── Barge-in ────────────────────────────────────────────────────────────────
 
+function isAssistantPlaybackActive() {
+  if (_transport === "responses-audio") {
+    return Boolean(_responsesAudioElement && !_responsesAudioElement.paused && !_responsesAudioElement.ended);
+  }
+  if (_transport === "websocket") {
+    return Boolean(_wsPlaybackPlaying || _wsPlaybackQueue.length > 0);
+  }
+  return Boolean(_audioElement && !_audioElement.paused);
+}
+
+function fadeElementVolumeTo(el, targetVolume, durationMs) {
+  if (!el) return;
+  const target = Math.max(0, Math.min(1, Number(targetVolume)));
+  const duration = Math.max(40, Number(durationMs) || 180);
+  const start = Math.max(0, Math.min(1, Number(el.volume)));
+  const steps = 5;
+  const stepMs = Math.max(10, Math.floor(duration / steps));
+  let step = 0;
+  const timer = setInterval(() => {
+    step += 1;
+    const t = Math.min(1, step / steps);
+    const next = start + (target - start) * t;
+    try { el.volume = Math.max(0, Math.min(1, next)); } catch { /* ignore */ }
+    if (t >= 1) clearInterval(timer);
+  }, stepMs);
+}
+
+function triggerAutoBargeIn(reason = "speech-started") {
+  const now = Date.now();
+  const audioActive = isAssistantPlaybackActive();
+  if (!shouldAutoBargeIn({
+    muted: isVoiceMicMuted.value,
+    audioActive,
+    now,
+    lastTriggeredAt: _lastAutoBargeInAt,
+    minIntervalMs: AUTO_BARGE_IN_COOLDOWN_MS,
+  })) {
+    return false;
+  }
+  _lastAutoBargeInAt = now;
+  if (_autoBargeInTimer) {
+    clearTimeout(_autoBargeInTimer);
+    _autoBargeInTimer = null;
+  }
+  if (_transport === "responses-audio" && _responsesAudioElement) {
+    fadeElementVolumeTo(_responsesAudioElement, 0.1, AUTO_BARGE_IN_FADE_MS);
+    _autoBargeInTimer = setTimeout(() => {
+      _autoBargeInTimer = null;
+      interruptResponse();
+      emit("auto-barge-in", { reason });
+    }, AUTO_BARGE_IN_FADE_MS);
+    return true;
+  }
+  if (_transport === "webrtc" && _audioElement) {
+    fadeElementVolumeTo(_audioElement, 0.12, AUTO_BARGE_IN_FADE_MS);
+    _autoBargeInTimer = setTimeout(() => {
+      _autoBargeInTimer = null;
+      interruptResponse();
+      emit("auto-barge-in", { reason });
+    }, AUTO_BARGE_IN_FADE_MS);
+    return true;
+  }
+  interruptResponse();
+  emit("auto-barge-in", { reason });
+  return true;
+}
+
 /**
  * Interrupt the current response (barge-in).
  */
@@ -1445,6 +1553,7 @@ export function interruptResponse() {
       try {
         _responsesAudioElement.pause();
         _responsesAudioElement.currentTime = 0;
+        _responsesAudioElement.volume = 1;
       } catch { /* ignore */ }
     }
     voiceState.value = "listening";
@@ -1462,6 +1571,10 @@ export function interruptResponse() {
   }
   if (_dc && _dc.readyState === "open") {
     _dc.send(JSON.stringify({ type: "response.cancel" }));
+    if (_audioElement) {
+      try { _audioElement.volume = 1; } catch { /* ignore */ }
+    }
+    voiceState.value = "listening";
     emit("interrupt", {});
   }
 }
@@ -1722,6 +1835,10 @@ function cleanupConnection() {
 }
 
 function cleanup() {
+  // Always close the mic-level AudioContext first so no AudioContext
+  // holds a live MediaStreamAudioSourceNode after teardown.  This path
+  // is reached both by stopVoiceSession() and by handleDisconnect().
+  _stopMicLevelMonitor();
   _reconnectInFlight = false;
   _audioAutoplayWarned = false;
   isVoiceMicMuted.value = false;
@@ -1737,6 +1854,7 @@ function cleanup() {
     }
     _mediaStream = null;
   }
+  stopTrackedMicStreams();
   _stopResponsesRecognition();
   if (_responsesAbortController) {
     try { _responsesAbortController.abort(); } catch { /* ignore */ }
@@ -1758,4 +1876,9 @@ function cleanup() {
   _awaitingToolCompletionAck = false;
   _assistantRespondedAfterTool = false;
   _clearToolCompletionAckTimer();
+  if (_autoBargeInTimer) {
+    clearTimeout(_autoBargeInTimer);
+    _autoBargeInTimer = null;
+  }
+  _lastAutoBargeInAt = 0;
 }
