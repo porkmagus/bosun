@@ -1566,11 +1566,13 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
           </${Stack}>
         `}
         <${Stack} direction="row" spacing=${1} alignItems="flex-end">
-          <input
-            ref=${fileInputRef}
+          <${TextField}
+            inputRef=${fileInputRef}
             type="file"
-            multiple
-            style="display:none"
+            size="small"
+            variant="outlined"
+            inputProps=${{ multiple: true }}
+            sx=${{ display: "none" }}
             onChange=${handleAttachmentInput}
           />
           <${Tooltip} title="Attach file">

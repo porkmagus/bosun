@@ -2225,12 +2225,13 @@ export function VoiceOverlay({
               </div>
               ${!isCompactFollowMode && html`
                 <div class="voice-overlay-chat-input-wrap">
-                  <input
-                    ref=${meetingFileInputRef}
+                  <${TextField}
+                    inputRef=${meetingFileInputRef}
                     type="file"
-                    accept="image/*,application/pdf,.pdf"
-                    multiple
-                    style="display:none"
+                    size="small"
+                    variant="outlined"
+                    inputProps=${{ accept: "image/*,application/pdf,.pdf", multiple: true }}
+                    sx=${{ display: "none" }}
                     onChange=${(e) => {
                       const files = e?.target?.files;
                       if (files?.length) uploadMeetingAttachments(files);
@@ -2710,12 +2711,13 @@ export function VoiceOverlay({
     <!-- Floating minimized PiP widget -->
     ${minimized && html`
       <div class="vm-floating">
-        <input
-          ref=${meetingFileInputRef}
+        <${TextField}
+          inputRef=${meetingFileInputRef}
           type="file"
-          accept="image/*,application/pdf,.pdf"
-          multiple
-          style="display:none"
+          size="small"
+          variant="outlined"
+          inputProps=${{ accept: "image/*,application/pdf,.pdf", multiple: true }}
+          sx=${{ display: "none" }}
           onChange=${(e) => {
             const files = e?.target?.files;
             if (files?.length) uploadMeetingAttachments(files);

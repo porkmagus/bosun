@@ -1153,11 +1153,13 @@ export function ChatTab() {
               <//>
             `}
             <${Box} class="chat-input-wrapper" sx=${{ display: "flex", alignItems: "flex-end", gap: 0.5, px: 1, py: 0.5 }}>
-              <input
-                ref=${fileInputRef}
+              <${TextField}
+                inputRef=${fileInputRef}
                 type="file"
-                multiple
-                style="display:none"
+                size="small"
+                variant="outlined"
+                inputProps=${{ multiple: true }}
+                sx=${{ display: "none" }}
                 onChange=${handleAttachmentInput}
               />
               <${IconButton}

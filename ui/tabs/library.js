@@ -1467,11 +1467,15 @@ function ProfileMatcher() {
   return html`
     <div style="margin-bottom:12px;">
       <div style="display:flex;gap:8px;align-items:center;">
-        <input type="text" placeholder="Test task title, e.g. feat(portal): add login page"
-          value=${title} onInput=${(e) => setTitle(e.target.value)}
+        <${TextField}
+          size="small"
+          variant="outlined"
+          placeholder="Test task title, e.g. feat(portal): add login page"
+          value=${title}
+          onInput=${(e) => setTitle(e.target.value)}
           onKeyDown=${(e) => e.key === "Enter" && doMatch()}
-          style="flex:1;padding:6px 10px;border-radius:8px;border:1px solid var(--border,#333);
-            background:var(--bg-input,#0d1117);color:var(--text-primary,#eee);font-size:0.85em;" />
+          sx=${{ flex: 1, fontSize: "0.85em" }}
+        />
         <button class="library-type-pill active" onClick=${doMatch} style="font-size:0.82em;" disabled=${loading}>
           ${loading ? html`<${Spinner} size=${12} />` : iconText(":target: Match")}
         </button>
