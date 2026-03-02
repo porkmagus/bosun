@@ -251,7 +251,7 @@ let telegramApiReachable = null; // null = unknown, true/false after probe
 
 /**
  * Read persisted 409 conflict state from disk.
- * Returns { untilMs, reason } or null if missing or corrupt.
+ * Returns { untilMs, reason, pid } or null if missing or corrupt.
  */
 function readTelegramPollConflictState() {
   try {
@@ -259,7 +259,11 @@ function readTelegramPollConflictState() {
     const raw = readFileSync(telegramPollConflictStatePath, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.untilMs !== "number") return null;
-    return { untilMs: parsed.untilMs, reason: parsed.reason || "" };
+    return {
+      untilMs: parsed.untilMs,
+      reason: parsed.reason || "",
+      pid: Number(parsed.pid) || 0,
+    };
   } catch {
     return null;
   }
@@ -11197,12 +11201,23 @@ export async function startTelegramBot(options = {}) {
 
   const conflictState = readTelegramPollConflictState();
   if (conflictState && conflictState.untilMs > Date.now()) {
+    // If the recorded cooldown owner process is no longer alive, clear stale
+    // conflict cooldown immediately so polling can recover without waiting
+    // the full backoff window.
+    if (
+      Number.isFinite(Number(conflictState.pid)) &&
+      Number(conflictState.pid) > 0 &&
+      !canSignalProcess(Number(conflictState.pid))
+    ) {
+      clearTelegramPollConflictState();
+    } else {
     const remainSec = Math.ceil((conflictState.untilMs - Date.now()) / 1000);
     console.warn(
       `[telegram-bot] polling suppressed — 409 conflict cooldown active for ${remainSec}s` +
       (conflictState.reason ? ` (${conflictState.reason})` : ""),
     );
     return;
+    }
   }
 
   const ownerClaim = await claimTelegramPollOwner("telegram-bot", {
