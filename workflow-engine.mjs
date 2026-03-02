@@ -899,6 +899,60 @@ export class WorkflowEngine extends EventEmitter {
     return triggered;
   }
 
+  // ── Schedule trigger evaluation ──────────────────────────────────────────
+
+  /**
+   * Evaluate all workflows that use `trigger.schedule` or `trigger.scheduled_once`.
+   * Unlike evaluateTriggers() (event-driven), this is polling-based and should
+   * be called periodically (e.g. every 60s) by the monitor.
+   *
+   * Returns an array of { workflowId, triggeredBy } for workflows whose
+   * schedule interval has elapsed since their last completed run.
+   */
+  evaluateScheduleTriggers() {
+    if (!this._loaded) this.load();
+
+    const triggered = [];
+    const runIndex = this._readRunIndex();
+
+    for (const [id, def] of this._workflows) {
+      if (def.enabled === false) continue;
+
+      // Skip workflows that are already running
+      const alreadyRunning = Array.from(this._activeRuns.values()).some(
+        (info) => info?.workflowId === id,
+      );
+      if (alreadyRunning) continue;
+
+      const triggerNodes = (def.nodes || []).filter(
+        (n) => n.type === "trigger.schedule" || n.type === "trigger.scheduled_once",
+      );
+
+      for (const tNode of triggerNodes) {
+        const intervalMs = Number(tNode.config?.intervalMs) || 3600000;
+
+        // Find the most recent completed run for this workflow
+        let lastRunAt = 0;
+        for (const entry of runIndex) {
+          if (entry?.workflowId !== id) continue;
+          const ts = Number(entry?.startedAt || entry?.completedAt || 0);
+          if (ts > lastRunAt) lastRunAt = ts;
+        }
+
+        const elapsed = Date.now() - lastRunAt;
+        if (elapsed >= intervalMs) {
+          triggered.push({ workflowId: id, triggeredBy: tNode.id });
+
+          // For scheduled_once, only fire if never run before
+          if (tNode.type === "trigger.scheduled_once" && lastRunAt > 0) {
+            triggered.pop(); // undo — already ran once
+          }
+        }
+      }
+    }
+    return triggered;
+  }
+
   /** Get status of active runs */
   getActiveRuns() {
     return Array.from(this._activeRuns.entries())
