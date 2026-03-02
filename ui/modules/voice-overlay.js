@@ -46,6 +46,11 @@ import {
 } from "./vision-stream.js";
 import { AudioVisualizer } from "./audio-visualizer.js";
 import { resolveIcon } from "./icon-utils.js";
+import {
+  Select, MenuItem, TextField, Switch, FormControlLabel,
+  Button, IconButton, Typography, Box, Stack, Chip,
+  Tooltip, Divider, Paper, Slider,
+} from "@mui/material";
 
 const html = htm.bind(h);
 const CHAT_UPDATE_PREFIX_RE = /^\[Chat Update [—-] [A-Z]+]:\s*/;
@@ -1905,16 +1910,17 @@ export function VoiceOverlay({
                         : (activeVoiceAgent?.description || "Pick the voice agent for this call.")}
                     </div>
                   </div>
-                  <select
+                  <${Select}
+                    size="small"
                     class="vm-settings-select"
                     disabled=${loadingVoiceAgents || switchingVoiceAgent}
                     value=${selectedVoiceAgentId || ""}
                     onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
                   >
                     ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
-                      <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                      <${MenuItem} key=${agent.id} value=${agent.id}>${agent.name || agent.id}<//>
                     `)}
-                  </select>
+                  <//>
                 </div>
               </div>
               <div class="library-actions" style="margin-top:10px;">
@@ -2242,7 +2248,9 @@ export function VoiceOverlay({
                     disabled=${meetingUploadingAttachments || meetingChatSending}
                     title="Capture screenshot"
                   >📸</button>
-                  <input
+                  <${TextField}
+                    size="small"
+                    variant="outlined"
                     class="voice-overlay-chat-input"
                     placeholder="Message the agent…"
                     value=${meetingChatInput}
@@ -2555,15 +2563,16 @@ export function VoiceOverlay({
                     <div class="vm-settings-row-info">
                       <div class="vm-settings-row-label">Microphone</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       value=${selectedAudioInput.value || ""}
                       onChange=${(e) => switchAudioInput(e.target.value)}
                     >
                       ${audioInputDevices.value.map(d => html`
-                        <option key=${d.deviceId} value=${d.deviceId}>${d.label || "Mic " + d.deviceId.slice(0, 8)}</option>
+                        <${MenuItem} key=${d.deviceId} value=${d.deviceId}>${d.label || "Mic " + d.deviceId.slice(0, 8)}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
 
                   <!-- Mic level -->
@@ -2575,15 +2584,16 @@ export function VoiceOverlay({
                     <div class="vm-settings-row-info">
                       <div class="vm-settings-row-label">Speakers</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       value=${selectedAudioOutput.value || ""}
                       onChange=${(e) => switchAudioOutput(e.target.value)}
                     >
                       ${audioOutputDevices.value.map(d => html`
-                        <option key=${d.deviceId} value=${d.deviceId}>${d.label || "Speaker " + d.deviceId.slice(0, 8)}</option>
+                        <${MenuItem} key=${d.deviceId} value=${d.deviceId}>${d.label || "Speaker " + d.deviceId.slice(0, 8)}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
                 </div>
 
@@ -2645,16 +2655,17 @@ export function VoiceOverlay({
                       <div class="vm-settings-row-label">Switch voice agent</div>
                       <div class="vm-settings-row-desc">Change persona/toolset without leaving this call</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       disabled=${switchingVoiceAgent}
                       value=${selectedVoiceAgentId || ""}
                       onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
                     >
                       ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
-                        <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                        <${MenuItem} key=${agent.id} value=${agent.id}>${agent.name || agent.id}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
                   <div class="vm-settings-row">
                     <div class="vm-settings-row-info">
@@ -2735,7 +2746,9 @@ export function VoiceOverlay({
           <button class="vm-floating-end" onClick=${handleClose} title="End call">📵</button>
         </div>
         <div style="padding:0 12px 10px;display:flex;gap:6px;align-items:center">
-          <input
+          <${TextField}
+            size="small"
+            variant="outlined"
             class="voice-overlay-chat-input"
             style="padding:6px 12px;font-size:12px"
             placeholder="Quick message…"

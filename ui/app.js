@@ -574,16 +574,16 @@ class TabErrorBoundary extends Component {
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
-            <button class="btn btn-primary btn-sm" onClick=${retry}>Retry</button>
-            <button class="btn btn-ghost btn-sm" onClick=${copyError}>Copy Error</button>
-            ${stack ? html`<button class="btn btn-ghost btn-sm" onClick=${toggleStack}>
+            <${Button} variant="contained" size="small" onClick=${retry}>Retry<//>
+            <${Button} variant="text" size="small" onClick=${copyError}>Copy Error<//>
+            ${stack ? html`<${Button} variant="text" size="small" onClick=${toggleStack}>
               ${stackToggleLabel}
-            </button>` : null}
-            <button class="btn btn-ghost btn-sm" onClick=${() => {
+            <//>` : null}
+            <${Button} variant="text" size="small" onClick=${() => {
               console.group("[ve:error-log]");
               getErrorLog().forEach((e, i) => console.log(i, e));
               console.groupEnd();
-            }}>Error Log</button>
+            }}>Error Log<//>
           </div>
           ${this.state.showStack && stack ? html`
             <div class="tab-error-stack">${stack}</div>
@@ -727,33 +727,35 @@ function SidebarNav({ collapsed = false, onToggle }) {
           </div>
           ${!collapsed && html`<div class="sidebar-title">Bosun</div>`}
         </div>
-        <button
+        <${IconButton}
+          size="small"
           class="sidebar-collapse-btn"
           onClick=${onToggle}
           title=${collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label=${collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           ${collapseIcon}
-        </button>
+        <//>
       </div>
       ${!collapsed && html`
         <div class="sidebar-actions">
-          <button class="btn btn-primary btn-block" onClick=${() => createSession({ type: "primary" })}>
+          <${Button} variant="contained" fullWidth onClick=${() => createSession({ type: "primary" })}>
             <span class="btn-icon">${resolveIcon(":plus:")}</span> New Session
-          </button>
-          <button class="btn btn-ghost btn-block" onClick=${() => navigateTo("tasks")}>
+          <//>
+          <${Button} variant="text" fullWidth onClick=${() => navigateTo("tasks")}>
             <span class="btn-icon">${resolveIcon(":clipboard:")}</span> View Tasks
-          </button>
+          <//>
         </div>
       `}
       ${collapsed && html`
         <div class="sidebar-actions-icon">
-          <button
+          <${IconButton}
+            size="small"
             class="sidebar-icon-action"
             onClick=${() => createSession({ type: "primary" })}
             title="New Session"
             aria-label="New Session"
-          >${resolveIcon(":plus:")}</button>
+          >${resolveIcon(":plus:")}<//>
         </div>
       `}
       <${Tabs}
@@ -834,7 +836,8 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
 
     return html`
       <aside class="session-rail session-rail--collapsed" aria-label="Sessions (collapsed)">
-        <button
+        <${IconButton}
+          size="small"
           class="rail-expand-btn"
           onClick=${onExpand}
           title="Expand sessions panel"
@@ -843,7 +846,7 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
             <path d="M6 3l5 5-5 5"/>
           </svg>
-        </button>
+        <//>
         <div class="rail-dots">
           ${dots.map((s) => html`
             <div
@@ -879,7 +882,8 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
             ${activeCount} active · ${sessions.length} total
           </div>
         </div>
-        <button
+        <${IconButton}
+          size="small"
           class="rail-collapse-btn"
           onClick=${onCollapse}
           title="Collapse sessions panel"
@@ -888,7 +892,7 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
             <path d="M10 3l-5 5 5 5"/>
           </svg>
-        </button>
+        <//>
       </div>
       <${SessionList}
         showArchived=${showArchived}
@@ -1035,9 +1039,9 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
             <div class="inspector-section">
               <div class="inspector-title">Smart Logs</div>
               ${smartLogsContent}
-              <button class="btn btn-ghost btn-sm" onClick=${() => navigateTo("logs")}>
+              <${Button} variant="text" size="small" onClick=${() => navigateTo("logs")}>
                 Open Logs
-              </button>
+              <//>
             </div>
           `
         : html`
@@ -1155,8 +1159,9 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               const isHome = tab.id === "dashboard";
               const isActive = activeTab.value === tab.id;
               return html`
-                <button
+                <${Button}
                   key=${tab.id}
+                  variant="text"
                   class="more-menu-item ${isActive ? "active" : ""}"
                   aria-label=${`Open ${tab.label}`}
                   onClick=${() =>
@@ -1166,7 +1171,7 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
                 >
                   <span class="more-menu-icon">${ICONS[tab.icon]}</span>
                   <span class="more-menu-label">${tab.label}</span>
-                </button>
+                <//>
               `;
             })}
           </div>
@@ -1178,8 +1183,9 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               const isHome = tab.id === "dashboard";
               const isActive = activeTab.value === tab.id;
               return html`
-                <button
+                <${Button}
                   key=${tab.id}
+                  variant="text"
                   class="more-menu-item ${isActive ? "active" : ""}"
                   aria-label=${`Open ${tab.label}`}
                   onClick=${() =>
@@ -1189,14 +1195,15 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
                 >
                   <span class="more-menu-icon">${ICONS[tab.icon]}</span>
                   <span class="more-menu-label">${tab.label}</span>
-                </button>
+                <//>
               `;
             })}
           </div>
         </div>
         <div class="more-menu-section">
           <div class="more-menu-section-title">Quick Actions</div>
-          <button
+          <${Button}
+            variant="text"
             class="more-menu-bot-btn"
             type="button"
             aria-label="Open Bot Controls"
@@ -1208,7 +1215,7 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               <span class="more-menu-bot-sub">Commands, executor, routing</span>
             </div>
             <span class="more-menu-bot-chevron">›</span>
-          </button>
+          <//>
         </div>
       </div>
     <//>
@@ -1362,13 +1369,13 @@ function BotControlsSheet({ open, onClose }) {
       <div class="bot-controls">
         ${navStack.length > 0 ? html`
           <div class="bot-controls-breadcrumb">
-            <button class="btn btn-ghost btn-sm" type="button" onClick=${botGoBack} aria-label="Go back">
+            <${Button} variant="text" size="small" type="button" onClick=${botGoBack} aria-label="Go back">
               ← Back
-            </button>
+            <//>
             ${navStack.length > 1 ? html`
-              <button class="btn btn-ghost btn-sm" type="button" onClick=${botGoHome} aria-label="Go to home">
+              <${Button} variant="text" size="small" type="button" onClick=${botGoHome} aria-label="Go to home">
                 ${iconText(":home: Home")}
-              </button>
+              <//>
             ` : null}
           </div>
         ` : null}
@@ -1394,15 +1401,16 @@ function BotControlsSheet({ open, onClose }) {
           ${currentDef.keyboard.map((row, ri) => html`
             <div key=${ri} class="bot-kb-row">
               ${row.map((btn, bi) => html`
-                <button
+                <${Button}
                   key=${bi}
                   type="button"
+                  variant="text"
                   class="bot-kb-btn ${btn.go ? "nav-btn" : ""}"
                   disabled=${cmdLoading}
                   onClick=${() => btn.go ? botNavigateTo(btn.go) : runBotCommand(btn.cmd)}
                 >
                   ${iconText(btn.text)}
-                </button>
+                <//>
               `)}
             </div>
           `)}
@@ -2192,25 +2200,29 @@ function App() {
     : "Open inspector";
   const inspectorToggleButton = showInspectorToggle
     ? html`
-        <button
-          class="btn btn-ghost btn-sm tablet-toggle"
+        <${Button}
+          variant="text"
+          size="small"
+          class="tablet-toggle"
           onClick=${toggleInspector}
           aria-label=${inspectorToggleLabel}
         >
           <span class="btn-icon">${resolveIcon("clipboard")}</span>
           Inspector
-        </button>
+        <//>
       `
     : null;
   const moreToggleButton = showDrawerToggles
     ? html`
-        <button
-          class="btn btn-ghost btn-sm tablet-toggle"
+        <${Button}
+          variant="text"
+          size="small"
+          class="tablet-toggle"
           onClick=${toggleMore}
           aria-label=${isMoreOpen ? "Close navigation menu" : "Open navigation menu"}
         >
           ⋯ Navigation
-        </button>
+        <//>
       `
     : null;
 
