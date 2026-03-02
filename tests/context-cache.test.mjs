@@ -502,4 +502,192 @@ describe("context-cache", () => {
       expect(savings.savedPct).toBeGreaterThan(0);
     });
   });
+
+  // ── Content-Aware Relevance Scoring ───────────────────────────────────
+
+  describe("scoreToolOutput", () => {
+    it("returns neutral score for null/undefined", () => {
+      expect(contextCache.scoreToolOutput(null)).toBe(50);
+      expect(contextCache.scoreToolOutput(undefined)).toBe(50);
+    });
+
+    it("scores small targeted file reads high", () => {
+      const item = {
+        type: "function_call_output",
+        tool_name: "read_file",
+        arguments: { filePath: "src/config.mjs", startLine: 10, endLine: 25 },
+        output: "const FOO = 42;\nexport default FOO;",
+      };
+      const score = contextCache.scoreToolOutput(item);
+      // read_file base(85) + small size(~+20) + narrow range(+15) + path(+5)
+      expect(score).toBeGreaterThanOrEqual(70);
+    });
+
+    it("scores large grep search results low", () => {
+      // Simulate a big grep result with many matches
+      const lines = [];
+      for (let i = 0; i < 100; i++) {
+        lines.push(`src/file${i}.ts:${i * 10}: const x = ${i};`);
+      }
+      const item = {
+        type: "function_call_output",
+        tool_name: "grep_search",
+        arguments: { query: "const x" },
+        output: lines.join("\n"),
+      };
+      const score = contextCache.scoreToolOutput(item);
+      // grep_search base(30) + large size(-5 to -10) + many matches(-15)
+      expect(score).toBeLessThan(30);
+    });
+
+    it("scores file edits high regardless of size", () => {
+      const item = {
+        type: "function_call_output",
+        tool_name: "replace_string_in_file",
+        arguments: { filePath: "src/main.ts" },
+        output: "File edited successfully",
+      };
+      const score = contextCache.scoreToolOutput(item);
+      // replace_string_in_file base(90) + small output(+20) + path(+5)
+      // Clamped to 100 max
+      expect(score).toBeGreaterThanOrEqual(90);
+    });
+
+    it("scores command failures higher than successes", () => {
+      const success = {
+        type: "command_execution",
+        command: "npm test",
+        exit_code: 0,
+        aggregated_output: "All tests passed.\n" + "x".repeat(500),
+      };
+      const failure = {
+        type: "command_execution",
+        command: "npm test",
+        exit_code: 1,
+        aggregated_output: "FAIL tests/foo.test.ts\n" + "x".repeat(500),
+      };
+      const successScore = contextCache.scoreToolOutput(success);
+      const failureScore = contextCache.scoreToolOutput(failure);
+      // Failure gets +10 error bonus
+      expect(failureScore).toBeGreaterThan(successScore);
+    });
+
+    it("gives higher scores to narrower line ranges", () => {
+      const narrow = {
+        type: "function_call_output",
+        tool_name: "read_file",
+        arguments: { filePath: "a.ts", startLine: 10, endLine: 15 },
+        output: "const a = 1;\nconst b = 2;",
+      };
+      const wide = {
+        type: "function_call_output",
+        tool_name: "read_file",
+        arguments: { filePath: "a.ts", startLine: 1, endLine: 500 },
+        output: "x".repeat(15000),
+      };
+      const narrowScore = contextCache.scoreToolOutput(narrow);
+      const wideScore = contextCache.scoreToolOutput(wide);
+      expect(narrowScore).toBeGreaterThan(wideScore);
+    });
+
+    it("identifies search tools by name pattern", () => {
+      const item = {
+        type: "function_call_output",
+        tool_name: "semantic_search",
+        arguments: { query: "auth handler" },
+        output: "x".repeat(8000),
+      };
+      const score = contextCache.scoreToolOutput(item);
+      // semantic_search base(25) + large size(-5) = low score
+      expect(score).toBeLessThan(40);
+    });
+
+    it("returns error items with item.error field higher score", () => {
+      const item = {
+        type: "function_call_output",
+        tool_name: "unknown_tool",
+        error: { message: "Something went wrong" },
+        output: "",
+      };
+      const score = contextCache.scoreToolOutput(item);
+      // unknown tool base(50) + tiny size(+20) + error(+10) = 80
+      expect(score).toBeGreaterThanOrEqual(70);
+    });
+  });
+
+  describe("content-aware compression integration", () => {
+    it("protects high-value small reads from early compression", async () => {
+      // 10 turns: early turns have small targeted reads
+      const items = [];
+      // Turn 0: small read_file (high value)
+      items.push({
+        type: "function_call_output",
+        tool_name: "read_file",
+        arguments: { filePath: "src/core.ts", startLine: 10, endLine: 15 },
+        output: "function handleRequest() { return true; }",
+      });
+      items.push({ type: "agent_message", text: "Found the handler." });
+
+      // Turns 1-7: filler to push turn 0 far enough for age-based compression
+      for (let i = 1; i <= 7; i++) {
+        items.push({
+          type: "function_call_output",
+          tool_name: `tool_${i}`,
+          output: `Short output ${i}: ` + "y".repeat(300),
+        });
+        items.push({ type: "agent_message", text: `Done step ${i}.` });
+      }
+
+      const result = await contextCache.cacheAndCompressItems(items);
+
+      // The small read_file from turn 0 should still be relatively intact
+      // because its high score protects it (shifts tier down by 2)
+      const readItem = result.find(
+        (it) => it.tool_name === "read_file" || it._originalTool === "read_file",
+      );
+      // If the item was kept at tier 0 (full), it shouldn't have _compressed
+      // If it was compressed, at worst it should be tier 1 (not tier 3/breadcrumb)
+      if (readItem._compressed) {
+        expect(readItem._compressed).not.toBe("tier3");
+      }
+    });
+
+    it("aggressively compresses low-value large search results", async () => {
+      const items = [];
+      // Turn 0: large grep search with many matches (low value)
+      const searchLines = [];
+      for (let i = 0; i < 80; i++) {
+        searchLines.push(`src/generated${i}.ts:${i}: match ${i}`);
+      }
+      items.push({
+        type: "function_call_output",
+        tool_name: "grep_search",
+        arguments: { query: "match" },
+        output: searchLines.join("\n"),
+      });
+      items.push({ type: "agent_message", text: "Found many results." });
+
+      // Turns 1-4: normal work
+      for (let i = 1; i <= 4; i++) {
+        items.push({
+          type: "function_call_output",
+          tool_name: `tool_${i}`,
+          output: `Step ${i} output: ` + "z".repeat(400),
+        });
+        items.push({ type: "agent_message", text: `Step ${i} done.` });
+      }
+
+      const result = await contextCache.cacheAndCompressItems(items);
+
+      // The large grep_search should be compressed more aggressively
+      const grepItem = result.find(
+        (it) =>
+          it.tool_name === "grep_search" || /grep/i.test(it._originalTool || ""),
+      );
+      // Should have been compressed (it's large + low score + old enough)
+      if (grepItem) {
+        expect(grepItem._compressed || grepItem._cachedLogId).toBeTruthy();
+      }
+    });
+  });
 });

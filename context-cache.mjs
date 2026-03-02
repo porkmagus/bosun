@@ -262,6 +262,23 @@ function getItemText(item) {
 }
 
 /**
+ * Set the text content on a tool output item, matching whichever field
+ * the item originally uses (text, output, aggregated_output, etc.).
+ * @param {object} item
+ * @param {string} newText
+ */
+function setItemText(item, newText) {
+  if (!item || typeof item !== "object") return;
+  if (item.text !== undefined) { item.text = newText; return; }
+  if (item.output !== undefined) { item.output = newText; return; }
+  if (item.aggregated_output !== undefined) { item.aggregated_output = newText; return; }
+  if (item.result !== undefined) { item.result = newText; return; }
+  if (item.message !== undefined) { item.message = newText; return; }
+  // Fallback: set .output
+  item.output = newText;
+}
+
+/**
  * Get a human-readable size for text.
  */
 function charLabel(text) {
@@ -475,8 +492,472 @@ function isCompressCandidate(item) {
   return Boolean(text && text.length >= 200);
 }
 
+// ===========================================================================
+// CONTENT-AWARE RELEVANCE SCORING
+// ===========================================================================
+//
+// Age-based compression is necessary but insufficient.  A 3-line file read
+// from 8 turns ago might be the critical method definition the agent is
+// currently modifying, while a 400-result grep search from 2 turns ago is
+// 99% noise.
+//
+// This system scores each tool output's "value density" on a 0-100 scale,
+// then uses that score to shift the compression tier:
+//
+//   High score (70-100) → protect: shift tier down by 2 (delay compression)
+//   Normal     (30-69)  → default: use age-based tier as-is
+//   Low score  (0-29)   → accelerate: shift tier up by 1 (compress sooner)
+//
+// Additionally, RETROSPECTIVE RELEVANCE scans subsequent items to detect
+// which parts of a large output the agent actually used (by matching file
+// paths, symbol names, etc.).
+//
+// Everything is deterministic — zero API cost, zero latency.
 // ---------------------------------------------------------------------------
-// Main Entry Point
+
+// ── Score thresholds ──────────────────────────────────────────────────────
+const SCORE_HIGH = 70;   // protect from compression
+const SCORE_LOW = 30;    // accelerate compression
+const TIER_SHIFT_PROTECT = -2;
+const TIER_SHIFT_ACCELERATE = 1;
+
+// ── Tool type scoring profiles ────────────────────────────────────────────
+// Maps tool types / names to baseline value density.
+// Specific reads are high-value; broad searches are low-value.
+const TOOL_SCORE_PROFILES = {
+  // High-value: targeted, specific reads
+  read_file:                85,
+  readFile:                 85,
+  file_read:                85,
+
+  // High-value: the agent is actively changing code
+  replace_string_in_file:   90,
+  create_file:              90,
+  edit_file:                90,
+  file_change:              85,
+
+  // Medium-value: errors/diagnostics the agent might need
+  get_errors:               75,
+  command_execution:        50,  // varies — adjusted by exit code & output size
+  run_in_terminal:          50,
+
+  // Low-value: broad discovery — most results are noise
+  grep_search:              30,
+  semantic_search:          25,
+  file_search:              20,
+  search_subagent:          25,
+  web_search:               20,
+  list_dir:                 35,
+  list_directory:           35,
+
+  // Medium: MCP tools (vary widely, default to medium)
+  mcp_tool_call:            45,
+};
+
+/**
+ * Score a tool output item's inherent value density (0-100).
+ *
+ * Uses multiple signals:
+ *   1. Tool type (baseline from TOOL_SCORE_PROFILES)
+ *   2. Output size (small = higher density, large = lower density)
+ *   3. Specificity signals (line ranges, single file vs. many matches)
+ *   4. Error/success status
+ *
+ * @param {object} item  The tool output item
+ * @returns {number}     Score 0-100
+ */
+export function scoreToolOutput(item) {
+  if (!item || typeof item !== "object") return 50;
+
+  const toolName = extractToolName(item);
+  const text = getItemText(item);
+  const textLen = text?.length || 0;
+
+  // 1. Baseline from tool type
+  let score = resolveBaseScore(toolName);
+
+  // 2. Size adjustment — small outputs are denser
+  score += scoreSizeAdjustment(textLen);
+
+  // 3. Specificity signals
+  score += scoreSpecificityAdjustment(item, toolName, textLen);
+
+  // 4. Error/success signal
+  score += scoreErrorAdjustment(item);
+
+  // Clamp to 0-100
+  return Math.max(0, Math.min(100, score));
+}
+
+/**
+ * Resolve a baseline score from tool name, with fuzzy matching.
+ * @param {string} toolName
+ * @returns {number}
+ */
+function resolveBaseScore(toolName) {
+  if (!toolName) return 50;
+  const lower = toolName.toLowerCase();
+
+  // Direct match
+  if (TOOL_SCORE_PROFILES[toolName] !== undefined) {
+    return TOOL_SCORE_PROFILES[toolName];
+  }
+
+  // Fuzzy match: check if any profile key is contained in the tool name
+  for (const [key, val] of Object.entries(TOOL_SCORE_PROFILES)) {
+    if (lower.includes(key.toLowerCase())) return val;
+  }
+
+  // Check for common patterns
+  if (lower.includes("read") || lower.includes("get_file")) return 80;
+  if (lower.includes("search") || lower.includes("find")) return 25;
+  if (lower.includes("edit") || lower.includes("write") || lower.includes("replace")) return 85;
+  if (lower.includes("list") || lower.includes("dir")) return 35;
+  if (lower.includes("run") || lower.includes("exec") || lower.includes("terminal")) return 50;
+
+  return 50; // unknown tool — neutral
+}
+
+/**
+ * Adjust score based on output size.
+ * Small outputs (< 500 chars) are almost always high-value.
+ * Very large outputs (> 10K) are almost always search dumps.
+ *
+ * @param {number} textLen
+ * @returns {number}  Adjustment (-20 to +20)
+ */
+function scoreSizeAdjustment(textLen) {
+  if (textLen < 200)   return 20;   // tiny → almost certainly targeted
+  if (textLen < 500)   return 15;   // small → probably a specific read
+  if (textLen < 2000)  return 5;    // medium → neutral
+  if (textLen < 5000)  return 0;    // normal
+  if (textLen < 10000) return -5;   // large → getting noisy
+  if (textLen < 20000) return -10;  // very large → likely search dump
+  return -20;                        // huge → almost certainly bulk results
+}
+
+/**
+ * Adjust score based on specificity signals in the item.
+ *
+ * @param {object} item
+ * @param {string} toolName
+ * @param {number} textLen
+ * @returns {number}  Adjustment (-15 to +15)
+ */
+function scoreSpecificityAdjustment(item, toolName, textLen) {
+  let adj = 0;
+  const args = item.arguments || item.args || item.call?.arguments || {};
+  const argsObj = typeof args === "string" ? safeParse(args) : args;
+
+  // File reads with narrow line ranges are highly specific
+  if (argsObj.startLine && argsObj.endLine) {
+    const range = Number(argsObj.endLine) - Number(argsObj.startLine);
+    if (range <= 30) adj += 15;       // reading ≤30 lines = very targeted
+    else if (range <= 100) adj += 5;  // reading ≤100 lines = moderately targeted
+    else adj -= 5;                     // reading 200+ lines = broad
+  }
+
+  // Single file path = more specific than no path
+  if (argsObj.filePath || argsObj.file || argsObj.path) {
+    adj += 5;
+  }
+
+  // Search results: count match lines as a noise indicator
+  const lower = toolName.toLowerCase();
+  if (lower.includes("search") || lower.includes("grep") || lower.includes("find")) {
+    const matchCount = countSearchMatches(item);
+    if (matchCount > 50) adj -= 15;       // 50+ matches = very noisy
+    else if (matchCount > 20) adj -= 10;  // 20+ = noisy
+    else if (matchCount > 5) adj -= 5;    // 5+ = moderate
+    else if (matchCount <= 3) adj += 5;   // ≤3 = highly specific
+  }
+
+  return adj;
+}
+
+/**
+ * Adjust score based on error/success signals.
+ *
+ * @param {object} item
+ * @returns {number}  Adjustment (-10 to +10)
+ */
+function scoreErrorAdjustment(item) {
+  // Command execution with non-zero exit → errors are valuable for debugging
+  if (item.exit_code !== undefined) {
+    if (item.exit_code !== 0) return 10;  // error output is important
+    // Successful commands with tiny output → just need to know it worked
+    const text = getItemText(item);
+    if (text && text.length < 100) return 5; // compact success
+  }
+
+  // Items with error fields are diagnostic — preserve longer
+  if (item.error) return 10;
+
+  return 0;
+}
+
+/**
+ * Count the number of search match lines in a tool output.
+ * Heuristic: count lines matching common search result patterns.
+ *
+ * @param {object} item
+ * @returns {number}
+ */
+function countSearchMatches(item) {
+  const text = getItemText(item);
+  if (!text) return 0;
+
+  // Count lines that look like search results:
+  //   - "path/file.ts:123: matched text"  (grep format)
+  //   - "<match path="..." line=N>"       (XML match format)
+  //   - "  src/foo.ts"                    (file search format)
+  let count = 0;
+  const lines = text.split("\n");
+  for (const line of lines) {
+    if (
+      /^\s*\S+\.\w+:\d+/.test(line) ||          // grep: file.ts:123
+      /<match\s+path=/.test(line) ||             // XML match
+      /^\d+\s+match/.test(line) ||               // "N matches"
+      /^\s+\S+\.\w+\s*$/.test(line)              // bare file path
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Safely parse JSON, returning empty object on failure.
+ * @param {string} str
+ * @returns {object}
+ */
+function safeParse(str) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Retrospective Relevance
+// ---------------------------------------------------------------------------
+//
+// After scoring each item individually, scan SUBSEQUENT items to detect
+// which earlier tool outputs the agent actually acted on.
+//
+// Signals:
+//   - Agent reads file X → any earlier search mentioning file X is relevant
+//   - Agent edits file X at line Y → any earlier read of X around line Y
+//     is highly relevant
+//   - Agent references a symbol name → outputs containing that symbol
+//     are relevant
+//
+// Items identified as "retrospectively relevant" get their score boosted.
+// ---------------------------------------------------------------------------
+
+/**
+ * Try to extract a path value from an argument key.
+ * @returns {string|null}  normalised path or null
+ */
+function extractPathFromArg(argsObj, key) {
+  const val = argsObj[key];
+  if (typeof val !== "string" || val.length <= 2 || val.length >= 300) return null;
+  if (/[/\\]/.test(val) || /\.\w{1,6}$/.test(val)) {
+    return normalizePathForMatching(val);
+  }
+  return null;
+}
+
+/**
+ * Extract file paths and line numbers from an item's arguments.
+ *
+ * @param {object} item
+ * @returns {{ paths: string[], lines: number[] }}
+ */
+function extractItemTargets(item) {
+  if (!item || typeof item !== "object") return { paths: [], lines: [] };
+
+  const args = item.arguments || item.args || item.call?.arguments || {};
+  const argsObj = typeof args === "string" ? safeParse(args) : args;
+
+  const paths = [];
+  const lines = [];
+
+  // Collect file paths from various fields
+  for (const key of ["filePath", "file", "path", "includePattern", "query"]) {
+    const p = extractPathFromArg(argsObj, key);
+    if (p) paths.push(p);
+  }
+
+  // Collect line numbers
+  for (const key of ["startLine", "endLine", "line"]) {
+    const val = Number(argsObj[key]);
+    if (Number.isFinite(val) && val > 0) lines.push(val);
+  }
+
+  // Also extract paths from file_change items
+  if (Array.isArray(item.changes)) {
+    for (const ch of item.changes) {
+      if (ch?.path) paths.push(normalizePathForMatching(ch.path));
+    }
+  }
+
+  return { paths, lines };
+}
+
+/**
+ * Normalize a file path for fuzzy matching: lowercase, forward slashes,
+ * strip leading ./ or absolute prefix.
+ *
+ * @param {string} p
+ * @returns {string}
+ */
+function normalizePathForMatching(p) {
+  return p
+    .replaceAll("\\", "/")
+    .replace(/^\.\//, "")
+    .toLowerCase();
+}
+
+/**
+ * Build a retrospective relevance map for a sequence of turn-tagged items.
+ *
+ * Scans items from newest to oldest. For each item that acts on a file path
+ * (read, edit, terminal command referencing a path), marks any OLDER item
+ * that mentions that path in its output as "retrospectively relevant."
+ *
+ * @param {Array<{item: object, turn: number}>} turnItems
+ * @returns {Map<object, number>}  item → bonus score (0-30)
+ */
+function buildRetrospectiveRelevanceMap(turnItems) {
+  const bonusMap = new Map();
+
+  // Phase 1: Collect all "action paths" — files the agent explicitly targeted
+  //          in reads, edits, or commands.
+  const actionPaths = new Set();
+  for (const { item } of turnItems) {
+    const { paths } = extractItemTargets(item);
+    for (const p of paths) actionPaths.add(p);
+  }
+
+  if (actionPaths.size === 0) return bonusMap;
+
+  // Phase 2: For each older item, check if its OUTPUT mentions any action path.
+  //          If yes, that item's output contained something the agent later used.
+  for (const { item } of turnItems) {
+    const text = getItemText(item);
+    if (!text || text.length < 50) continue;
+
+    const textLower = text.toLowerCase().replaceAll("\\", "/");
+    let matchCount = 0;
+
+    for (const actionPath of actionPaths) {
+      // Use just the filename or last 2 segments for matching
+      // to avoid false negatives from different absolute path prefixes
+      const segments = actionPath.split("/");
+      const shortPath = segments.slice(-2).join("/");
+      if (shortPath.length >= 4 && textLower.includes(shortPath)) {
+        matchCount++;
+      }
+    }
+
+    if (matchCount > 0) {
+      // Bonus proportional to how many action paths this output mentions
+      // Cap at 30 to avoid over-protecting search results that mention
+      // half the codebase
+      const bonus = Math.min(30, matchCount * 10);
+      bonusMap.set(item, bonus);
+    }
+  }
+
+  return bonusMap;
+}
+
+/**
+ * Apply score-based tier adjustment.
+ *
+ * High scores protect items from compression (shift tier down).
+ * Low scores accelerate compression (shift tier up).
+ *
+ * @param {number} baseTier  The age-based tier (1, 2, or 3)
+ * @param {number} score     The content-aware score (0-100)
+ * @returns {number}         Adjusted tier (0, 1, 2, or 3)
+ */
+function adjustTierByScore(baseTier, score) {
+  if (score >= SCORE_HIGH) {
+    // Protect: shift tier down (less compression)
+    return Math.max(0, baseTier + TIER_SHIFT_PROTECT);
+  }
+  if (score < SCORE_LOW) {
+    // Accelerate: shift tier up (more compression)
+    return Math.min(3, baseTier + TIER_SHIFT_ACCELERATE);
+  }
+  return baseTier; // Normal: use age-based tier as-is
+}
+
+// ---------------------------------------------------------------------------
+// Smart Search Result Compression
+// ---------------------------------------------------------------------------
+//
+// For large search outputs (grep_search with 50+ results), instead of
+// just head/tail truncation, extract only the results that the agent
+// actually used (by matching against subsequent file reads/edits).
+// ---------------------------------------------------------------------------
+
+/**
+ * Smart-compress a large search result by keeping only relevant matches.
+ *
+ * @param {string}    text         The full search output
+ * @param {Set<string>} actionPaths  Paths the agent later acted on
+ * @param {number}    logId        Cache log ID for retrieval command
+ * @returns {string}               Compressed output with relevant matches preserved
+ */
+function smartCompressSearchResult(text, actionPaths, logId) {
+  if (!text || actionPaths.size === 0) return null; // fall back to standard compression
+
+  const lines = text.split("\n");
+  const keptLines = [];
+  let droppedCount = 0;
+
+  for (const line of lines) {
+    const lineLower = line.toLowerCase().replaceAll("\\", "/");
+    let isRelevant = false;
+
+    // Keep lines that mention any action path
+    for (const actionPath of actionPaths) {
+      const segments = actionPath.split("/");
+      const shortPath = segments.slice(-2).join("/");
+      if (shortPath.length >= 4 && lineLower.includes(shortPath)) {
+        isRelevant = true;
+        break;
+      }
+    }
+
+    // Also keep header/summary lines (first 2, last 1)
+    if (keptLines.length < 2 || lines.indexOf(line) >= lines.length - 1) {
+      isRelevant = true;
+    }
+
+    if (isRelevant) {
+      keptLines.push(line);
+    } else {
+      droppedCount++;
+    }
+  }
+
+  // Only use smart compression if we actually filtered something significant
+  if (droppedCount < 5) return null; // not worth it — fall back to standard
+
+  const compressed = keptLines.join("\n");
+  return (
+    compressed +
+    `\n\n[…${droppedCount} irrelevant search results filtered — full output: bosun --tool-log ${logId}]`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Entry Point (Content-Aware)
 // ---------------------------------------------------------------------------
 
 /**
@@ -503,47 +984,35 @@ export async function cacheAndCompressItems(items, options = {}) {
   // Nothing to compress if we don't have enough turns yet
   if (maxTurn < fullContextTurns) return items;
 
+  // ── Content-aware scoring pass ──────────────────────────────────────────
+  // Phase 1: Score every item's inherent value density
+  const scores = new Map();
+  for (const { item } of turnItems) {
+    scores.set(item, scoreToolOutput(item));
+  }
+
+  // Phase 2: Retrospective relevance — boost items whose output the agent
+  //          later acted on (read/edited a file mentioned in search results)
+  const retroBonus = buildRetrospectiveRelevanceMap(turnItems);
+  for (const [item, bonus] of retroBonus) {
+    const current = scores.get(item) || 50;
+    scores.set(item, Math.min(100, current + bonus));
+  }
+
+  // Collect all action paths for smart search compression
+  const actionPaths = new Set();
+  for (const { item } of turnItems) {
+    const { paths } = extractItemTargets(item);
+    for (const p of paths) actionPaths.add(p);
+  }
+
   const result = [];
   const cachePromises = [];
 
   for (const { item, turn } of turnItems) {
     const age = maxTurn - turn;
-
-    // Tier 0: keep full
-    if (age <= TIER_0_MAX_AGE) {
-      result.push(item);
-      continue;
-    }
-
-    // Skip items that have no meaningful text to compress
-    if (!isCompressCandidate(item)) {
-      result.push(item);
-      continue;
-    }
-
-    // Already compressed? (has _cachedLogId)
-    if (item._cachedLogId) {
-      // Re-apply compression at potentially more aggressive tier
-      const tier = resolveTier(age);
-      result.push(applyCompression(item, item._cachedLogId, tier));
-      continue;
-    }
-
-    // Determine tier
-    const tier = resolveTier(age);
-
-    // Cache the original, then compress
-    const toolName = extractToolName(item);
-    const argsPreview = extractArgsPreview(item);
-
-    // We need to write to cache before compressing — capture the promise
-    const cacheIdx = result.length;
-    result.push(item); // placeholder — will be replaced
-
-    cachePromises.push(
-      writeToCache(item, toolName, argsPreview).then((logId) => {
-        result[cacheIdx] = applyCompression(item, logId, tier);
-      }),
+    processCompressItem(
+      item, age, scores, actionPaths, result, cachePromises,
     );
   }
 
@@ -553,6 +1022,71 @@ export async function cacheAndCompressItems(items, options = {}) {
   }
 
   return result;
+}
+
+/**
+ * Process a single item for the compression pipeline (extracted to keep
+ * `cacheAndCompressItems` under cognitive-complexity limit).
+ * @param {object} item
+ * @param {number} age
+ * @param {Map} scores
+ * @param {Set} actionPaths
+ * @param {Array} result     Mutated — items are pushed here
+ * @param {Array} cachePromises  Mutated — cache promises pushed here
+ */
+function processCompressItem(item, age, scores, actionPaths, result, cachePromises) {
+  // Tier 0: keep full
+  if (age <= TIER_0_MAX_AGE) { result.push(item); return; }
+
+  // Skip items that have no meaningful text to compress
+  if (!isCompressCandidate(item)) { result.push(item); return; }
+
+  // Content-aware tier resolution
+  const itemScore = scores.get(item) ?? 50;
+  const baseTier = resolveTier(age);
+  const tier = adjustTierByScore(baseTier, itemScore);
+
+  // Tier 0 after score adjustment: item is valuable enough to protect
+  if (tier === 0) { result.push(item); return; }
+
+  // Already compressed? Re-apply at potentially more aggressive tier
+  if (item._cachedLogId) {
+    result.push(applyCompression(item, item._cachedLogId, tier));
+    return;
+  }
+
+  // Cache the original, then compress
+  const toolName = extractToolName(item);
+  const argsPreview = extractArgsPreview(item);
+  const cacheIdx = result.length;
+  result.push(item); // placeholder — will be replaced
+
+  cachePromises.push(
+    writeToCache(item, toolName, argsPreview).then((logId) => {
+      const smartResult = trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId);
+      result[cacheIdx] = smartResult || applyCompression(item, logId, tier);
+    }),
+  );
+}
+
+/**
+ * Attempt smart search result compression for low-score search outputs.
+ * Returns null if smart compression is not applicable.
+ */
+function trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId) {
+  if (itemScore >= SCORE_LOW || actionPaths.size === 0) return null;
+  const lower = (toolName || "").toLowerCase();
+  const isSearch =
+    lower.includes("search") || lower.includes("grep") || lower.includes("find");
+  if (!isSearch) return null;
+
+  const text = getItemText(item);
+  const smartText = smartCompressSearchResult(text, actionPaths, logId);
+  if (!smartText) return null;
+
+  const compressed = { ...item, _cachedLogId: logId };
+  setItemText(compressed, smartText);
+  return compressed;
 }
 
 // ===========================================================================
@@ -608,7 +1142,7 @@ const PINNED_KEYWORDS = [
 
 /** Pre-compiled regex for pinned detection (case-insensitive) */
 const PINNED_RE = new RegExp(
-  PINNED_KEYWORDS.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+  PINNED_KEYWORDS.map((k) => k.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)).join("|"),
   "i",
 );
 
@@ -674,15 +1208,15 @@ function summarizeAgentMessage(text) {
 
   // Strip markdown fences, bullet/number lists, extra whitespace
   let clean = text
-    .replace(/```[\s\S]*?```/g, "[code block]")                  // code fences
-    .replace(/^\s*[-*•]\s+/gm, "")                                // bullet lists
-    .replace(/^\s*\d+[.)]\s+/gm, "")                              // numbered lists
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")                      // markdown links
-    .replace(/#{1,6}\s+/g, "")                                    // headings
-    .replace(/[`*_~]+/g, "")                                      // inline formatting
-    .replace(/\n{2,}/g, ". ")                                     // paragraph breaks → period
-    .replace(/\n/g, " ")                                          // newlines → space
-    .replace(/\s{2,}/g, " ")                                      // collapse whitespace
+    .replaceAll(/```[\s\S]*?```/g, "[code block]")                // code fences
+    .replaceAll(/^\s*[-*•]\s+/gm, "")                              // bullet lists
+    .replaceAll(/^\s*\d+[.)]\s+/gm, "")                            // numbered lists
+    .replaceAll(/\[([^\]]*)\]\([^)]*\)/g, "$1")                    // markdown links
+    .replaceAll(/#{1,6}\s+/g, "")                                  // headings
+    .replaceAll(/[`*_~]+/g, "")                                    // inline formatting
+    .replaceAll(/\n{2,}/g, ". ")                                   // paragraph breaks → period
+    .replaceAll("\n", " ")                                           // newlines → space
+    .replaceAll(/\s{2,}/g, " ")                                    // collapse whitespace
     .trim();
 
   // Take only the first "sentence" (up to first period, colon, or dash boundary)
@@ -718,13 +1252,13 @@ function summarizeUserMessage(text) {
 
   // Remove code blocks and markdown
   let clean = rawText
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/#{1,6}\s+/g, "")
-    .replace(/[`*_~]+/g, "")
-    .replace(/\n{2,}/g, ". ")
-    .replace(/\n/g, " ")
-    .replace(/\s{2,}/g, " ")
+    .replaceAll(/```[\s\S]*?```/g, "")
+    .replaceAll(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replaceAll(/#{1,6}\s+/g, "")
+    .replaceAll(/[`*_~]+/g, "")
+    .replaceAll(/\n{2,}/g, ". ")
+    .replaceAll("\n", " ")
+    .replaceAll(/\s{2,}/g, " ")
     .trim();
 
   // If there's a system prompt prepended, skip to the user's actual content
