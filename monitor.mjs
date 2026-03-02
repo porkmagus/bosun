@@ -13307,4 +13307,6 @@ export {
   // Container runner re-exports
   getContainerStatus,
   isContainerEnabled,
+  // Workflow event bridge — for fleet/kanban modules to emit events
+  queueWorkflowEvent,
 };

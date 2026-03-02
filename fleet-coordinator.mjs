@@ -36,6 +36,24 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ── Workflow Event Bridge ────────────────────────────────────────────────────
+// Lazy-import queueWorkflowEvent from monitor.mjs — cached at module scope.
+let _queueWorkflowEvent = null;
+function emitFleetEvent(eventType, eventData = {}, opts = {}) {
+  if (!_queueWorkflowEvent) {
+    import("./monitor.mjs")
+      .then((mod) => {
+        if (typeof mod.queueWorkflowEvent === "function") {
+          _queueWorkflowEvent = mod.queueWorkflowEvent;
+          _queueWorkflowEvent(eventType, eventData, opts);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  _queueWorkflowEvent(eventType, eventData, opts);
+}
+
 // ── Repo Fingerprinting ──────────────────────────────────────────────────────
 
 function buildGitEnv() {
@@ -434,13 +452,21 @@ export function assignTasksToWorkstations(waves, peers, taskMap = new Map()) {
     assignments.push(...waveAssignments);
   }
 
-  return {
+  const result = {
     assignments,
     totalTasks: assignments.length,
     totalPeers: peers.length,
     waveCount: waves.length,
     createdAt: new Date().toISOString(),
   };
+
+  emitFleetEvent("fleet.tasks_assigned", {
+    totalTasks: result.totalTasks,
+    totalPeers: result.totalPeers,
+    waveCount: result.waveCount,
+  }, { dedupKey: `fleet-assign-${result.createdAt}` });
+
+  return result;
 }
 
 // ── Backlog Depth Calculator ─────────────────────────────────────────────────
@@ -502,6 +528,10 @@ export function detectMaintenanceMode(status) {
 
   // Maintenance mode: nothing to do AND nothing in progress
   if (backlog === 0 && todo === 0 && running === 0 && review === 0) {
+    emitFleetEvent("fleet.maintenance_mode", {
+      isMaintenanceMode: true,
+      reason: "all tasks completed — no backlog, no active work",
+    });
     return {
       isMaintenanceMode: true,
       reason: "all tasks completed — no backlog, no active work",
@@ -722,6 +752,9 @@ export function shouldAutoGenerateTasks({
  */
 export function markAutoGenTriggered() {
   lastAutoGenTimestamp = Date.now();
+  emitFleetEvent("fleet.auto_gen_triggered", {
+    triggeredAt: new Date(lastAutoGenTimestamp).toISOString(),
+  });
 }
 
 /**

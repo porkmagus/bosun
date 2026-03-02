@@ -798,7 +798,9 @@ registerNodeType("trigger.manual", {
 });
 
 registerNodeType("trigger.task_low", {
-  describe: () => "Fires when backlog task count drops below threshold",
+  describe: () =>
+    "Fires when backlog task count drops below threshold. Self-queries kanban " +
+    "when todoCount is not pre-populated in context data.",
   schema: {
     type: "object",
     properties: {
@@ -809,7 +811,29 @@ registerNodeType("trigger.task_low", {
   },
   async execute(node, ctx) {
     const threshold = node.config?.threshold ?? 3;
-    const todoCount = ctx.data?.todoCount ?? ctx.data?.backlogCount ?? 0;
+    const status = node.config?.status ?? "todo";
+    let todoCount = ctx.data?.todoCount ?? ctx.data?.backlogCount ?? null;
+
+    // Self-query kanban if todoCount not pre-populated
+    if (todoCount == null) {
+      try {
+        const projectId = cfgOrCtx(node, ctx, "projectId") || undefined;
+        const kanban = ctx.data?._services?.kanban;
+        let tasks;
+        if (kanban?.listTasks) {
+          tasks = await kanban.listTasks(projectId, { status });
+        } else {
+          const ka = await ensureKanbanAdapterMod();
+          tasks = await ka.listTasks(projectId, { status });
+        }
+        todoCount = Array.isArray(tasks) ? tasks.length : 0;
+        ctx.log(node.id, `Self-queried kanban: ${todoCount} task(s) with status "${status}"`);
+      } catch (err) {
+        ctx.log(node.id, `Kanban query failed: ${err?.message || err} — using 0`);
+        todoCount = 0;
+      }
+    }
+
     const triggered = todoCount < threshold;
     ctx.log(node.id, `Task count: ${todoCount}, threshold: ${threshold}, triggered: ${triggered}`);
     return { triggered, todoCount, threshold };
@@ -2322,7 +2346,9 @@ registerNodeType("action.git_operations", {
 });
 
 registerNodeType("action.create_pr", {
-  describe: () => "Hand off pull-request lifecycle to Bosun management (direct creation disabled)",
+  describe: () =>
+    "Create a pull request via GitHub CLI. Falls back to Bosun-managed handoff " +
+    "when gh is unavailable or the operation fails with failOnError=false.",
   schema: {
     type: "object",
     properties: {
@@ -2330,10 +2356,18 @@ registerNodeType("action.create_pr", {
       body: { type: "string", description: "PR body" },
       base: { type: "string", description: "Base branch" },
       baseBranch: { type: "string", description: "Legacy alias for base branch" },
-      branch: { type: "string", description: "Head branch for Bosun lifecycle handoff context" },
+      branch: { type: "string", description: "Head branch (source)" },
       draft: { type: "boolean", default: false },
+      labels: {
+        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        description: "Comma-separated or array of labels",
+      },
+      reviewers: {
+        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        description: "Comma-separated or array of reviewer handles",
+      },
       cwd: { type: "string" },
-      failOnError: { type: "boolean", default: false, description: "Retained for compatibility; direct PR commands are disabled" },
+      failOnError: { type: "boolean", default: false, description: "If true, throw on gh failure instead of falling back" },
     },
     required: ["title"],
   },
@@ -2342,23 +2376,77 @@ registerNodeType("action.create_pr", {
     const body = ctx.resolve(node.config?.body || "");
     const base = ctx.resolve(node.config?.base || node.config?.baseBranch || "main");
     const branch = ctx.resolve(node.config?.branch || "");
+    const draft = node.config?.draft === true;
+    const failOnError = node.config?.failOnError === true;
     const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
-    ctx.log(
-      node.id,
-      `PR lifecycle handoff recorded for "${title}" (direct PR commands are disabled)`,
-    );
-    return {
-      success: true,
-      handedOff: true,
-      lifecycle: "bosun_managed",
-      action: "pr_handoff",
-      message: "Direct PR commands are disabled; Bosun manages pull-request lifecycle.",
-      title,
-      body,
-      base,
-      branch: branch || null,
-      cwd,
+
+    // Normalize labels/reviewers to arrays
+    const toList = (v) => {
+      if (!v) return [];
+      if (Array.isArray(v)) return v.map(String).filter(Boolean);
+      return String(v).split(",").map((s) => s.trim()).filter(Boolean);
     };
+    const labels = toList(ctx.resolve(node.config?.labels || ""));
+    const reviewers = toList(ctx.resolve(node.config?.reviewers || ""));
+
+    // Build gh pr create command
+    const args = ["gh", "pr", "create"];
+    args.push("--title", JSON.stringify(title));
+    if (body) args.push("--body", JSON.stringify(body));
+    if (base) args.push("--base", base);
+    if (branch) args.push("--head", branch);
+    if (draft) args.push("--draft");
+    if (labels.length) args.push("--label", labels.join(","));
+    if (reviewers.length) args.push("--reviewer", reviewers.join(","));
+
+    const cmd = args.join(" ");
+    ctx.log(node.id, `Creating PR: ${cmd}`);
+
+    try {
+      const output = execSync(cmd, { cwd, encoding: "utf8", timeout: 60000 });
+      const trimmed = (output || "").trim();
+      // gh pr create prints the PR URL on success
+      const urlMatch = trimmed.match(/https:\/\/github\.com\/[^\s]+\/pull\/(\d+)/);
+      const prNumber = urlMatch ? parseInt(urlMatch[1], 10) : null;
+      const prUrl = urlMatch ? urlMatch[0] : trimmed;
+      ctx.log(node.id, `PR created: ${prUrl}`);
+      return {
+        success: true,
+        prUrl,
+        prNumber,
+        title,
+        base,
+        branch: branch || null,
+        draft,
+        labels,
+        reviewers,
+        output: trimmed,
+      };
+    } catch (err) {
+      const errorMsg = err?.stderr?.toString?.()?.trim() || err?.message || String(err);
+      ctx.log(node.id, `PR creation failed: ${errorMsg}`);
+      if (failOnError) {
+        return { success: false, error: errorMsg, command: cmd };
+      }
+      // Graceful fallback — record handoff for Bosun management
+      ctx.log(node.id, `Falling back to Bosun-managed PR lifecycle handoff`);
+      return {
+        success: true,
+        handedOff: true,
+        lifecycle: "bosun_managed",
+        action: "pr_handoff",
+        message: "gh CLI failed; Bosun manages pull-request lifecycle.",
+        title,
+        body,
+        base,
+        branch: branch || null,
+        draft,
+        labels,
+        reviewers,
+        cwd,
+        ghError: errorMsg,
+      };
+    }
   },
 });
 
@@ -3484,17 +3572,23 @@ registerNodeType("flow.gate", {
 // ═══════════════════════════════════════════════════════════════════════════
 
 registerNodeType("loop.for_each", {
-  describe: () => "Iterate over an array, executing downstream nodes for each item",
+  describe: () =>
+    "Iterate over an array, executing a sub-workflow for each item. " +
+    "Supports parallel fan-out via maxConcurrent and provides per-item " +
+    "context injection under the configured variable name.",
   schema: {
     type: "object",
     properties: {
       items: { type: "string", description: "Expression that resolves to an array" },
       variable: { type: "string", default: "item", description: "Variable name for current item" },
-      maxIterations: { type: "number", default: 50 },
+      indexVariable: { type: "string", default: "index", description: "Variable name for current index" },
+      maxIterations: { type: "number", default: 50, description: "Cap on total iterations" },
+      maxConcurrent: { type: "number", default: 1, description: "Parallel fan-out width (1 = sequential)" },
+      workflowId: { type: "string", description: "Sub-workflow to execute for each item (optional)" },
     },
     required: ["items"],
   },
-  async execute(node, ctx) {
+  async execute(node, ctx, engine) {
     const expr = node.config?.items || "[]";
     let items;
     try {
@@ -3507,12 +3601,65 @@ registerNodeType("loop.for_each", {
     const max = node.config?.maxIterations || 50;
     items = items.slice(0, max);
     const varName = node.config?.variable || "item";
+    const indexVar = node.config?.indexVariable || "index";
+    const maxConcurrent = Math.max(1, node.config?.maxConcurrent || 1);
+    const subWorkflowId = node.config?.workflowId || "";
 
-    // Store items for downstream processing
+    // Store items for downstream processing (backward compat)
     ctx.data[`_loop_${node.id}_items`] = items;
     ctx.data[`_loop_${node.id}_count`] = items.length;
 
-    return { items, count: items.length, variable: varName };
+    const results = [];
+
+    // If a sub-workflow is specified, fan-out execution across items
+    if (subWorkflowId && engine?.execute) {
+      ctx.log(node.id, `Fan-out: ${items.length} item(s), concurrency=${maxConcurrent}, workflow=${subWorkflowId}`);
+
+      // Process items in batches of maxConcurrent
+      for (let batchStart = 0; batchStart < items.length; batchStart += maxConcurrent) {
+        const batch = items.slice(batchStart, batchStart + maxConcurrent);
+        const batchPromises = batch.map(async (item, batchIdx) => {
+          const itemIndex = batchStart + batchIdx;
+          const itemData = {
+            ...ctx.data,
+            [varName]: item,
+            [indexVar]: itemIndex,
+            _loopParentNodeId: node.id,
+            _loopIteration: itemIndex,
+            _loopTotal: items.length,
+          };
+          try {
+            const runCtx = await engine.execute(subWorkflowId, itemData);
+            const ok = !runCtx?.errors?.length;
+            return { index: itemIndex, item, success: ok, runId: runCtx?.id || null };
+          } catch (err) {
+            return { index: itemIndex, item, success: false, error: err?.message || String(err) };
+          }
+        });
+        const batchResults = await Promise.all(batchPromises);
+        results.push(...batchResults);
+      }
+    } else {
+      // No sub-workflow — store items for downstream node access (legacy mode)
+      for (let i = 0; i < items.length; i++) {
+        ctx.data[varName] = items[i];
+        ctx.data[indexVar] = i;
+        results.push({ index: i, item: items[i], success: true });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failCount = results.length - successCount;
+    ctx.log(node.id, `Loop complete: ${successCount} succeeded, ${failCount} failed out of ${items.length}`);
+
+    return {
+      items,
+      count: items.length,
+      variable: varName,
+      results,
+      successCount,
+      failCount,
+    };
   },
 });
 
@@ -5088,17 +5235,19 @@ registerNodeType("action.detect_new_commits", {
   schema: {
     type: "object",
     properties: {
-      worktreePath: { type: "string", description: "Worktree path" },
+      worktreePath: { type: "string", description: "Worktree path (soft-fails if not set)" },
       preExecHead: { type: "string", description: "HEAD hash before agent (auto from ctx)" },
       baseBranch: { type: "string", description: "Base branch for diff stats" },
     },
-    required: ["worktreePath"],
   },
   async execute(node, ctx) {
     const worktreePath = cfgOrCtx(node, ctx, "worktreePath");
     const baseBranch = cfgOrCtx(node, ctx, "baseBranch", "origin/main");
 
-    if (!worktreePath) throw new Error("action.detect_new_commits: worktreePath is required");
+    if (!worktreePath) {
+      ctx.log(node.id, "action.detect_new_commits: worktreePath not set — skipping commit detection");
+      return { success: false, error: "worktreePath required", hasCommits: false, hasNewCommits: false, unpushedCount: 0 };
+    }
 
     // Read preExecHead from record-head node output or ctx
     const preExecHead = cfgOrCtx(node, ctx, "preExecHead")

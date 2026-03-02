@@ -11,12 +11,12 @@
  *
  * DAG overview:
  *   trigger.task_low
- *     → condition.check (is coordinator or solo?)
- *       → action.kanban_query (list todo tasks)
+ *     → condition.expression (is coordinator or solo?)
+ *       → action.run_command (list todo tasks)
  *         → loop.for_each (fan-out, maxConcurrent tasks at a time)
  *           → sub-workflow: template-task-lifecycle per task
  *         → action.set_variable (record batch results)
- *           → notification.send (summary)
+ *           → notify.log (summary)
  */
 
 import { node, edge, resetLayout } from "./_helpers.mjs";
@@ -45,7 +45,6 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     pollStatus: "todo",
     maxBatchSize: 10,
     subWorkflow: "template-task-lifecycle",
-    notifyOnComplete: true,
     notifyChannel: "telegram",
   },
   nodes: [
@@ -56,9 +55,8 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     }, { x: 400, y: 50 }),
 
     // ── Gate: Fleet coordinator check (skip if not coordinator) ──────────
-    node("check-coordinator", "condition.check", "Is Coordinator?", {
-      condition: "ctx.data?.isCoordinator !== false",
-      description: "Only the fleet coordinator (or solo instance) dispatches",
+    node("check-coordinator", "condition.expression", "Is Coordinator?", {
+      expression: "$data?.isCoordinator !== false",
     }, { x: 400, y: 180 }),
 
     // ── Query kanban for available tasks ─────────────────────────────────
@@ -99,19 +97,25 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     }, { x: 400, y: 570 }),
 
     // ── Notify on completion ─────────────────────────────────────────────
-    node("notify-complete", "notification.send", "Batch Summary", {
+    node("notify-complete", "notify.telegram", "Batch Summary", {
       channel: "{{notifyChannel}}",
       message: "Task batch completed: {{batchResult.successCount}}/{{batchResult.totalItems}} succeeded",
-      level: "info",
     }, { x: 400, y: 700 }),
   ],
   edges: [
     edge("trigger", "check-coordinator"),
-    edge("check-coordinator", "query-tasks", { condition: "result.passed === true" }),
+    edge("check-coordinator", "query-tasks", { condition: "result.result === true" }),
     edge("query-tasks", "dispatch-tasks"),
     edge("dispatch-tasks", "record-results"),
     edge("record-results", "notify-complete"),
   ],
+  metadata: {
+    author: "bosun",
+    version: 1,
+    createdAt: "2026-03-15T00:00:00Z",
+    templateVersion: "1.0.0",
+    tags: ["task", "batch", "parallel", "dispatch", "lifecycle"],
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -191,6 +195,8 @@ export const TASK_BATCH_PR_TEMPLATE = {
     // ── Per-task: detect commits ─────────────────────────────────────────
     node("detect-commits", "action.detect_new_commits", "Check Commits", {
       taskId: "{{task.taskId}}",
+      worktreePath: "{{worktreePath}}",
+      failOnError: false,
     }, { x: 400, y: 700 }),
 
     // ── Per-task: push + create PR ───────────────────────────────────────
@@ -214,10 +220,9 @@ export const TASK_BATCH_PR_TEMPLATE = {
     }, { x: 400, y: 1090 }),
 
     // ── Batch complete notification ──────────────────────────────────────
-    node("notify", "notification.send", "Batch Complete", {
+    node("notify", "notify.telegram", "Batch Complete", {
       channel: "{{notifyChannel}}",
       message: "Task batch PR pipeline complete",
-      level: "info",
     }, { x: 400, y: 1220 }),
   ],
   edges: [
@@ -232,4 +237,11 @@ export const TASK_BATCH_PR_TEMPLATE = {
     edge("detect-commits", "notify", { condition: "result.hasNewCommits !== true" }),
     edge("set-inreview", "notify"),
   ],
+  metadata: {
+    author: "bosun",
+    version: 1,
+    createdAt: "2026-03-15T00:00:00Z",
+    templateVersion: "1.0.0",
+    tags: ["task", "batch", "pr", "agent", "autonomous"],
+  },
 };

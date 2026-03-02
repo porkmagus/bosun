@@ -5823,6 +5823,23 @@ export function getKanbanBackendName() {
 // Convenience exports: direct task operations via active adapter
 // ---------------------------------------------------------------------------
 
+// ── Workflow Event Bridge (lazy-loaded from monitor.mjs) ──────────────────
+let _kanbanQueueWorkflowEvent = null;
+function emitKanbanEvent(eventType, eventData = {}) {
+  if (!_kanbanQueueWorkflowEvent) {
+    import("./monitor.mjs")
+      .then((mod) => {
+        if (typeof mod.queueWorkflowEvent === "function") {
+          _kanbanQueueWorkflowEvent = mod.queueWorkflowEvent;
+          _kanbanQueueWorkflowEvent(eventType, eventData);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  _kanbanQueueWorkflowEvent(eventType, eventData);
+}
+
 export async function listProjects() {
   return getKanbanAdapter().listProjects();
 }
@@ -5836,7 +5853,9 @@ export async function getTask(taskId) {
 }
 
 export async function updateTaskStatus(taskId, status, options) {
-  return getKanbanAdapter().updateTaskStatus(taskId, status, options);
+  const result = await getKanbanAdapter().updateTaskStatus(taskId, status, options);
+  emitKanbanEvent("task.status_updated", { taskId, status, options });
+  return result;
 }
 
 export async function updateTask(taskId, patch) {
@@ -5851,11 +5870,19 @@ export async function updateTask(taskId, patch) {
 }
 
 export async function createTask(projectId, taskData) {
-  return getKanbanAdapter().createTask(projectId, taskData);
+  const result = await getKanbanAdapter().createTask(projectId, taskData);
+  emitKanbanEvent("task.created", {
+    projectId,
+    taskId: result?.id || null,
+    title: taskData?.title || null,
+  });
+  return result;
 }
 
 export async function deleteTask(taskId) {
-  return getKanbanAdapter().deleteTask(taskId);
+  const result = await getKanbanAdapter().deleteTask(taskId);
+  emitKanbanEvent("task.deleted", { taskId });
+  return result;
 }
 
 export async function addComment(taskId, body) {
