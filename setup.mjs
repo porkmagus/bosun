@@ -5568,6 +5568,84 @@ async function main() {
     }
 
     saveSetupSnapshot(9, "Running Mode", env, configJson);
+
+    // ── Context Shredding advanced configuration (advanced setup only) ──
+    if (isAdvancedSetup) {
+      console.log();
+      console.log(chalk.bold.cyan("  Context Shredding"));
+      console.log(chalk.dim(
+        "  Context Shredding compresses old tool outputs and messages to reduce\n" +
+        "  token usage and avoid context overflow on long-running sessions.\n" +
+        "  Pinned instructions (AGENTS.md, MUST rules) are never compressed.\n",
+      ));
+
+      const shreddingEnabled = await prompt.confirm(
+        "Enable Context Shredding (recommended)?",
+        env.CONTEXT_SHREDDING_ENABLED
+          ? env.CONTEXT_SHREDDING_ENABLED !== "false"
+          : true,
+      );
+      env.CONTEXT_SHREDDING_ENABLED = shreddingEnabled ? "true" : "false";
+
+      if (shreddingEnabled) {
+        const fullTurns = await prompt.ask(
+          "Full-context turns (Tier 0 — keep uncompressed)",
+          env.CONTEXT_SHREDDING_FULL_CONTEXT_TURNS || "3",
+        );
+        if (fullTurns && String(fullTurns).trim() !== "3") {
+          env.CONTEXT_SHREDDING_FULL_CONTEXT_TURNS = String(fullTurns).trim();
+        }
+
+        const compressMessages = await prompt.confirm(
+          "Compress agent reasoning & user messages?",
+          env.CONTEXT_SHREDDING_COMPRESS_MESSAGES
+            ? env.CONTEXT_SHREDDING_COMPRESS_MESSAGES !== "false"
+            : true,
+        );
+        env.CONTEXT_SHREDDING_COMPRESS_MESSAGES = compressMessages ? "true" : "false";
+
+        console.log(chalk.dim(
+          "\n  Advanced tier tuning (press Enter to keep defaults):",
+        ));
+
+        const tier1MaxAge = await prompt.ask(
+          "Tier 1 max age (light compression, in turns)",
+          env.CONTEXT_SHREDDING_TIER1_MAX_AGE || "5",
+        );
+        if (tier1MaxAge && String(tier1MaxAge).trim() !== "5") {
+          env.CONTEXT_SHREDDING_TIER1_MAX_AGE = String(tier1MaxAge).trim();
+        }
+
+        const tier2MaxAge = await prompt.ask(
+          "Tier 2 max age (moderate compression, in turns)",
+          env.CONTEXT_SHREDDING_TIER2_MAX_AGE || "9",
+        );
+        if (tier2MaxAge && String(tier2MaxAge).trim() !== "9") {
+          env.CONTEXT_SHREDDING_TIER2_MAX_AGE = String(tier2MaxAge).trim();
+        }
+
+        console.log();
+        console.log(chalk.dim(
+          "  Per-type profiles let you tune shredding per interaction type.\n" +
+          "  Example: {\"perType\":{\"voice\":{\"fullContextTurns\":6}},\"perAgent\":{\"claude-sdk\":{\"tier1MaxAge\":8}}}\n" +
+          "  Leave blank to use global defaults.\n",
+        ));
+        const profiles = await prompt.ask(
+          "Per-type profiles JSON (optional)",
+          env.CONTEXT_SHREDDING_PROFILES || "",
+        );
+        if (profiles && String(profiles).trim()) {
+          // Validate JSON before saving
+          try {
+            JSON.parse(String(profiles).trim());
+            env.CONTEXT_SHREDDING_PROFILES = String(profiles).trim();
+          } catch {
+            console.warn(chalk.yellow("  ⚠ Invalid JSON — skipping profiles override."));
+          }
+        }
+      }
+    }
+
     } // end step 9
 
   } finally {

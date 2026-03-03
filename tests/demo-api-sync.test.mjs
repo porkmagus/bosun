@@ -150,6 +150,17 @@ const INTENTIONALLY_SKIPPED = new Set([
   "/api/voice/auth/gemini/cancel",
   "/api/voice/auth/gemini/logout",
   "/api/voice/auth/gemini/refresh",
+  // Manual Flows — server-only (reads/writes workspace flow templates and runs)
+  "/api/manual-flows/templates",
+  "/api/manual-flows/templates/save",
+  "/api/manual-flows/execute",
+  "/api/manual-flows/runs",
+  "/api/manual-flows/runs/:id",
+  // Workflow launcher & concurrency — server-only
+  "/api/workflows/launch-template",
+  "/api/workflows/concurrency",
+  // Telemetry — server-only
+  "/api/telemetry/shredding",
 ]);
 
 // ── Session actions intentionally skipped in demo ─────────────────────

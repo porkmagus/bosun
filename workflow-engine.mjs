@@ -4,10 +4,17 @@
  * A modular, declarative workflow execution engine that replaces hardcoded
  * supervisor logic with composable, user-editable workflow definitions.
  *
- * Workflows are directed acyclic graphs (DAGs) of nodes. Each node has a
- * type (trigger, condition, action, validation, transform) and connects
- * to downstream nodes via edges. The engine evaluates triggers, routes
+ * Workflows are directed graphs of nodes. Each node has a type (trigger,
+ * condition, action, validation, transform, loop) and connects to
+ * downstream nodes via edges. The engine evaluates triggers, routes
  * through conditions, executes actions, and validates results.
+ *
+ * While most workflows are DAGs, the engine supports back-edges
+ * (edges with `backEdge: true`) for convergence loops. Back-edges
+ * allow downstream nodes to route execution back to an upstream node,
+ * enabling iterative patterns like generate→verify→revise cycles.
+ * Back-edges are capped at a configurable iteration limit to prevent
+ * infinite loops.
  *
  * Users define workflows via JSON (or the visual builder UI) — no custom
  * code required. Built-in templates cover common patterns like:
@@ -27,6 +34,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { writeFile as writeFileAsync } from "node:fs/promises";
 import { resolve, basename, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -57,6 +65,10 @@ const MAX_CONCURRENT_BRANCHES = readBoundedEnvInt("WORKFLOW_MAX_CONCURRENT_BRANC
   min: 1,
   max: 64,
 });
+const MAX_CONCURRENT_RUNS = readBoundedEnvInt("WORKFLOW_MAX_CONCURRENT_RUNS", 16, {
+  min: 1,
+  max: 256,
+});
 const MAX_PERSISTED_RUNS = readBoundedEnvInt("WORKFLOW_MAX_PERSISTED_RUNS", 200, {
   min: 20,
   max: 5000,
@@ -65,6 +77,11 @@ const DEFAULT_RUN_STUCK_THRESHOLD_MS = readBoundedEnvInt(
   "WORKFLOW_RUN_STUCK_THRESHOLD_MS",
   5 * 60 * 1000,
   { min: 10000, max: 7_200_000 },
+);
+const MAX_BACK_EDGE_ITERATIONS = readBoundedEnvInt(
+  "WORKFLOW_MAX_BACK_EDGE_ITERATIONS",
+  20,
+  { min: 1, max: 200 },
 );
 
 // ── Auto-Retry Defaults ─────────────────────────────────────────────────────
@@ -188,6 +205,11 @@ export function listNodeTypes() {
  * @property {string} target - Target node ID
  * @property {string} [sourcePort] - Output port name (default: "default")
  * @property {string} [condition] - Optional JS expression for conditional routing
+ * @property {boolean} [backEdge] - When true, this edge routes execution back
+ *   to a previously-executed node, creating a convergence loop. Back-edges
+ *   are excluded from in-degree calculation and have a per-edge iteration
+ *   cap (default: MAX_BACK_EDGE_ITERATIONS).
+ * @property {number} [maxIterations] - Override iteration cap for this back-edge
  */
 
 /**
@@ -366,6 +388,12 @@ export class WorkflowEngine extends EventEmitter {
     this._loaded = false;
     this._checkpointTimers = new Map(); // runId → debounce timer
     this._resumingRuns = false;
+
+    // ── Concurrency control ───────────────────────────────────────────
+    this._runSlots = 0;              // current number of executing runs
+    this._runQueue = [];             // FIFO queue of { resolve, reject, args }
+    this._runIndexCache = null;      // cached run index (invalidated on writes)
+    this._runIndexCacheMtime = 0;    // mtime of the cached index file
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -510,6 +538,21 @@ export class WorkflowEngine extends EventEmitter {
     return JSON.stringify(def, null, 2);
   }
 
+  // ── Concurrency Stats ───────────────────────────────────────────────
+
+  /**
+   * Return live concurrency stats for monitoring / dashboards.
+   * @returns {{ activeRuns: number, maxConcurrentRuns: number, queuedRuns: number, maxConcurrentBranches: number }}
+   */
+  getConcurrencyStats() {
+    return {
+      activeRuns: this._runSlots,
+      maxConcurrentRuns: MAX_CONCURRENT_RUNS,
+      queuedRuns: this._runQueue.length,
+      maxConcurrentBranches: MAX_CONCURRENT_BRANCHES,
+    };
+  }
+
   // ── Execution ─────────────────────────────────────────────────────────
 
   /**
@@ -525,6 +568,34 @@ export class WorkflowEngine extends EventEmitter {
     if (def.enabled === false && !opts.force) {
       throw new Error(`${TAG} Workflow "${def.name}" is disabled`);
     }
+
+    // ── Concurrency gate ──────────────────────────────────────────────
+    // If we're at capacity, queue this run and wait for a slot.
+    if (this._runSlots >= MAX_CONCURRENT_RUNS) {
+      this.emit("run:queued", { workflowId, name: def.name, queueDepth: this._runQueue.length + 1 });
+      await new Promise((resolve, reject) => {
+        this._runQueue.push({ resolve, reject });
+      });
+    }
+    this._runSlots++;
+
+    try {
+      return await this._executeInner(def, workflowId, inputData, opts);
+    } finally {
+      this._runSlots--;
+      // Wake the next queued run, if any
+      if (this._runQueue.length > 0) {
+        const next = this._runQueue.shift();
+        next.resolve();
+      }
+    }
+  }
+
+  /**
+   * Inner execute logic — called only once a concurrency slot is acquired.
+   * @private
+   */
+  async _executeInner(def, workflowId, inputData, opts) {
 
     const ctx = new WorkflowContext({
       ...def.variables,
@@ -1042,6 +1113,25 @@ export class WorkflowEngine extends EventEmitter {
     return adj;
   }
 
+  /**
+   * Collect the set of node IDs reachable from `startId` via forward
+   * (non-back) edges.  Used by back-edge handling to know which nodes
+   * must be reset when a loop cycles.
+   */
+  _collectSubgraph(startId, adjacency) {
+    const visited = new Set();
+    const stack = [startId];
+    while (stack.length > 0) {
+      const nid = stack.pop();
+      if (visited.has(nid)) continue;
+      visited.add(nid);
+      for (const edge of adjacency.get(nid) || []) {
+        if (!edge.backEdge) stack.push(edge.target);
+      }
+    }
+    return visited;
+  }
+
   _findEntryNodes(def) {
     const hasIncoming = new Set();
     for (const edge of def.edges || []) {
@@ -1066,14 +1156,19 @@ export class WorkflowEngine extends EventEmitter {
       }
     }
 
-    // Track in-degree for proper scheduling
+    // Track in-degree for proper scheduling (exclude back-edges)
     const inDegree = new Map();
     for (const node of def.nodes || []) {
       inDegree.set(node.id, 0);
     }
     for (const edge of def.edges || []) {
-      inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+      if (!edge.backEdge) {
+        inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+      }
     }
+
+    // Back-edge iteration counters: Map<edgeId, number>
+    const backEdgeIterations = new Map();
 
     // ── Adjust in-degree for pre-completed nodes (retry resume) ─────────
     // When resuming from a failed step, pre-completed source nodes have
@@ -1278,8 +1373,11 @@ export class WorkflowEngine extends EventEmitter {
             try {
               const condResult = this._evaluateCondition(edge.condition, ctx, nodeId);
               if (!condResult) {
-                ctx.setNodeStatus(edge.target, NodeStatus.SKIPPED);
-                executed.add(edge.target);
+                // For back-edges, a false condition simply means "don't loop"
+                if (!edge.backEdge) {
+                  ctx.setNodeStatus(edge.target, NodeStatus.SKIPPED);
+                  executed.add(edge.target);
+                }
                 continue;
               }
             } catch {
@@ -1287,7 +1385,62 @@ export class WorkflowEngine extends EventEmitter {
             }
           }
 
-          // Decrement in-degree
+          // ── Back-edge handling (convergence loops) ──────────────────────
+          if (edge.backEdge) {
+            const edgeKey = edge.id || `${edge.source}->${edge.target}`;
+            const iterCount = (backEdgeIterations.get(edgeKey) || 0) + 1;
+            const maxIter = Number(edge.maxIterations) || MAX_BACK_EDGE_ITERATIONS;
+
+            if (iterCount > maxIter) {
+              ctx.log(nodeId,
+                `Back-edge "${edgeKey}" reached max iterations (${maxIter}) — stopping loop`,
+                "warn");
+              this.emit("loop:exhausted", { edgeId: edgeKey, iterations: maxIter, nodeId });
+              continue; // Don't follow this back-edge
+            }
+
+            backEdgeIterations.set(edgeKey, iterCount);
+            this.emit("loop:back_edge", {
+              edgeId: edgeKey,
+              source: edge.source,
+              target: edge.target,
+              iteration: iterCount,
+              maxIterations: maxIter,
+            });
+            ctx.log(nodeId,
+              `Back-edge → ${edge.target} (iteration ${iterCount}/${maxIter})`,
+              "info");
+
+            // Reset the target node and all forward-reachable nodes from it
+            // so the sub-graph can be re-executed.
+            const subgraph = this._collectSubgraph(edge.target, adjacency);
+            for (const nid of subgraph) {
+              executed.delete(nid);
+              ctx.setNodeStatus(nid, NodeStatus.PENDING);
+              // Restore in-degree for nodes in the subgraph so they schedule
+              // correctly on this new iteration.
+              let deg = 0;
+              for (const e of def.edges || []) {
+                if (e.target === nid && !e.backEdge) deg++;
+              }
+              // Subtract 1 for each predecessor in the subgraph that will
+              // re-execute (its edge will re-satisfy the in-degree).
+              // But do NOT subtract for the back-edge source — the back-edge
+              // itself is what triggers the target to be ready now.
+              for (const e of def.edges || []) {
+                if (e.target === nid && !e.backEdge && subgraph.has(e.source)) {
+                  deg--;
+                }
+              }
+              // The back-edge target itself has a satisfied edge (the back-edge)
+              if (nid === edge.target) deg = 0;
+              inDegree.set(nid, Math.max(0, deg));
+            }
+            ready.add(edge.target);
+            continue;
+          }
+
+          // Decrement in-degree (forward edges only)
           const newDegree = (inDegree.get(edge.target) || 1) - 1;
           inDegree.set(edge.target, newDegree);
           if (newDegree <= 0 && !executed.has(edge.target)) {
@@ -1675,7 +1828,10 @@ export class WorkflowEngine extends EventEmitter {
         this._ensureDirs();
         const detail = this._serializeRunContext(ctx, true);
         const detailPath = resolve(this.runsDir, `${runId}.json`);
-        writeFileSync(detailPath, JSON.stringify(detail, null, 2), "utf8");
+        // Async write — checkpoint is fire-and-forget, no need to block event loop
+        writeFileAsync(detailPath, JSON.stringify(detail, null, 2), "utf8").catch((err) => {
+          console.error(`${TAG} Checkpoint write failed for run ${runId}:`, err.message);
+        });
       } catch (err) {
         console.error(`${TAG} Checkpoint failed for run ${runId}:`, err.message);
       }

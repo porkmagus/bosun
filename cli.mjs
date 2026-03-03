@@ -33,6 +33,7 @@ import {
   detectLegacySetup,
   migrateFromLegacy,
 } from "./compat.mjs";
+import { resolveRepoRoot } from "./repo-root.mjs";
 
 const MONITOR_START_MAX_WAIT_MS = Math.max(
   0,
@@ -79,6 +80,12 @@ function showHelp() {
     --setup-terminal            Run the legacy terminal setup wizard
     --where                     Show the resolved bosun config directory
     --doctor                    Validate bosun .env/config setup
+    --tool-log <ID|list|prune>  Retrieve/list/prune cached tool outputs
+    --context-index [mode]      Run context index workflow (run|status|search)
+    --context-index-query <text> Query text for context index search mode
+    --context-index-limit <n>   Max results for context index search (default: 25)
+    --context-index-task-type <type> Task scope for search (auto|ci-cd|frontend|backend|infra|docs|security)
+    --context-index-no-fallback Disable global fallback when scoped search is weak
     --help                      Show this help
     --version                   Show version
     --portal, --desktop         Launch the Bosun desktop portal (Electron)
@@ -263,19 +270,27 @@ function printConfigLocations() {
 
 // ── Daemon Mode ──────────────────────────────────────────────────────────────
 
+const runtimeRepoRoot = resolveRepoRoot();
+const runtimeCacheDir = resolve(runtimeRepoRoot, ".cache");
 // Monitor singleton lock file (owned by monitor.mjs / maintenance.mjs).
-const PID_FILE = resolve(__dirname, ".cache", "bosun.pid");
+const PID_FILE = resolve(runtimeCacheDir, "bosun.pid");
+const LEGACY_MONITOR_PID_FILE = resolve(__dirname, ".cache", "bosun.pid");
 // Daemon supervisor PID file (owned by cli.mjs --daemon-child).
-const DAEMON_PID_FILE = resolve(__dirname, ".cache", "bosun-daemon.pid");
+const DAEMON_PID_FILE = resolve(runtimeCacheDir, "bosun-daemon.pid");
+const LEGACY_DAEMON_PID_FILE = resolve(__dirname, ".cache", "bosun-daemon.pid");
 const DAEMON_LOG = resolve(__dirname, "logs", "daemon.log");
 const SENTINEL_PID_FILE = resolve(
+  runtimeCacheDir,
+  "telegram-sentinel.pid",
+);
+const SENTINEL_PID_FILE_LEGACY = resolve(
   __dirname,
   "..",
   "..",
   ".cache",
   "telegram-sentinel.pid",
 );
-const SENTINEL_PID_FILE_LEGACY = resolve(
+const SENTINEL_PID_FILE_LEGACY_ALT = resolve(
   __dirname,
   ".cache",
   "telegram-sentinel.pid",
@@ -359,6 +374,14 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+function readSentinelPid() {
+  return (
+    readAlivePid(SENTINEL_PID_FILE) ||
+    readAlivePid(SENTINEL_PID_FILE_LEGACY) ||
+    readAlivePid(SENTINEL_PID_FILE_LEGACY_ALT)
+  );
+}
+
 async function runSentinelCli(flag) {
   return await new Promise((resolveExit) => {
     const child = spawn(process.execPath, [SENTINEL_SCRIPT_PATH, flag], {
@@ -373,8 +396,7 @@ async function runSentinelCli(flag) {
 
 async function ensureSentinelRunning(options = {}) {
   const { quiet = false } = options;
-  const existing =
-    readAlivePid(SENTINEL_PID_FILE) || readAlivePid(SENTINEL_PID_FILE_LEGACY);
+  const existing = readSentinelPid();
   if (existing) {
     if (!quiet) {
       console.log(`  telegram-sentinel already running (PID ${existing})`);
@@ -402,8 +424,7 @@ async function ensureSentinelRunning(options = {}) {
   const timeoutAt = Date.now() + 5000;
   while (Date.now() < timeoutAt) {
     await sleep(200);
-    const pid =
-      readAlivePid(SENTINEL_PID_FILE) || readAlivePid(SENTINEL_PID_FILE_LEGACY);
+    const pid = readSentinelPid();
     if (pid) {
       if (!quiet) {
         console.log(`  telegram-sentinel started (PID ${pid})`);
@@ -425,7 +446,8 @@ async function ensureSentinelRunning(options = {}) {
 }
 
 function getDaemonPid() {
-  const tracked = readAlivePid(DAEMON_PID_FILE);
+  const tracked =
+    readAlivePid(DAEMON_PID_FILE) || readAlivePid(LEGACY_DAEMON_PID_FILE);
   if (tracked) return tracked;
 
   // Legacy fallback: older versions stored daemon PID in bosun.pid
@@ -454,7 +476,7 @@ function findGhostDaemonPids() {
         [
           "-NoProfile",
           "-Command",
-          "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match 'cli\\.mjs' -and $_.CommandLine -match '--daemon-child' } | Select-Object -ExpandProperty ProcessId",
+          "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(node|electron)(\\.exe)?$' -and $_.CommandLine -match 'cli\\.mjs' -and $_.CommandLine -match '--daemon-child' } | Select-Object -ExpandProperty ProcessId",
         ],
         { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 3000 },
       ).trim();
@@ -494,6 +516,7 @@ function writePidFile(pid) {
 function removePidFile() {
   try {
     if (existsSync(DAEMON_PID_FILE)) unlinkSync(DAEMON_PID_FILE);
+    if (existsSync(LEGACY_DAEMON_PID_FILE)) unlinkSync(LEGACY_DAEMON_PID_FILE);
   } catch {
     /* ok */
   }
@@ -700,7 +723,7 @@ function findAllBosunProcessPids() {
         [
           "-NoProfile",
           "-Command",
-          `Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^node(\\.exe)?$' -and $_.CommandLine -match '${joined.replace(/\|/g, "|")}' } | Select-Object -ExpandProperty ProcessId`,
+          `Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(node|electron)(\\.exe)?$' -and $_.CommandLine -match '${joined.replace(/\|/g, "|")}' } | Select-Object -ExpandProperty ProcessId`,
         ],
         { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 4000 },
       ).trim();
@@ -732,9 +755,12 @@ function findAllBosunProcessPids() {
 function removeKnownPidFiles() {
   const pidFiles = [
     DAEMON_PID_FILE,
+    LEGACY_DAEMON_PID_FILE,
     PID_FILE,
+    LEGACY_MONITOR_PID_FILE,
     SENTINEL_PID_FILE,
     SENTINEL_PID_FILE_LEGACY,
+    SENTINEL_PID_FILE_LEGACY_ALT,
     resolve(__dirname, "..", ".cache", "bosun.pid"),
     resolve(process.cwd(), ".cache", "bosun.pid"),
   ];
@@ -751,8 +777,8 @@ function terminateBosun() {
   const tracked = [
     getDaemonPid(),
     readAlivePid(PID_FILE),
-    readAlivePid(SENTINEL_PID_FILE),
-    readAlivePid(SENTINEL_PID_FILE_LEGACY),
+    readAlivePid(LEGACY_MONITOR_PID_FILE),
+    readSentinelPid(),
   ].filter((pid) => Number.isFinite(pid) && pid > 0);
   const ghosts = findGhostDaemonPids();
   const scanned = findAllBosunProcessPids();
@@ -894,6 +920,127 @@ async function main() {
     process.exit(result.ok ? 0 : 1);
   }
 
+  // Handle --tool-log <ID> — retrieve cached tool output
+  if (args.includes("--tool-log")) {
+    const idx = args.indexOf("--tool-log");
+    const logIdArg = args[idx + 1];
+    const { retrieveToolLog, listToolLogs, pruneToolLogCache, getToolLogDir } =
+      await import("./context-cache.mjs");
+
+    if (logIdArg === "list" || logIdArg === "ls") {
+      const logs = await listToolLogs(50);
+      if (logs.length === 0) {
+        console.log("No cached tool logs found.");
+      } else {
+        console.log(`Cached tool logs (${logs.length} entries):\n`);
+        for (const entry of logs) {
+          const ts = new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19);
+          console.log(`  ${entry.id}  ${ts}  ${entry.toolName}(${entry.argsPreview || ""})`);
+        }
+        console.log(`\nCache dir: ${getToolLogDir()}`);
+      }
+      process.exit(0);
+    }
+
+    if (logIdArg === "prune") {
+      const pruned = await pruneToolLogCache();
+      console.log(`Pruned ${pruned} expired cache entries.`);
+      process.exit(0);
+    }
+
+    if (!logIdArg || !/^\d+$/.test(logIdArg)) {
+      console.error("Usage: bosun --tool-log <ID>       Retrieve a cached tool output");
+      console.error("       bosun --tool-log list       List cached tool logs");
+      console.error("       bosun --tool-log prune      Remove expired cache entries");
+      process.exit(1);
+    }
+
+    const result = await retrieveToolLog(Number(logIdArg));
+    if (!result.found) {
+      console.error(result.error || `Tool log ${logIdArg} not found.`);
+      process.exit(1);
+    }
+
+    // Print the full original tool output
+    const entry = result.entry;
+    console.log(`\n── Tool Log ${entry.id} ──`);
+    console.log(`Tool:  ${entry.toolName}`);
+    console.log(`Args:  ${entry.argsPreview || "(none)"}`);
+    console.log(`Time:  ${new Date(entry.ts).toISOString()}`);
+    console.log(`${"─".repeat(60)}\n`);
+
+    const item = entry.item;
+    const output =
+      item?.text || item?.output || item?.aggregated_output ||
+      item?.result || item?.message || JSON.stringify(item, null, 2);
+    console.log(output);
+    process.exit(0);
+  }
+
+  if (args.includes("--context-index")) {
+    const modeRaw = (getArgValue("--context-index") || "run").toLowerCase();
+    const validModes = new Set(["run", "status", "search"]);
+    if (!validModes.has(modeRaw)) {
+      console.error(`Invalid --context-index mode: ${modeRaw}`);
+      console.error("Valid modes: run, status, search");
+      process.exit(1);
+    }
+
+    try {
+      const {
+        runContextIndex,
+        searchContextIndex,
+        getContextIndexStatus,
+      } = await import("./context-indexer.mjs");
+
+      if (modeRaw === "run") {
+        const result = await runContextIndex({ rootDir: runtimeRepoRoot });
+        console.log(
+          `Context index complete: files=${result.indexedFiles}, changed=${result.changedFiles}, removed=${result.removedFiles}, symbols=${result.symbolCount}`,
+        );
+        if (result.zoekt) {
+          const zoektState = result.zoekt.success ? "ok" : "not-ready";
+          console.log(`Zoekt: ${zoektState}${result.zoekt.message ? ` (${result.zoekt.message})` : ""}`);
+        }
+        process.exit(0);
+      }
+
+      if (modeRaw === "status") {
+        const status = await getContextIndexStatus({ rootDir: runtimeRepoRoot });
+        console.log(JSON.stringify(status, null, 2));
+        process.exit(0);
+      }
+
+      const query = getArgValue("--context-index-query");
+      if (!query) {
+        console.error("--context-index-query is required when --context-index=search");
+        process.exit(1);
+      }
+
+      const limitRaw = getArgValue("--context-index-limit");
+      const parsedLimit = Number(limitRaw || 25);
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.floor(parsedLimit)
+        : 25;
+
+      const taskType = getArgValue("--context-index-task-type") || "auto";
+      const fallbackToGlobal = !args.includes("--context-index-no-fallback");
+
+      const results = await searchContextIndex(query, {
+        rootDir: runtimeRepoRoot,
+        limit,
+        taskType,
+        fallbackToGlobal,
+        includeMeta: true,
+      });
+      console.log(JSON.stringify(results, null, 2));
+      process.exit(0);
+    } catch (error) {
+      console.error(`Context index command failed: ${error?.message || String(error)}`);
+      process.exit(1);
+    }
+  }
+
   // Handle sentinel controls
   if (args.includes("--sentinel-stop")) {
     process.exit(await runSentinelCli("--stop"));
@@ -933,7 +1080,7 @@ async function main() {
     args.includes("--daemon-child") ||
     process.env.BOSUN_DAEMON === "1"
   ) {
-    const existingDaemonPid = readAlivePid(DAEMON_PID_FILE);
+    const existingDaemonPid = getDaemonPid();
     if (existingDaemonPid && existingDaemonPid !== process.pid) {
       process.stdout.write(
         `[daemon] another daemon-child already owns ${DAEMON_PID_FILE} (PID ${existingDaemonPid}) — duplicate daemon-child ignored.\n`,
@@ -1006,7 +1153,7 @@ async function main() {
         : "requested by BOSUN_SENTINEL_AUTO_START";
       const strictSentinel = parseBoolEnv(
         process.env.BOSUN_SENTINEL_STRICT,
-        false,
+        sentinelExplicit,
       );
       const prefix = strictSentinel ? ":close:" : ":alert:";
       const suffix = strictSentinel
@@ -1018,6 +1165,13 @@ async function main() {
       if (strictSentinel) {
         process.exit(1);
       }
+    }
+
+    if (sentinelExplicit && !IS_DAEMON_CHILD) {
+      console.log(
+        "  Sentinel started without launching monitor (use --daemon --sentinel to run both).",
+      );
+      process.exit(0);
     }
   }
 

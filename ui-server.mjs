@@ -174,6 +174,110 @@ const DEFAULT_VISION_ANALYSIS_INTERVAL_MS = Math.min(
     Number.parseInt(process.env.VISION_ANALYSIS_INTERVAL_MS || "", 10) || 1500,
   ),
 );
+const VOICE_TRACE_MAX_EVENTS_PER_SESSION = Math.max(
+  50,
+  Number.parseInt(process.env.BOSUN_VOICE_TRACE_MAX_EVENTS_PER_SESSION || "", 10) || 250,
+);
+const VOICE_TRACE_MAX_SESSIONS = Math.max(
+  10,
+  Number.parseInt(process.env.BOSUN_VOICE_TRACE_MAX_SESSIONS || "", 10) || 200,
+);
+const VOICE_TRACE_MAX_QUERY_LIMIT = 500;
+const voiceTraceStore = new Map();
+let voiceTraceSequence = 0;
+
+function parseVoiceTraceLimit(rawLimit, fallback = 50) {
+  const parsed = Number.parseInt(String(rawLimit || "").trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(VOICE_TRACE_MAX_QUERY_LIMIT, Math.max(1, parsed));
+}
+
+function pruneVoiceTraceSessions() {
+  while (voiceTraceStore.size > VOICE_TRACE_MAX_SESSIONS) {
+    let oldestSessionId = null;
+    let oldestUpdatedAt = Number.POSITIVE_INFINITY;
+    for (const [sessionId, state] of voiceTraceStore.entries()) {
+      const updatedAt = Number(state?.updatedAt || 0);
+      if (updatedAt < oldestUpdatedAt) {
+        oldestUpdatedAt = updatedAt;
+        oldestSessionId = sessionId;
+      }
+    }
+    if (!oldestSessionId) break;
+    voiceTraceStore.delete(oldestSessionId);
+  }
+}
+
+function appendVoiceTraceEvent(rawEvent = {}) {
+  const sessionId = String(rawEvent?.sessionId || "").trim();
+  const eventType = String(rawEvent?.eventType || rawEvent?.type || "").trim();
+  if (!sessionId || !eventType) return null;
+
+  const nowMs = Date.now();
+  voiceTraceSequence += 1;
+  const traceEvent = {
+    id: `${sessionId}:${nowMs}:${randomBytes(4).toString("hex")}`,
+    sessionId,
+    turnId: String(rawEvent?.turnId || "").trim() || null,
+    eventType,
+    transport: String(rawEvent?.transport || "").trim() || null,
+    provider: String(rawEvent?.provider || "").trim() || null,
+    role: String(rawEvent?.role || "").trim() || null,
+    source: String(rawEvent?.source || "voice-client").trim() || "voice-client",
+    reason: String(rawEvent?.reason || "").trim() || null,
+    timestamp: String(rawEvent?.timestamp || "").trim() || new Date(nowMs).toISOString(),
+    recordedAt: nowMs,
+    sequence: voiceTraceSequence,
+    meta: rawEvent?.meta && typeof rawEvent.meta === "object" ? rawEvent.meta : null,
+  };
+
+  const existing = voiceTraceStore.get(sessionId) || {
+    sessionId,
+    updatedAt: 0,
+    events: [],
+  };
+  existing.events.push(traceEvent);
+  if (existing.events.length > VOICE_TRACE_MAX_EVENTS_PER_SESSION) {
+    existing.events.splice(0, existing.events.length - VOICE_TRACE_MAX_EVENTS_PER_SESSION);
+  }
+  existing.updatedAt = nowMs;
+  voiceTraceStore.set(sessionId, existing);
+  pruneVoiceTraceSessions();
+  return traceEvent;
+}
+
+function queryVoiceTraceEvents({ sessionId = "", limit = 50, latestOnly = false } = {}) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const normalizedLimit = parseVoiceTraceLimit(limit, latestOnly ? 1 : 50);
+
+  let events = [];
+  if (normalizedSessionId) {
+    const state = voiceTraceStore.get(normalizedSessionId);
+    events = Array.isArray(state?.events) ? [...state.events] : [];
+  } else {
+    for (const state of voiceTraceStore.values()) {
+      if (!Array.isArray(state?.events)) continue;
+      events.push(...state.events);
+    }
+  }
+
+  events.sort((a, b) => {
+    const byRecordedAt = Number(b?.recordedAt || 0) - Number(a?.recordedAt || 0);
+    if (byRecordedAt !== 0) return byRecordedAt;
+    return Number(b?.sequence || 0) - Number(a?.sequence || 0);
+  });
+  if (latestOnly) {
+    return {
+      latest: events[0] || null,
+      total: events.length,
+    };
+  }
+  return {
+    events: events.slice(0, normalizedLimit),
+    total: events.length,
+  };
+}
+
 function sanitizeVisionSource(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (raw === "camera") return "camera";
@@ -236,17 +340,28 @@ const VOICE_TOOL_ID_MAP = Object.freeze({
   "search-files": ["search_code", "list_directory"],
   "read-file": ["read_file_content"],
   "edit-file": ["delegate_to_agent", "run_workspace_command"],
-  "run-command": ["run_command", "run_workspace_command"],
+  "run-command": ["run_command", "run_workspace_command", "bosun_slash_command"],
   "web-search": ["ask_agent_context"],
-  "code-search": ["search_code", "get_workspace_context"],
-  "git-operations": ["run_workspace_command", "get_pr_status"],
-  "create-task": ["create_task"],
-  "delegate-task": ["delegate_to_agent", "ask_agent_context", "poll_background_session"],
+  "code-search": ["search_code", "get_workspace_context", "warm_codebase_context"],
+  "git-operations": ["run_workspace_command", "get_pr_status", "get_workspace_context"],
+  "create-task": ["create_task", "list_tasks", "get_task", "update_task_status"],
+  "delegate-task": ["delegate_to_agent", "ask_agent_context", "poll_background_session", "set_agent_mode"],
   "fetch-url": ["run_workspace_command"],
   "list-directory": ["list_directory"],
   "grep-search": ["search_code"],
-  "task-management": ["list_tasks", "get_task", "search_tasks", "get_task_stats", "delete_task", "comment_on_task"],
-  "notifications": ["dispatch_action"],
+  "task-management": [
+    "list_tasks",
+    "get_task",
+    "create_task",
+    "update_task_status",
+    "search_tasks",
+    "get_task_stats",
+    "delete_task",
+    "comment_on_task",
+    "list_sessions",
+    "get_session_history",
+  ],
+  "notifications": ["dispatch_action", "get_system_status", "get_fleet_status"],
   "vision-analysis": ["query_live_view"],
 });
 
@@ -374,12 +489,20 @@ function applyVoiceAgentToolFilters(allTools, toolConfig = null) {
 
   const disabledNames = mapToolConfigIdsToVoiceToolNames(disabledBuiltinIds);
   const enabledNames = enabledIds ? mapToolConfigIdsToVoiceToolNames(enabledIds) : null;
+  const runtimeNames = new Set(
+    tools.map((tool) => String(tool?.name || "").trim()).filter(Boolean),
+  );
+  const hasRuntimeAllowlist = Boolean(
+    enabledIds && enabledIds.some((id) => runtimeNames.has(String(id || "").trim())),
+  );
 
   return tools.filter((tool) => {
     const name = String(tool?.name || "").trim();
     if (!name) return false;
     if (name === "invoke_mcp_tool" && enabledServers.length === 0) return false;
-    if (enabledNames && enabledNames.size > 0) {
+    // Important: only apply strict allowlisting when explicit runtime tool names
+    // were selected. Built-in tool ids alone should not hide Bosun JS tools.
+    if (enabledNames && enabledNames.size > 0 && hasRuntimeAllowlist) {
       return enabledNames.has(name);
     }
     if (disabledNames.has(name)) return false;
@@ -405,16 +528,37 @@ function buildVoiceToolCapabilityPrompt(tools = [], toolConfig = null, selectedV
     ? selectedVoiceAgent.skills.map((skill) => String(skill || "").trim()).filter(Boolean)
     : [];
   const agentName = String(selectedVoiceAgent?.name || selectedVoiceAgent?.id || "Voice Agent").trim();
+  const toolManifest = runtimeTools
+    .slice(0, 64)
+    .map((tool) => {
+      const name = String(tool?.name || "").trim();
+      if (!name) return null;
+      return {
+        name,
+        description: String(tool?.description || "").replace(/\s+/g, " ").trim(),
+        inputSchema:
+          tool?.parameters && typeof tool.parameters === "object"
+            ? tool.parameters
+            : { type: "object", properties: {} },
+      };
+    })
+    .filter(Boolean);
+  const manifestJson = JSON.stringify(toolManifest, null, 2);
 
   return [
     "",
     "## Active Voice Agent Capability Contract",
     `Agent profile: ${agentName}.`,
-    "You can execute tools directly in this voice session. Do not claim you cannot use tools or must rely on chat-only help.",
-    "When the user asks for action or facts, call the most relevant tool first, then report results briefly.",
+    "You have FULL tool-calling capability in this voice session. You MUST use tools when the user asks for information or actions.",
+    "IMPORTANT: Do NOT respond conversationally when a tool call would answer the question. Call the tool FIRST, then speak the result.",
+    "When the user asks about tasks, status, agents, code, or any operational question — call the relevant tool immediately.",
     toolLines.length > 0
-      ? "Enabled runtime tools:\n" + toolLines.join("\n")
-      : "Enabled runtime tools: none (tool calls unavailable for this profile).",
+      ? "Available tools (call these by name):\n" + toolLines.join("\n")
+      : "Available tools: none (tool calls unavailable for this profile).",
+    "Available tools JSON (name + input schema):",
+    "```json",
+    manifestJson,
+    "```",
     enabledServers.length > 0
       ? `Enabled MCP servers (for invoke_mcp_tool): ${enabledServers.join(", ")}.`
       : "Enabled MCP servers: none.",
@@ -422,7 +566,14 @@ function buildVoiceToolCapabilityPrompt(tools = [], toolConfig = null, selectedV
       ? `Voice agent skills: ${skills.join(", ")}.`
       : "Voice agent skills: none specified.",
     "",
-    "If you need the current tool list, call get_admin_help.",
+    "TOOL USAGE RULES:",
+    "1. When calling tools, use exact argument keys from the inputSchema JSON above.",
+    "2. For questions about tasks, status, projects → call list_tasks or get_task.",
+    "3. For code questions or codebase queries → call ask_agent_context with mode=instant.",
+    "4. For running commands → call run_workspace_command.",
+    "5. For delegating coding work → call delegate_to_agent with a specific message.",
+    "6. Never say 'I cannot do that' if a matching tool exists — use it.",
+    "7. If you need a complete tool/action reference, call get_admin_help.",
   ].join("\n");
 }
 
@@ -442,6 +593,185 @@ async function listBosunRuntimeTools(context = {}) {
   } catch {
     return [];
   }
+}
+
+const VOICE_SIDE_EFFECT_TOOL_NAMES = new Set([
+  "delegate_to_agent",
+  "run_workspace_command",
+  "invoke_mcp_tool",
+  "bosun_slash_command",
+  "run_command",
+  "dispatch_action",
+  "create_task",
+  "update_task_status",
+  "delete_task",
+  "comment_on_task",
+  "create_workflow",
+  "update_workflow_definition",
+  "create_workflow_from_template",
+  "generate_workflow_with_agent",
+  "execute_workflow",
+  "delete_workflow",
+  "update_config",
+  "switch_agent",
+  "set_agent_mode",
+  "retry_workflow_run",
+  "warm_codebase_context",
+]);
+
+const VOICE_SIDE_EFFECT_ALLOWED_MODES = new Set(["agent", "code", "web"]);
+const VOICE_POLICY_RATE_LIMIT_WINDOW_MS = 12_000;
+const VOICE_POLICY_MAX_CALLS_PER_WINDOW = 18;
+const VOICE_POLICY_MAX_SIDE_EFFECT_CALLS_PER_WINDOW = 4;
+const VOICE_POLICY_MAX_SESSION_TRACKERS = 500;
+const voiceToolPolicyRateCache = new Map();
+
+function isVoiceToolExplicitConfirmation(args = {}) {
+  if (!args || typeof args !== "object") return false;
+  if (args.confirm === true) return true;
+  const confirmation = String(args.confirmation || "").trim();
+  if (!confirmation) return false;
+  return /\b(yes|confirm|confirmed|confirmation|proceed|proceeding)\b/i.test(confirmation);
+}
+
+function detectVoiceToolCatalogPaste(intentText = "") {
+  const text = String(intentText || "").trim();
+  if (!text) return false;
+  const useForCount = (text.match(/use\s+for/gi) || []).length;
+  const toolLikeIdentifiers = text.match(/\b[a-z][a-z0-9]*(?:[_-][a-z0-9]+){1,}\b/g) || [];
+  const uniqueToolLikeIds = new Set(toolLikeIdentifiers.map((value) => value.toLowerCase()));
+  const lineCount = text.split(/\r?\n/).length;
+  if (text.length >= 1200 && uniqueToolLikeIds.size >= 12) return true;
+  if (useForCount >= 4 && uniqueToolLikeIds.size >= 8) return true;
+  if (lineCount >= 24 && uniqueToolLikeIds.size >= 10) return true;
+  return false;
+}
+
+function extractVoiceIntentText(args = {}) {
+  if (!args || typeof args !== "object") return "";
+  const candidates = [
+    args.intent,
+    args.intentText,
+    args.prompt,
+    args.query,
+    args.request,
+    args.instruction,
+    args.instructions,
+    args.text,
+    args.message,
+    args.description,
+    args.task,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function pruneVoicePolicyRateCache() {
+  if (voiceToolPolicyRateCache.size <= VOICE_POLICY_MAX_SESSION_TRACKERS) return;
+  const entries = Array.from(voiceToolPolicyRateCache.entries())
+    .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0));
+  const toDelete = voiceToolPolicyRateCache.size - VOICE_POLICY_MAX_SESSION_TRACKERS;
+  for (let index = 0; index < toDelete; index += 1) {
+    const key = entries[index]?.[0];
+    if (!key) continue;
+    voiceToolPolicyRateCache.delete(key);
+  }
+}
+
+function evaluateVoiceToolRateLimit({ sessionKey = "", isSideEffect = false } = {}) {
+  const key = String(sessionKey || "").trim() || "anonymous";
+  const nowMs = Date.now();
+  const existing = voiceToolPolicyRateCache.get(key);
+  let state = existing;
+  if (!state || (nowMs - Number(state.windowStartedAt || 0)) >= VOICE_POLICY_RATE_LIMIT_WINDOW_MS) {
+    state = {
+      windowStartedAt: nowMs,
+      totalCalls: 0,
+      sideEffectCalls: 0,
+      updatedAt: nowMs,
+    };
+  }
+
+  state.totalCalls += 1;
+  if (isSideEffect) state.sideEffectCalls += 1;
+  state.updatedAt = nowMs;
+  voiceToolPolicyRateCache.set(key, state);
+  pruneVoicePolicyRateCache();
+
+  if (state.totalCalls > VOICE_POLICY_MAX_CALLS_PER_WINDOW) {
+    return {
+      allow: false,
+      statusCode: 429,
+      message: "Voice tool burst limit reached. Please wait a moment before sending more tool calls.",
+    };
+  }
+  if (isSideEffect && state.sideEffectCalls > VOICE_POLICY_MAX_SIDE_EFFECT_CALLS_PER_WINDOW) {
+    return {
+      allow: false,
+      statusCode: 429,
+      message: "Voice side-effect tool burst limit reached. Confirm fewer actions per turn.",
+    };
+  }
+  return { allow: true };
+}
+
+function evaluateVoiceToolPolicy({
+  toolName,
+  args,
+  context,
+  intentText,
+  transport,
+} = {}) {
+  const normalizedToolName = String(toolName || "").trim();
+  const normalizedMode = String(context?.mode || "").trim().toLowerCase();
+  const isSideEffectTool = VOICE_SIDE_EFFECT_TOOL_NAMES.has(normalizedToolName);
+  const keyParts = [
+    String(context?.sessionId || "").trim(),
+    String(context?.authSource || "").trim(),
+    String(context?.executor || "").trim(),
+    String(transport || "").trim(),
+  ].filter(Boolean);
+  const sessionKey = keyParts.join("|") || "anonymous";
+
+  const rateLimitDecision = evaluateVoiceToolRateLimit({
+    sessionKey,
+    isSideEffect: isSideEffectTool,
+  });
+  if (!rateLimitDecision.allow) return rateLimitDecision;
+
+  if (!isSideEffectTool) {
+    return { allow: true, statusCode: 200, message: "ok" };
+  }
+
+  if (!VOICE_SIDE_EFFECT_ALLOWED_MODES.has(normalizedMode)) {
+    return {
+      allow: false,
+      statusCode: 403,
+      message: `Tool "${normalizedToolName}" is side-effectful and only allowed in agent/code/web modes.`,
+    };
+  }
+
+  const normalizedIntentText = String(intentText || "").trim();
+  if (detectVoiceToolCatalogPaste(normalizedIntentText)) {
+    return {
+      allow: false,
+      statusCode: 400,
+      message: "Side-effect tool execution denied: input looks like pasted tool catalog/spec text. Provide a concise intent and explicit confirmation.",
+    };
+  }
+
+  if (!isVoiceToolExplicitConfirmation(args || {})) {
+    return {
+      allow: false,
+      statusCode: 400,
+      message: `Tool "${normalizedToolName}" requires explicit confirmation (confirm=true or confirmation=\"yes/confirm/proceed\").`,
+    };
+  }
+
+  return { allow: true, statusCode: 200, message: "ok" };
 }
 
 // ── Workflow engine lazy-loader (module-scope cache) ──────────────────────────
@@ -1016,7 +1346,12 @@ const VENDOR_FILES = {
   "htm.js":                   { specifier: "htm/dist/htm.module.js",                         cdn: "https://esm.sh/htm@3.1.1" },
   "preact-signals-core.js":   { specifier: "@preact/signals-core/dist/signals-core.module.js", cdn: "https://cdn.jsdelivr.net/npm/@preact/signals-core@1.8.0/dist/signals-core.module.js" },
   "preact-signals.js":        { specifier: "@preact/signals/dist/signals.module.js",         cdn: "https://esm.sh/@preact/signals@1.3.1?deps=preact@10.25.4" },
+  "preact-jsx-runtime.js":    { specifier: "preact/jsx-runtime/dist/jsxRuntime.module.js",   cdn: "https://esm.sh/preact@10.25.4/jsx-runtime" },
   "es-module-shims.js":       { specifier: "es-module-shims/dist/es-module-shims.js",        cdn: "https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.min.js" },
+  // MUI / Emotion — pre-bundled by build-vendor-mui.mjs into ui/vendor/
+  "mui-material.js":          { specifier: null, cdn: "https://cdn.jsdelivr.net/npm/@mui/material@5/+esm" },
+  "emotion-react.js":         { specifier: null, cdn: "https://cdn.jsdelivr.net/npm/@emotion/react@11/+esm" },
+  "emotion-styled.js":        { specifier: null, cdn: "https://cdn.jsdelivr.net/npm/@emotion/styled@11/+esm" },
 };
 
 /**
@@ -1038,7 +1373,7 @@ async function handleVendor(req, res, url) {
 
   const headers = {
     "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": "max-age=86400, stale-while-revalidate=604800",
+    "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
   };
 
@@ -1054,7 +1389,7 @@ async function handleVendor(req, res, url) {
   }
 
   // ── 2. node_modules resolution ──────────────────────────────────────────────
-  const localPath = resolveVendorPath(entry.specifier);
+  const localPath = entry.specifier ? resolveVendorPath(entry.specifier) : null;
   if (localPath && existsSync(localPath)) {
     try {
       const data = await readFile(localPath);
@@ -1071,6 +1406,141 @@ async function handleVendor(req, res, url) {
   res.writeHead(302, { Location: entry.cdn, "Cache-Control": "no-store" });
   res.end();
 }
+
+// ── ESM CDN proxy / cache ─────────────────────────────────────────────────────
+// Routes MUI and Emotion imports through the local server instead of requiring
+// the browser to fetch directly from esm.sh.  The `?bundle` flag tells esm.sh
+// to inline all sub-dependencies into a single file so no further cross-origin
+// requests are needed (only bare `react`/`react-dom` remain as external
+// imports, resolved by the page's import map to preact-compat).
+//
+// Resolution:
+//   1. Local disk cache (.cache/esm-vendor/<name>)  — instant, fully offline
+//   2. Fetch from esm.sh, cache the response, and serve
+//   3. 502 if esm.sh is unreachable and no cache exists
+const ESM_CACHE_DIR = resolve(repoRoot, ".cache", "esm-vendor");
+
+const ESM_CDN_FILES = {
+  "mui-material.js":
+    "https://esm.sh/@mui/material@5.15.20?target=es2022&external=react,react-dom,react/jsx-runtime",
+  "emotion-react.js": "https://esm.sh/@emotion/react@11?bundle&external=react",
+  "emotion-styled.js": "https://esm.sh/@emotion/styled@11?bundle&external=react,react-dom",
+};
+
+function normalizeEsmProxyBody(bodyText = "") {
+  let body = String(bodyText || "");
+  // esm.sh module entrypoints often include absolute specifiers like:
+  //   import "/react@..."; export * from "/@mui/material@.../..."
+  // When proxied from our origin these incorrectly resolve to our server.
+  // Rewrite to absolute esm.sh URLs so nested deps resolve correctly.
+  body = body.replace(
+    /(import\s+(?:[^"'`]*?\s+from\s+)?["'])\/(?!\/)/g,
+    "$1https://esm.sh/",
+  );
+  body = body.replace(
+    /(export\s+(?:\*|\{[^}]*\})\s+from\s+["'])\/(?!\/)/g,
+    "$1https://esm.sh/",
+  );
+  return body;
+}
+
+function hasUnsupportedCjsRuntime(bodyText = "") {
+  const body = String(bodyText || "");
+  return (
+    body.includes('Dynamic require of "react"') ||
+    body.includes("require(\"react\")") ||
+    body.includes("require('react')")
+  );
+}
+
+function getEsmCachePath(name, cdnUrl) {
+  const safeName = String(name || "module.js").replace(/[^a-z0-9_.-]/gi, "_");
+  const urlHash = createHash("sha256")
+    .update(String(cdnUrl || ""))
+    .digest("hex")
+    .slice(0, 12);
+  const ext = extname(safeName) || ".js";
+  const base = safeName.slice(0, safeName.length - ext.length) || "module";
+  return resolve(ESM_CACHE_DIR, `${base}.${urlHash}${ext}`);
+}
+
+async function handleEsmProxy(req, res, url) {
+  const name = url.pathname.replace(/^\/esm\//, "");
+  const cdnUrl = ESM_CDN_FILES[name];
+  if (!cdnUrl) {
+    textResponse(res, 404, "Not Found");
+    return;
+  }
+
+  const headers = {
+    "Content-Type": "application/javascript; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  };
+
+  // ── 1. Disk cache ──────────────────────────────────────────────────────────
+  const cachePath = getEsmCachePath(name, cdnUrl);
+  if (existsSync(cachePath)) {
+    try {
+      const cached = String(await readFile(cachePath, "utf8"));
+      const normalized = normalizeEsmProxyBody(cached);
+      const finalBody = normalized;
+      if (cached !== normalized) {
+        try {
+          mkdirSync(ESM_CACHE_DIR, { recursive: true });
+          writeFileSync(cachePath, normalized, "utf8");
+        } catch {
+          // best effort
+        }
+      }
+      if (hasUnsupportedCjsRuntime(finalBody)) {
+        throw new Error("cached ESM bundle contains unsupported dynamic require runtime");
+      }
+      res.writeHead(200, { ...headers, "X-Bosun-Esm": "cached" });
+      res.end(finalBody);
+      return;
+    } catch { /* fall through to live fetch */ }
+  }
+
+  // ── 2. Fetch from esm.sh, cache, and serve ─────────────────────────────────
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const response = await fetch(cdnUrl, {
+      signal: controller.signal,
+      headers: { "User-Agent": "bosun-esm-proxy/1.0" },
+    });
+    clearTimeout(timeout);
+    if (!response.ok) {
+      throw new Error(`esm.sh returned HTTP ${response.status}`);
+    }
+    const rawBody = await response.text();
+    const body = normalizeEsmProxyBody(rawBody);
+    if (hasUnsupportedCjsRuntime(body)) {
+      throw new Error("esm payload contains unsupported dynamic require runtime");
+    }
+
+    // Cache to disk (best-effort, don't fail the request)
+    try {
+      mkdirSync(ESM_CACHE_DIR, { recursive: true });
+      writeFileSync(cachePath, body, "utf8");
+    } catch (cacheErr) {
+      console.warn(`[ui-server] esm cache write failed: ${cacheErr.message}`);
+    }
+
+    res.writeHead(200, { ...headers, "X-Bosun-Esm": "fetched" });
+    res.end(body);
+  } catch (err) {
+    console.warn(`[ui-server] esm proxy failed for ${name}: ${err.message}`);
+    textResponse(
+      res,
+      502,
+      `Failed to fetch ${name} from esm.sh CDN: ${err.message}. ` +
+        "Run the portal once while online to pre-cache MUI dependencies.",
+    );
+  }
+}
+
 const statusPath = resolve(repoRoot, ".cache", "ve-orchestrator-status.json");
 const logsDir = resolve(__dirname, "logs");
 const agentLogsDirCandidates = [
@@ -2029,13 +2499,18 @@ const UI_INSTANCE_LOCK_FILE = "ui-server.instance.lock.json";
 const UI_SESSION_TOKEN_FILE = "ui-session-token.json";
 const UI_LAST_PORT_FILE = "ui-last-port.json";
 const DEFAULT_AUTO_OPEN_COOLDOWN_MS = 12 * 60 * 60 * 1000; // 12h
-const DEFAULT_SESSION_TOKEN_TTL_MS = AUTH_MAX_AGE_SEC * 1000;
+const DEFAULT_SESSION_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const wsClients = new Set();
 let sessionListenerAttached = false;
 /** @type {ReturnType<typeof setInterval>|null} */
 let wsHeartbeatTimer = null;
 let uiInstanceLockPath = "";
 let uiInstanceLockHeld = false;
+let _sessionTokenLastTouchedAt = 0;
+let _localRequestAddressCache = {
+  loadedAt: 0,
+  addresses: new Set(["127.0.0.1", "::1"]),
+};
 
 /* ─── Log Streaming State ─── */
 /** Map<string, { sockets: Set<WebSocket>, offset: number, pollTimer }> keyed by filePath */
@@ -2312,6 +2787,14 @@ function getSessionTokenTtlMs() {
   return Math.max(5 * 60 * 1000, Math.trunc(raw));
 }
 
+function getSessionCookieMaxAgeSec() {
+  const raw = Number(process.env.BOSUN_UI_SESSION_COOKIE_MAX_AGE_SEC || "");
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.max(60, Math.trunc(raw));
+  }
+  return Math.max(60, Math.floor(getSessionTokenTtlMs() / 1000));
+}
+
 function resolveUiCachePath(fileName) {
   const cacheDir = resolve(resolveUiConfigDir(), ".cache");
   mkdirSync(cacheDir, { recursive: true });
@@ -2358,6 +2841,15 @@ function persistSessionToken(token) {
   } catch {
     // best effort
   }
+}
+
+function touchSessionToken() {
+  if (!isValidSessionToken(sessionToken)) return;
+  const now = Date.now();
+  // Avoid churning the cache file on every static/API request.
+  if (now - _sessionTokenLastTouchedAt < 5 * 60 * 1000) return;
+  _sessionTokenLastTouchedAt = now;
+  persistSessionToken(sessionToken);
 }
 
 function ensureSessionToken() {
@@ -4689,6 +5181,7 @@ function checkSessionToken(req) {
     const provided = Buffer.from(authHeader.slice(7));
     const expected = Buffer.from(sessionToken);
     if (provided.length === expected.length && timingSafeEqual(provided, expected)) {
+      touchSessionToken();
       return true;
     }
   }
@@ -4697,7 +5190,10 @@ function checkSessionToken(req) {
   if (cookieVal) {
     const provided = Buffer.from(cookieVal);
     const expected = Buffer.from(sessionToken);
-    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return true;
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) {
+      touchSessionToken();
+      return true;
+    }
   }
   return false;
 }
@@ -4746,12 +5242,77 @@ function getTelegramInitData(req, url = null) {
 function buildSessionCookieHeader() {
   const secure = uiServerTls ? "; Secure" : "";
   const token = ensureSessionToken();
-  return `ve_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${secure}`;
+  const maxAgeSec = getSessionCookieMaxAgeSec();
+  return `ve_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}${secure}`;
 }
 
 function getHeaderString(value) {
   if (Array.isArray(value)) return String(value[0] || "");
   return String(value || "");
+}
+
+function normalizeRemoteAddress(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  if (!value) return "";
+  if (value.startsWith("::ffff:")) return value.slice(7);
+  return value;
+}
+
+function getLocalRequestAddressSet() {
+  const now = Date.now();
+  if (now - Number(_localRequestAddressCache.loadedAt || 0) < 60_000) {
+    return _localRequestAddressCache.addresses;
+  }
+  const addresses = new Set(["127.0.0.1", "::1"]);
+  try {
+    const nets = networkInterfaces();
+    for (const entries of Object.values(nets || {})) {
+      for (const info of entries || []) {
+        const addr = normalizeRemoteAddress(info?.address);
+        if (!addr) continue;
+        addresses.add(addr);
+      }
+    }
+  } catch {
+    // best effort
+  }
+  _localRequestAddressCache = { loadedAt: now, addresses };
+  return addresses;
+}
+
+function isSameMachineRequest(req) {
+  const remote = normalizeRemoteAddress(req?.socket?.remoteAddress);
+  if (!remote) return false;
+  return getLocalRequestAddressSet().has(remote);
+}
+
+function shouldAllowLocalSessionBootstrap(req, url) {
+  if (!parseBooleanEnv(process.env.BOSUN_UI_LOCAL_BOOTSTRAP, false)) return false;
+  if (isAllowUnsafe()) return false;
+  if (String(req?.method || "").toUpperCase() !== "GET") return false;
+  if (!isSameMachineRequest(req)) return false;
+  if (checkDesktopApiKey(req) || checkSessionToken(req)) return false;
+  if (url?.searchParams?.get("token")) return false;
+  if (url?.searchParams?.get("desktopKey")) return false;
+  if (url?.searchParams?.get("localBootstrap") === "1") return false;
+  return true;
+}
+
+function tryLocalSessionBootstrap(req, res, url) {
+  if (!shouldAllowLocalSessionBootstrap(req, url)) return false;
+  const redirectUrl = new URL(url.toString());
+  redirectUrl.searchParams.set("localBootstrap", "1");
+  const redirectPath =
+    redirectUrl.pathname +
+    (redirectUrl.searchParams.toString()
+      ? `?${redirectUrl.searchParams.toString()}`
+      : "");
+  res.writeHead(302, {
+    "Set-Cookie": buildSessionCookieHeader(),
+    Location: redirectPath || "/",
+  });
+  res.end();
+  return true;
 }
 
 const DESKTOP_API_KEY_FILE = "desktop-api-key.json";
@@ -4778,11 +5339,9 @@ function readDesktopApiKeyFromConfig(configDir) {
 }
 
 function getExpectedDesktopApiKey() {
-  const fromEnv = String(process.env.BOSUN_DESKTOP_API_KEY || "").trim();
-  if (fromEnv) return fromEnv;
-
   const configDir = resolveUiConfigDir();
-  if (!configDir) return "";
+  const fromEnv = String(process.env.BOSUN_DESKTOP_API_KEY || "").trim();
+  if (!configDir) return fromEnv;
 
   const now = Date.now();
   if (
@@ -4799,7 +5358,15 @@ function getExpectedDesktopApiKey() {
     configDir,
     loadedAt: now,
   };
-  return keyFromFile;
+  if (keyFromFile) {
+    // Keep env aligned with the canonical persisted key to avoid stale
+    // long-running daemon state rejecting fresh desktop sessions.
+    if (fromEnv !== keyFromFile) {
+      process.env.BOSUN_DESKTOP_API_KEY = keyFromFile;
+    }
+    return keyFromFile;
+  }
+  return fromEnv;
 }
 
 async function requireAuth(req) {
@@ -6270,11 +6837,23 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST") {
-    const maxPerMin = getMutationRateLimitPerMin(authResult);
-    const rateScope = `post:${authResult?.source || "unknown"}`;
-    if (!checkRateLimit(req, maxPerMin, rateScope)) {
-      jsonResponse(res, 429, { ok: false, error: "Rate limit exceeded. Try again later." });
-      return;
+    // Voice telemetry endpoints (trace, transcript) fire rapidly during active
+    // calls and must not be throttled by the standard mutation rate limiter.
+    const isVoiceTelemetry =
+      path === "/api/voice/trace" || path === "/api/voice/transcript";
+    if (isVoiceTelemetry) {
+      const voiceTelemetryLimit = isPrivilegedAuthSource(authResult?.source) ? 600 : 120;
+      if (!checkRateLimit(req, voiceTelemetryLimit, `voice-telemetry:${authResult?.source || "unknown"}`)) {
+        jsonResponse(res, 429, { ok: false, error: "Rate limit exceeded. Try again later." });
+        return;
+      }
+    } else {
+      const maxPerMin = getMutationRateLimitPerMin(authResult);
+      const rateScope = `post:${authResult?.source || "unknown"}`;
+      if (!checkRateLimit(req, maxPerMin, rateScope)) {
+        jsonResponse(res, 429, { ok: false, error: "Rate limit exceeded. Try again later." });
+        return;
+      }
     }
   }
   if (path.startsWith("/api/attachments/") && req.method === "GET") {
@@ -7932,6 +8511,80 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/telemetry/shredding") {
+    try {
+      const days = Number(url.searchParams.get("days") || "30");
+      const shreddingPath = resolve(
+        resolveAgentWorkLogDir(),
+        "shredding-stats.jsonl",
+      );
+      const raw = await readJsonlTail(shreddingPath, 10_000);
+      const events = raw.filter((e) => withinDays(e, days));
+
+      // Aggregate totals
+      let totalEvents = events.length;
+      let totalOriginalChars = 0;
+      let totalCompressedChars = 0;
+      let totalSavedChars = 0;
+      const dailySaved = {};
+      const dailyCounts = {};
+      const agentCounts = {};
+
+      for (const e of events) {
+        totalOriginalChars  += e.originalChars  || 0;
+        totalCompressedChars += e.compressedChars || 0;
+        totalSavedChars     += e.savedChars      || 0;
+        const day = (e.timestamp || "").slice(0, 10);
+        if (day) {
+          dailySaved[day]  = (dailySaved[day]  || 0) + (e.savedChars || 0);
+          dailyCounts[day] = (dailyCounts[day] || 0) + 1;
+        }
+        const agent = e.agentType || "unknown";
+        agentCounts[agent] = (agentCounts[agent] || 0) + 1;
+      }
+
+      const avgSavedPct = totalOriginalChars > 0
+        ? Math.round((totalSavedChars / totalOriginalChars) * 100)
+        : 0;
+
+      const sortedDates = Object.keys(dailySaved).sort();
+      const topAgents = Object.entries(agentCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([name, count]) => ({ name, count }));
+
+      // Recent events (last 20)
+      const recentEvents = events.slice(-20).reverse().map((e) => ({
+        timestamp:      e.timestamp,
+        savedChars:     e.savedChars      || 0,
+        savedPct:       e.savedPct        || 0,
+        originalChars:  e.originalChars   || 0,
+        compressedChars: e.compressedChars || 0,
+        agentType:      e.agentType       || null,
+        attemptId:      e.attemptId       || null,
+      }));
+
+      jsonResponse(res, 200, {
+        ok: true,
+        data: {
+          totalEvents,
+          totalOriginalChars,
+          totalCompressedChars,
+          totalSavedChars,
+          avgSavedPct,
+          sortedDates,
+          dailySaved,
+          dailyCounts,
+          topAgents,
+          recentEvents,
+        },
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/analytics/usage") {
     try {
       const days = Number(url.searchParams.get("days") || "30");
@@ -8551,6 +9204,103 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // GET /api/workflows/concurrency — live concurrency stats for dashboard
+  if (path === "/api/workflows/concurrency" && req.method === "GET") {
+    try {
+      const stats = engine.getConcurrencyStats();
+      jsonResponse(res, 200, { ok: true, ...stats });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  // POST /api/workflows/launch-template — install (if needed) + execute a
+  // workflow template with custom variable overrides, all in one step.
+  // Body: { templateId, variables?: Record<string,any>, waitForCompletion?: boolean }
+  if (path === "/api/workflows/launch-template" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const templateId = String(body?.templateId || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
+      const tplMod = _wfTemplates;
+
+      // 1. Resolve template
+      const template = tplMod.getTemplate(templateId);
+      if (!template) {
+        jsonResponse(res, 404, { ok: false, error: `Template "${templateId}" not found` });
+        return;
+      }
+
+      // 2. Find or auto-install the workflow
+      let workflowId;
+      const installed = engine.list().find(
+        (wf) => wf.metadata?.installedFrom === templateId || wf.name === template.name,
+      );
+      if (installed) {
+        workflowId = installed.id;
+      } else {
+        // Auto-install silently
+        const saved = tplMod.installTemplate(templateId, engine);
+        workflowId = saved.id;
+      }
+
+      // 3. Build input: merge caller-supplied variables as execution input
+      const userVars = body?.variables && typeof body.variables === "object" ? body.variables : {};
+      const executeInput = { ...userVars };
+
+      // 4. Execute (dispatch by default for long-running research workflows)
+      const shouldWait = body?.waitForCompletion === true;
+      if (!shouldWait) {
+        const dispatchedAt = new Date().toISOString();
+        Promise.resolve()
+          .then(() => engine.execute(workflowId, executeInput, { force: true }))
+          .then((ctx) => {
+            const runStatus = Array.isArray(ctx?.errors) && ctx.errors.length > 0 ? "failed" : "completed";
+            console.log(`[workflows] Template launch finished template=${templateId} workflow=${workflowId} status=${runStatus}`);
+          })
+          .catch((err) => {
+            console.error(`[workflows] Template launch failed template=${templateId}: ${err.message}`);
+          });
+
+        jsonResponse(res, 202, {
+          ok: true,
+          accepted: true,
+          mode: "dispatch",
+          templateId,
+          templateName: template.name,
+          workflowId,
+          variables: { ...template.variables, ...userVars },
+          dispatchedAt,
+        });
+        return;
+      }
+
+      const result = await engine.execute(workflowId, executeInput, { force: true });
+      jsonResponse(res, 200, {
+        ok: true,
+        mode: "sync",
+        templateId,
+        templateName: template.name,
+        workflowId,
+        result,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/workflows/templates") {
     try {
       const wfCtx = await getWorkflowRequestContext(url);
@@ -8844,6 +9594,90 @@ async function handleApi(req, res, url) {
       const wf = engine.get(workflowId);
       if (!wf) { jsonResponse(res, 404, { ok: false, error: "Workflow not found" }); return; }
       jsonResponse(res, 200, { ok: true, workflow: wf });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+   *  Manual Flows API endpoints
+   * ═══════════════════════════════════════════════════════════ */
+
+  if (path === "/api/manual-flows/templates") {
+    try {
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const templates = mf.listFlowTemplates(ctx.workspaceDir);
+      jsonResponse(res, 200, { ok: true, templates });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/templates/save" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const saved = mf.saveFlowTemplate(body, ctx.workspaceDir);
+      jsonResponse(res, 200, { ok: true, template: saved });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/execute" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const { templateId, formValues } = body || {};
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const run = await mf.executeFlow(templateId, formValues || {}, ctx.workspaceDir, {});
+      jsonResponse(res, 200, { ok: true, run });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/runs") {
+    try {
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const templateId = url.searchParams.get("templateId") || undefined;
+      const status = url.searchParams.get("status") || undefined;
+      const rawLimit = Number(url.searchParams.get("limit"));
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const runs = mf.listRuns(ctx.workspaceDir, { templateId, status, limit });
+      jsonResponse(res, 200, { ok: true, runs });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path.startsWith("/api/manual-flows/runs/") && !path.endsWith("/runs/")) {
+    try {
+      const runId = decodeURIComponent(path.replace("/api/manual-flows/runs/", "").split("/")[0] || "");
+      if (!runId) {
+        jsonResponse(res, 400, { ok: false, error: "runId is required" });
+        return;
+      }
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const run = mf.getRun(runId, ctx.workspaceDir);
+      if (!run) {
+        jsonResponse(res, 404, { ok: false, error: "Run not found" });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, run });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -9703,6 +10537,7 @@ async function handleApi(req, res, url) {
         requestedWorkspaceId || workspaceContext.workspaceId;
       const resolvedWorkspaceDir =
         requestedWorkspaceDir || workspaceContext.workspaceDir || repoRoot;
+      const requestedAgentProfileId = String(body?.agentProfileId || "").trim();
       const tracker = getSessionTracker();
       const session = tracker.createSession({
         id,
@@ -9712,6 +10547,7 @@ async function handleApi(req, res, url) {
           agent: body?.agent || getPrimaryAgentName(),
           mode: body?.mode || getAgentMode(),
           model: body?.model || undefined,
+          ...(requestedAgentProfileId ? { agentProfileId: requestedAgentProfileId } : {}),
           ...(resolvedWorkspaceId ? { workspaceId: resolvedWorkspaceId } : {}),
           ...(resolvedWorkspaceDir ? { workspaceDir: resolvedWorkspaceDir } : {}),
         },
@@ -9902,6 +10738,9 @@ async function handleApi(req, res, url) {
         const messageMode = body?.mode || undefined;
         // Per-message model override (e.g. { "model": "o4-mini" })
         const messageModel = body?.model || undefined;
+        const messageAgentProfileId = String(
+          body?.agentProfileId || session?.metadata?.agentProfileId || "",
+        ).trim() || undefined;
 
         // Forward to primary agent if applicable (exec records user + assistant events)
         let exec = session.type === "primary" ? uiDeps.execPrimaryPrompt : null;
@@ -9953,6 +10792,7 @@ async function handleApi(req, res, url) {
             sessionType: "primary",
             mode: messageMode,
             model: messageModel,
+            agentProfileId: messageAgentProfileId,
             cwd: sessionWorkspaceDir,
             persistent: true,
             sendRawEvents: true,
@@ -10667,6 +11507,71 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // POST /api/voice/trace
+  if (path === "/api/voice/trace" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const inputEvents = Array.isArray(body?.events)
+        ? body.events
+        : [body];
+      const storedEvents = [];
+
+      for (const rawEvent of inputEvents) {
+        if (!rawEvent || typeof rawEvent !== "object") continue;
+        const merged = {
+          ...rawEvent,
+          sessionId: String(rawEvent?.sessionId || body?.sessionId || "").trim(),
+          source: String(rawEvent?.source || body?.source || "voice-client").trim() || "voice-client",
+          provider: String(rawEvent?.provider || body?.provider || "").trim() || undefined,
+          transport: String(rawEvent?.transport || body?.transport || "").trim() || undefined,
+        };
+        const appended = appendVoiceTraceEvent(merged);
+        if (appended) storedEvents.push(appended);
+      }
+
+      if (storedEvents.length === 0) {
+        jsonResponse(res, 400, { ok: false, error: "No valid trace events supplied" });
+        return;
+      }
+
+      jsonResponse(res, 200, {
+        ok: true,
+        stored: storedEvents.length,
+        latest: storedEvents[storedEvents.length - 1] || null,
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  // GET /api/voice/trace
+  if (path === "/api/voice/trace" && req.method === "GET") {
+    try {
+      const sessionId = String(url.searchParams.get("sessionId") || "").trim();
+      const latestOnly = ["1", "true", "yes"].includes(String(url.searchParams.get("latest") || "").trim().toLowerCase());
+      const limit = parseVoiceTraceLimit(url.searchParams.get("limit"), latestOnly ? 1 : 50);
+      const result = queryVoiceTraceEvents({ sessionId, limit, latestOnly });
+      if (latestOnly) {
+        jsonResponse(res, 200, {
+          ok: true,
+          latest: result.latest || null,
+          total: Number(result.total || 0),
+        });
+        return;
+      }
+
+      jsonResponse(res, 200, {
+        ok: true,
+        events: Array.isArray(result.events) ? result.events : [],
+        total: Number(result.total || 0),
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   // GET /api/voice/agents
   if (path === "/api/voice/agents" && req.method === "GET") {
     try {
@@ -10969,6 +11874,32 @@ async function handleApi(req, res, url) {
           }
           return;
         }
+      }
+      const voicePolicyDecision = evaluateVoiceToolPolicy({
+        toolName: normalizedToolName,
+        args: normalizedArgs,
+        context,
+        intentText: extractVoiceIntentText(normalizedArgs),
+        transport: "http",
+      });
+      if (!voicePolicyDecision.allow) {
+        const deniedMessage = String(voicePolicyDecision.message || "Voice tool policy denied execution");
+        const deniedStatusCode = Number(voicePolicyDecision.statusCode || 403);
+        if (isVoiceToolRoute) {
+          jsonResponse(res, deniedStatusCode, {
+            error: deniedMessage,
+            statusCode: deniedStatusCode,
+            policy: "voice-tool-pre-execution",
+          });
+        } else {
+          jsonResponse(res, deniedStatusCode, {
+            ok: false,
+            error: deniedMessage,
+            statusCode: deniedStatusCode,
+            policy: "voice-tool-pre-execution",
+          });
+        }
+        return;
       }
       const result = await executeVoiceTool(normalizedToolName, normalizedArgs, context);
       if (tracker && context.sessionId) {
@@ -11326,8 +12257,15 @@ async function handleApi(req, res, url) {
   if (path === "/api/voice/prompt" && req.method === "GET") {
     try {
       const compact = url.searchParams?.get("compact") === "true";
+      const context = {
+        sessionId: String(url.searchParams?.get("sessionId") || "").trim() || undefined,
+        voiceAgentId: String(url.searchParams?.get("voiceAgentId") || "").trim() || undefined,
+        mode: String(url.searchParams?.get("mode") || "").trim() || undefined,
+        executor: String(url.searchParams?.get("executor") || "").trim() || undefined,
+        model: String(url.searchParams?.get("model") || "").trim() || undefined,
+      };
       const { buildVoiceAgentPrompt } = await import("./voice-relay.mjs");
-      const prompt = await buildVoiceAgentPrompt({ compact });
+      const prompt = await buildVoiceAgentPrompt({ compact, context });
       jsonResponse(res, 200, { ok: true, prompt });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
@@ -11351,6 +12289,10 @@ async function handleApi(req, res, url) {
 }
 
 async function handleStatic(req, res, url) {
+  if (tryLocalSessionBootstrap(req, res, url)) {
+    return;
+  }
+
   const authResult = await requireAuth(req);
   if (!authResult?.ok) {
     textResponse(res, 401, "Unauthorized");
@@ -11361,6 +12303,18 @@ async function handleStatic(req, res, url) {
   }
 
   const rawPathname = String(url.pathname || "/").trim() || "/";
+  if (url.searchParams.get("localBootstrap") === "1") {
+    const cleanUrl = new URL(url.toString());
+    cleanUrl.searchParams.delete("localBootstrap");
+    const redirectPath =
+      cleanUrl.pathname +
+      (cleanUrl.searchParams.toString()
+        ? `?${cleanUrl.searchParams.toString()}`
+        : "");
+    res.writeHead(302, { Location: redirectPath || "/" });
+    res.end();
+    return;
+  }
   const pathname = rawPathname === "/" ? "/index.html" : rawPathname;
   const filePath = resolve(uiRoot, `.${pathname}`);
 
@@ -11601,6 +12555,13 @@ export async function startTelegramUiServer(options = {}) {
       return;
     }
 
+    // ESM CDN proxy/cache (MUI, Emotion) — served through local server to avoid
+    // direct browser→CDN dependency and self-signed cert cross-origin issues
+    if (url.pathname.startsWith("/esm/")) {
+      await handleEsmProxy(req, res, url);
+      return;
+    }
+
     // /demo and /ui/demo are convenience aliases for /demo.html (the self-contained mock UI demo)
     if (url.pathname === "/demo" || url.pathname === "/ui/demo") {
       const qs = url.search || "";
@@ -11777,6 +12738,23 @@ export async function startTelegramUiServer(options = {}) {
                       return;
                     }
                   }
+                  const voicePolicyDecision = evaluateVoiceToolPolicy({
+                    toolName: normalizedToolName,
+                    args: normalizedArgs,
+                    context,
+                    intentText: extractVoiceIntentText(normalizedArgs),
+                    transport: "ws",
+                  });
+                  if (!voicePolicyDecision.allow) {
+                    sendWsMessage(socket, {
+                      type: "voice-tool-result",
+                      callId,
+                      error: String(voicePolicyDecision.message || "Voice tool policy denied execution"),
+                      statusCode: Number(voicePolicyDecision.statusCode || 403),
+                      ts: Date.now(),
+                    });
+                    return;
+                  }
                   // Tool is allowed — execute it
                   relay.executeVoiceTool(normalizedToolName, normalizedArgs, context).then((result) => {
                     sendWsMessage(socket, {
@@ -11836,6 +12814,23 @@ export async function startTelegramUiServer(options = {}) {
                     type: "voice-tool-result",
                     callId,
                     error: `Tool "${normalizedToolName}" is not enabled for voice agent "${activeVoiceAgentId}"`,
+                    ts: Date.now(),
+                  });
+                  return;
+                }
+                const voicePolicyDecision = evaluateVoiceToolPolicy({
+                  toolName: normalizedToolName,
+                  args: normalizedArgs,
+                  context,
+                  intentText: extractVoiceIntentText(normalizedArgs),
+                  transport: "ws",
+                });
+                if (!voicePolicyDecision.allow) {
+                  sendWsMessage(socket, {
+                    type: "voice-tool-result",
+                    callId,
+                    error: String(voicePolicyDecision.message || "Voice tool policy denied execution"),
+                    statusCode: Number(voicePolicyDecision.statusCode || 403),
                     ts: Date.now(),
                   });
                   return;

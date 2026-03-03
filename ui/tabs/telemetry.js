@@ -10,17 +10,29 @@ import htm from "htm";
 const html = htm.bind(h);
 
 import {
+  Typography, Box, Stack, Chip, Paper, TextField, InputAdornment,
+  Select, MenuItem, FormControl, InputLabel, Button, IconButton, Tooltip,
+  CircularProgress, Alert, Switch, FormControlLabel, Table, TableBody,
+  TableCell, TableContainer, TableHead, TableRow, Divider, Tabs, Tab,
+  LinearProgress, Skeleton, Card, CardContent,
+} from "@mui/material";
+
+import {
   telemetryErrors,
   telemetryAlerts,
   usageAnalytics,
+  shreddingTelemetry,
   loadTelemetrySummary,
   loadTelemetryErrors,
   loadTelemetryExecutors,
   loadTelemetryAlerts,
   loadUsageAnalytics,
+  loadShreddingTelemetry,
   scheduleRefresh,
 } from "../modules/state.js";
-import { Card, EmptyState, Badge } from "../components/shared.js";
+import {
+  Card as LegacyCard, EmptyState, Badge,
+} from "../components/shared.js";
 
 // ── Colour palettes ──────────────────────────────────────────────────────────
 
@@ -68,9 +80,9 @@ function formatSinceDate(isoStr) {
   });
 }
 
-function severityBadge(sev = "medium") {
+function severityChipColor(sev = "medium") {
   const n = String(sev).toLowerCase();
-  if (n === "high" || n === "critical") return "danger";
+  if (n === "high" || n === "critical") return "error";
   if (n === "medium") return "warning";
   return "info";
 }
@@ -124,7 +136,8 @@ function TrendLines({ dates, seriesMap, palette }) {
   }));
 
   return html`
-    <svg viewBox="0 0 ${W} ${H}" class="analytics-trend-svg" aria-hidden="true">
+    <svg viewBox="0 0 ${W} ${H}" class="analytics-trend-svg" aria-hidden="true"
+      style="width:100%;height:auto;display:block">
       ${ySteps.map((v) => html`
         <g key=${v}>
           <line x1=${PL} y1=${yOf(v)} x2=${W - PR} y2=${yOf(v)}
@@ -150,16 +163,19 @@ function ChartLegend({ label, seriesMap, palette }) {
   const names = Object.keys(seriesMap || {});
   if (!names.length) return null;
   return html`
-    <div class="analytics-legend-group">
-      <span class="analytics-legend-category">${label}</span>
+    <${Stack} direction="row" spacing=${1} alignItems="center" flexWrap="wrap" sx=${{ mb: 1 }}>
+      <${Typography} variant="caption" color="text.secondary" sx=${{ fontWeight: 600, mr: 1 }}>${label}<//>
       ${names.map((name, i) => html`
-        <span key=${name} class="analytics-legend-item">
-          <span class="analytics-legend-dot"
-            style="background:${paletteColor(palette, i)}"></span>
-          ${name}
-        </span>
+        <${Chip}
+          key=${name}
+          label=${name}
+          size="small"
+          variant="outlined"
+          sx=${{ borderColor: paletteColor(palette, i), "& .MuiChip-label": { fontSize: "0.75rem" } }}
+          icon=${html`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${paletteColor(palette, i)};margin-left:8px"></span>`}
+        />
       `)}
-    </div>
+    <//>
   `;
 }
 
@@ -172,33 +188,37 @@ function TopBarChart({ items, palette, title }) {
   }
   const max = items[0].count || 1;
   return html`
-    <ul class="analytics-bar-list" aria-label=${title}>
+    <${Stack} spacing=${0.5}>
       ${items.map(({ name, count }, i) => html`
-        <li key=${name} class="analytics-bar-row">
-          <span class="analytics-bar-label" title=${name}>${name}</span>
-          <div class="analytics-bar-track">
-            <div class="analytics-bar-fill"
-              style="width:${Math.max(2, (count / max) * 100).toFixed(1)}%;background:${paletteColor(palette, i)}">
-            </div>
-          </div>
-          <span class="analytics-bar-count">${count}</span>
-        </li>
+        <${Stack} key=${name} direction="row" alignItems="center" spacing=${1}>
+          <${Typography} variant="caption" sx=${{ minWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title=${name}>
+            ${name}
+          <//>
+          <${Box} sx=${{ flex: 1, bgcolor: "grey.800", borderRadius: 1, height: 8, overflow: "hidden" }}>
+            <${Box} sx=${{ width: `${Math.max(2, (count / max) * 100).toFixed(1)}%`, height: "100%", bgcolor: paletteColor(palette, i), borderRadius: 1 }} />
+          <//>
+          <${Typography} variant="caption" color="text.secondary" sx=${{ minWidth: 28, textAlign: "right" }}>${count}<//>
+        <//>
       `)}
-    </ul>
+    <//>
   `;
 }
 
-// ── Stat card ────────────────────────────────────────────────────────────────
+// ── Stat card (MUI Card) ─────────────────────────────────────────────────────
 
 function AnalyticsStat({ icon, label, value }) {
   return html`
-    <div class="analytics-stat">
-      <div class="analytics-stat-icon">${icon}</div>
-      <div class="analytics-stat-body">
-        <div class="analytics-stat-label">${label}</div>
-        <div class="analytics-stat-value">${value}</div>
-      </div>
-    </div>
+    <${Card} variant="outlined" sx=${{ minWidth: 120, flex: "1 1 0" }}>
+      <${CardContent} sx=${{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
+        <${Stack} direction="row" spacing=${1} alignItems="center">
+          <${Typography} variant="h6" component="span">${icon}<//>
+          <${Box}>
+            <${Typography} variant="caption" color="text.secondary" display="block">${label}<//>
+            <${Typography} variant="h6" sx=${{ lineHeight: 1.2 }}>${value}<//>
+          <//>
+        <//>
+      <//>
+    <//>
   `;
 }
 
@@ -211,6 +231,203 @@ const PERIODS = [
 ];
 
 const TREND_TABS = ["agents", "skills", "mcp"];
+const TREND_TAB_LABELS = { agents: "Agents", skills: "Skills", mcp: "MCP Tools" };
+
+// ── Context Shredding Panel ──────────────────────────────────────────────────
+
+const SHRED_PALETTE = ["#818cf8", "#38bdf8", "#34d399", "#fb923c", "#f472b6", "#a78bfa"];
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return "–";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)} K`;
+  return `${n}`;
+}
+
+/**
+ * Mini inline sparkline SVG — no axes, just the shape of the data.
+ */
+function Sparkline({ values, color = "#818cf8" }) {
+  if (!values?.length) return null;
+  const W = 120, H = 32, PAD = 2;
+  const max = Math.max(...values, 1);
+  const n = values.length;
+  const xOf = (i) => PAD + (n < 2 ? (W - PAD * 2) / 2 : (i / (n - 1)) * (W - PAD * 2));
+  const yOf = (v) => H - PAD - ((v / max) * (H - PAD * 2));
+
+  let d = `M ${xOf(0).toFixed(1)} ${yOf(values[0]).toFixed(1)}`;
+  for (let i = 1; i < values.length; i++) {
+    d += ` L ${xOf(i).toFixed(1)} ${yOf(values[i]).toFixed(1)}`;
+  }
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true"
+      style="display:inline-block;vertical-align:middle;opacity:0.85">
+      <path d=${d} fill="none" stroke=${color} stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
+/**
+ * Context Shredding telemetry panel.
+ * Shows: total savings, avg reduction %, daily trend, per-agent breakdown,
+ * and a table of recent events.
+ */
+function ShreddingPanel({ period }) {
+  const data = shreddingTelemetry.value;
+
+  useEffect(() => {
+    loadShreddingTelemetry(period).catch(() => {});
+  }, [period]);
+
+  if (!data) {
+    return html`
+      <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+        <${Typography} variant="h6" gutterBottom>✂ Context Shredding<//>
+        <${EmptyState}
+          title="No shredding data yet"
+          description="Shredding stats will appear here once agents start running with context compression enabled."
+        />
+      <//>
+    `;
+  }
+
+  const {
+    totalEvents = 0,
+    totalOriginalChars = 0,
+    totalSavedChars = 0,
+    avgSavedPct = 0,
+    sortedDates = [],
+    dailySaved = {},
+    dailyCounts = {},
+    topAgents = [],
+    recentEvents = [],
+  } = data;
+
+  const sparkValues = sortedDates.map((d) => dailySaved[d] || 0);
+  const sparkCounts = sortedDates.map((d) => dailyCounts[d] || 0);
+
+  return html`
+    <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+      <!-- Header -->
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 1.5 }}>
+        <${Typography} variant="h6">✂ Context Shredding<//>
+        <${Chip} label="live" size="small" color="success" variant="outlined" />
+      <//>
+
+      <!-- Stat cards row -->
+      <${Stack} direction=${{ xs: "column", sm: "row" }} spacing=${1.5} sx=${{ mb: 2, flexWrap: "wrap" }}>
+        <${AnalyticsStat} icon="✂" label="Events" value=${formatCount(totalEvents)} />
+        <${AnalyticsStat} icon="📉" label="Chars Saved"
+          value=${totalSavedChars >= 1_000_000
+            ? `${(totalSavedChars / 1_000_000).toFixed(2)} M`
+            : totalSavedChars >= 1_000
+              ? `${(totalSavedChars / 1_000).toFixed(1)} K`
+              : String(totalSavedChars)} />
+        <${AnalyticsStat} icon="%" label="Avg Reduction" value=${avgSavedPct > 0 ? `${avgSavedPct}%` : "–"} />
+        <${AnalyticsStat} icon="📦" label="Original Chars"
+          value=${totalOriginalChars >= 1_000_000
+            ? `${(totalOriginalChars / 1_000_000).toFixed(2)} M`
+            : totalOriginalChars >= 1_000
+              ? `${(totalOriginalChars / 1_000).toFixed(1)} K`
+              : String(totalOriginalChars)} />
+      <//>
+
+      <!-- Trend row: daily savings sparkline + by-agent bar -->
+      <${Stack} direction=${{ xs: "column", md: "row" }} spacing=${2} sx=${{ mb: 2 }}>
+
+        <!-- Daily savings trend -->
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>Chars Saved per Day<//>
+          ${sparkValues.length > 1 ? html`
+            <${Box} sx=${{ overflow: "hidden" }}>
+              <${TrendLines}
+                dates=${sortedDates}
+                seriesMap=${{ "chars saved": sparkValues }}
+                palette=${SHRED_PALETTE}
+              />
+            <//>
+          ` : html`<${EmptyState} title="Not enough data" description="Need ≥2 days of events." />`}
+        <//>
+
+        <!-- By-agent -->
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>By Agent Type<//>
+          <${TopBarChart} items=${topAgents} palette=${SHRED_PALETTE} title="By Agent" />
+        <//>
+
+      <//>
+
+      <!-- Reduction % gauge bar -->
+      ${avgSavedPct > 0 ? html`
+        <${Box} sx=${{ mb: 2 }}>
+          <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 0.5 }}>
+            <${Typography} variant="caption" color="text.secondary">Context Reduction<//>
+            <${Typography} variant="caption" sx=${{ fontWeight: 600 }}>${avgSavedPct}% avg<//>
+          <//>
+          <${LinearProgress}
+            variant="determinate"
+            value=${Math.min(avgSavedPct, 100)}
+            sx=${{
+              height: 8, borderRadius: 4,
+              bgcolor: "grey.800",
+              "& .MuiLinearProgress-bar": { bgcolor: "#818cf8" },
+            }}
+          />
+        <//>
+      ` : null}
+
+      <!-- Recent events table -->
+      ${recentEvents.length > 0 ? html`
+        <${Typography} variant="subtitle2" gutterBottom>Recent Shredding Events<//>
+        <${TableContainer}>
+          <${Table} size="small">
+            <${TableHead}>
+              <${TableRow}>
+                <${TableCell}>Time<//>
+                <${TableCell} align="right">Original<//>
+                <${TableCell} align="right">Saved<//>
+                <${TableCell} align="right">Reduction<//>
+                <${TableCell}>Agent<//>
+              </${TableRow}>
+            <//>
+            <${TableBody}>
+              ${recentEvents.slice(0, 10).map((ev, i) => html`
+                <${TableRow} key=${i}>
+                  <${TableCell}>
+                    <${Typography} variant="caption">${formatRelative(ev.timestamp)}<//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Typography} variant="caption">${formatBytes(ev.originalChars)}<//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Typography} variant="caption" color="success.main">
+                      ${ev.savedChars > 0 ? `-${formatBytes(ev.savedChars)}` : "0"}
+                    <//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Chip}
+                      label=${`${ev.savedPct || 0}%`}
+                      size="small"
+                      color=${ev.savedPct >= 30 ? "success" : ev.savedPct >= 10 ? "warning" : "default"}
+                      variant="outlined"
+                    />
+                  <//>
+                  <${TableCell}>
+                    <${Typography} variant="caption" color="text.secondary">
+                      ${ev.agentType || "–"}
+                    <//>
+                  <//>
+                </${TableRow}>
+              `)}
+            <//>
+          <//>
+        <//>
+      ` : null}
+    <//>
+  `;
+}
 
 // ── Main exported component ──────────────────────────────────────────────────
 
@@ -221,6 +438,7 @@ export function TelemetryTab() {
 
   useEffect(() => {
     loadUsageAnalytics(period).catch(() => {});
+    loadShreddingTelemetry(period).catch(() => {});
   }, [period]);
 
   const trend = data?.trend;
@@ -242,39 +460,46 @@ export function TelemetryTab() {
 
   const sinceLabel = formatSinceDate(data?.sinceAt);
 
+  const trendTabIndex = TREND_TABS.indexOf(trendTab);
+
   return html`
     <section class="telemetry-tab analytics-tab">
 
-      <div class="section-header analytics-header">
-        <div class="analytics-title-row">
-          <h2>Usage Analytics</h2>
+      <!-- Header row -->
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" sx=${{ mb: 2 }}>
+        <${Box}>
+          <${Typography} variant="h5" component="h2">Usage Analytics<//>
           ${sinceLabel ? html`
-            <span class="analytics-since">Since ${sinceLabel}</span>
+            <${Typography} variant="caption" color="text.secondary">Since ${sinceLabel}<//>
           ` : null}
-        </div>
-        <div class="analytics-header-actions">
-          <div class="analytics-period-toggle">
-            ${PERIODS.map(({ days, label }) => html`
-              <button key=${days}
-                class="analytics-period-btn ${period === days ? "active" : ""}"
-                onClick=${() => setPeriod(days)}>
-                ${label}
-              </button>
-            `)}
-          </div>
-          <button class="btn btn-ghost btn-sm" onClick=${() => {
+        <//>
+        <${Stack} direction="row" spacing=${1} alignItems="center">
+          <!-- Period toggle chips -->
+          ${PERIODS.map(({ days, label }) => html`
+            <${Chip}
+              key=${days}
+              label=${label}
+              size="small"
+              color=${period === days ? "primary" : "default"}
+              variant=${period === days ? "filled" : "outlined"}
+              onClick=${() => setPeriod(days)}
+              clickable
+            />
+          `)}
+          <${Button} size="small" variant="outlined" onClick=${() => {
             loadUsageAnalytics(period).catch(() => {});
+            loadShreddingTelemetry(period).catch(() => {});
             loadTelemetrySummary();
             loadTelemetryErrors();
             loadTelemetryExecutors();
             loadTelemetryAlerts();
             scheduleRefresh(4000);
-          }}>Refresh</button>
-        </div>
-      </div>
+          }}>Refresh<//>
+        <//>
+      <//>
 
       <!-- Summary stat cards -->
-      <div class="analytics-stats-row">
+      <${Stack} direction="row" spacing=${1.5} sx=${{ mb: 2, flexWrap: "wrap" }}>
         <${AnalyticsStat} icon="⚡" label="Agent Runs"
           value=${data ? formatCount(data.agentRuns) : "–"} />
         <${AnalyticsStat} icon="✦" label="Skill Invocations"
@@ -285,52 +510,61 @@ export function TelemetryTab() {
           value=${data ? formatCount(data.avgPerDay) : "–"} />
         <${AnalyticsStat} icon="🕐" label="Last Active"
           value=${data?.lastActiveAt ? formatRelative(data.lastActiveAt) : "–"} />
-      </div>
+      <//>
 
       <!-- Activity trend chart -->
-      <${Card} title="Activity Trend" class="analytics-trend-card">
-        <div class="analytics-trend-header">
-          <div class="analytics-trend-tabs">
-            ${TREND_TABS.map((tab) => html`
-              <button key=${tab}
-                class="analytics-trend-tab ${trendTab === tab ? "active" : ""}"
-                onClick=${() => setTrendTab(tab)}>
-                ${tab === "agents" ? "Agents" : tab === "skills" ? "Skills" : "MCP Tools"}
-              </button>
-            `)}
-          </div>
-        </div>
+      <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+        <${Typography} variant="h6" gutterBottom>Activity Trend<//>
+
+        <!-- Trend tabs using MUI Tabs -->
+        <${Tabs}
+          value=${trendTabIndex >= 0 ? trendTabIndex : 0}
+          onChange=${(_e, idx) => setTrendTab(TREND_TABS[idx])}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx=${{ mb: 1.5 }}
+        >
+          ${TREND_TABS.map((tab) => html`
+            <${Tab} key=${tab} label=${TREND_TAB_LABELS[tab] || tab} />
+          `)}
+        <//>
 
         ${hasTrend ? html`
-          <div class="analytics-legend">
-            <${ChartLegend}
-              label=${trendTab === "agents" ? "AGENTS" : trendTab === "skills" ? "SKILLS" : "MCP TOOLS"}
-              seriesMap=${trendSeriesMap}
-              palette=${trendPalette}
-            />
-          </div>
-          <${TrendLines} dates=${trend.dates} seriesMap=${trendSeriesMap} palette=${trendPalette} />
+          <${ChartLegend}
+            label=${(TREND_TAB_LABELS[trendTab] || trendTab).toUpperCase()}
+            seriesMap=${trendSeriesMap}
+            palette=${trendPalette}
+          />
+          <${Paper} variant="outlined" sx=${{ p: 1 }}>
+            <${TrendLines} dates=${trend.dates} seriesMap=${trendSeriesMap} palette=${trendPalette} />
+          <//>
         ` : html`
           <${EmptyState} title="No activity data"
             description="Agent runs will appear here once they start." />
         `}
-      </${Card}>
+      <//>
 
       <!-- Top-N bar charts row -->
-      <div class="analytics-top-grid">
-        <${Card} title="Top Agents">
+      <${Stack} direction=${{ xs: "column", md: "row" }} spacing=${2} sx=${{ mb: 2 }}>
+        <${Paper} elevation=${1} sx=${{ p: 2, flex: 1 }}>
+          <${Typography} variant="h6" gutterBottom>Top Agents<//>
           <${TopBarChart} items=${data?.topAgents || []}
             palette=${AGENT_PALETTE} title="Top Agents" />
-        </${Card}>
-        <${Card} title="Top Skills">
+        <//>
+        <${Paper} elevation=${1} sx=${{ p: 2, flex: 1 }}>
+          <${Typography} variant="h6" gutterBottom>Top Skills<//>
           <${TopBarChart} items=${data?.topSkills || []}
             palette=${SKILL_PALETTE} title="Top Skills" />
-        </${Card}>
-        <${Card} title="Top MCP Tools">
+        <//>
+        <${Paper} elevation=${1} sx=${{ p: 2, flex: 1 }}>
+          <${Typography} variant="h6" gutterBottom>Top MCP Tools<//>
           <${TopBarChart} items=${data?.topMcpTools || []}
             palette=${MCP_PALETTE} title="Top MCP Tools" />
-        </${Card}>
-      </div>
+        <//>
+      <//>
+
+      <!-- Context Shredding Panel -->
+      <${ShreddingPanel} period=${period} />
 
       <!-- Errors + alerts (preserved from classic telemetry) -->
       <${ClassicTelemetry} />
@@ -347,42 +581,65 @@ function ClassicTelemetry() {
   if (!errors.length && !alerts.length) return null;
 
   return html`
-    <div class="telemetry-grid">
-      <${Card} title="Top Errors">
+    <${Stack} direction=${{ xs: "column", md: "row" }} spacing=${2}>
+      <!-- Top Errors -->
+      <${Paper} elevation=${1} sx=${{ p: 2, flex: 1 }}>
+        <${Typography} variant="h6" gutterBottom>Top Errors<//>
         ${errors.length === 0
           ? html`<${EmptyState} title="No errors logged"
               description="Errors appear here when failures are detected." />`
-          : html`<ul class="telemetry-list">
-              ${errors.slice(0, 8).map((err) => html`
-                <li key=${err.fingerprint}>
-                  <span class="telemetry-label">${err.fingerprint}</span>
-                  <span class="telemetry-count">${err.count}</span>
-                </li>`)}
-            </ul>`}
-      </${Card}>
+          : html`
+            <${TableContainer}>
+              <${Table} size="small">
+                <${TableHead}>
+                  <${TableRow}>
+                    <${TableCell}>Fingerprint<//>
+                    <${TableCell} align="right">Count<//>
+                  </${TableRow}>
+                <//>
+                <${TableBody}>
+                  ${errors.slice(0, 8).map((err) => html`
+                    <${TableRow} key=${err.fingerprint}>
+                      <${TableCell}>
+                        <${Typography} variant="body2" sx=${{ fontFamily: "monospace" }}>${err.fingerprint}<//>
+                      <//>
+                      <${TableCell} align="right">
+                        <${Chip} label=${String(err.count)} size="small" color="error" />
+                      <//>
+                    </${TableRow}>
+                  `)}
+                <//>
+              </${Table}>
+            <//>
+          `}
+      <//>
 
-      <${Card} title="Recent Alerts">
+      <!-- Recent Alerts -->
+      <${Paper} elevation=${1} sx=${{ p: 2, flex: 1 }}>
+        <${Typography} variant="h6" gutterBottom>Recent Alerts<//>
         ${alertRows.length === 0
           ? html`<${EmptyState} title="No alerts"
               description="Analyzer alerts will show up here." />`
-          : html`<ul class="telemetry-alerts">
+          : html`
+            <${Stack} spacing=${1}>
               ${alertRows.map((alert) => html`
-                <li key=${(alert.attempt_id || "") + (alert.type || "")}>
-                  <div>
-                    <div class="telemetry-alert-title">
-                      ${alert.type || "alert"}
-                      <${Badge} tone=${severityBadge(alert.severity)}>
-                        ${String(alert.severity || "medium").toUpperCase()}
-                      </${Badge}>
-                    </div>
-                    <div class="telemetry-alert-meta">
-                      ${alert.attempt_id || "unknown"}
-                      ${alert.executor ? html` · ${alert.executor}` : ""}
-                    </div>
-                  </div>
-                </li>`)}
-            </ul>`}
-      </${Card}>
-    </div>
+                <${Paper} key=${(alert.attempt_id || "") + (alert.type || "")} variant="outlined" sx=${{ p: 1.5 }}>
+                  <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 0.5 }}>
+                    <${Typography} variant="subtitle2">${alert.type || "alert"}<//>
+                    <${Chip}
+                      label=${String(alert.severity || "medium").toUpperCase()}
+                      size="small"
+                      color=${severityChipColor(alert.severity)}
+                    />
+                  <//>
+                  <${Typography} variant="caption" color="text.secondary">
+                    ${alert.attempt_id || "unknown"}${alert.executor ? ` · ${alert.executor}` : ""}
+                  <//>
+                <//>
+              `)}
+            <//>
+          `}
+      <//>
+    <//>
   `;
 }

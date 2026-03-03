@@ -760,6 +760,249 @@ await engine.process(data);
 | \`git add .\` | Stages unrelated files | Stage files individually |
 `,
   },
+  {
+    filename: "codebase-annotation-audit.md",
+    title: "Codebase Annotation Audit",
+    tags: [
+      "audit", "annotation", "documentation", "summary", "inventory",
+      "codebase", "onboarding", "knowledge", "context", "skill", "warn",
+      "manifest", "conformity", "regeneration", "claude", "copilot",
+    ],
+    scope: "global",
+    content: `# Skill: Codebase Annotation Audit
+
+## Purpose
+Systematically audit and annotate a codebase so that *future* AI agents can
+navigate it 4× faster, use 20% fewer tokens, and avoid false-positive changes.
+This skill is **documentation-only** — it MUST NOT fix bugs, refactor code,
+or change program behavior.
+
+## Philosophy — LEAN Annotations
+
+Modern AI coding SDKs (Copilot, Codex, Claude Code) already auto-compact
+context. Adding a memory/compaction layer on top is wasteful. What *does* help
+is **repo-level documentation** that agents read at the start of a session:
+summaries, warnings, architectural notes, and module manifests. These cost zero
+runtime tokens and dramatically reduce exploration time.
+
+## Annotation Format
+
+Use structured comment headers that agents are trained to recognize:
+
+\\\`\\\`\\\`
+// CLAUDE:SUMMARY — <module-name>
+// <1–3 sentence summary of purpose, key types, and public API>
+\\\`\\\`\\\`
+
+\\\`\\\`\\\`
+// CLAUDE:WARN — <module-name>
+// <non-obvious pitfall, race condition, or constraint agents MUST know>
+\\\`\\\`\\\`
+
+- Place annotations at the **top of the file**, after imports / shebang.
+- Keep each annotation to ≤ 3 lines.
+- Do NOT annotate trivial files (configs, lockfiles, generated code).
+
+## 6-Phase Audit Process
+
+### Phase 1 — Inventory
+Enumerate every source file.  For each file record:
+| Field | Value |
+|-------|-------|
+| path | relative from repo root |
+| lang | file extension / language |
+| lines | line count |
+| has_summary | yes / no |
+| has_warn | yes / no |
+| category | core / util / test / config / generated |
+
+Output: \\\`.bosun/audit/inventory.json\\\`
+
+### Phase 2 — Summaries
+For every file where \\\`has_summary === false\\\` and \\\`category !== "generated"\\\`:
+1. Read the file.
+2. Write a \\\`CLAUDE:SUMMARY\\\` comment at the top.
+3. Stage the file.
+
+### Phase 3 — Warnings
+For every file, check for non-obvious constraints:
+- Singleton/caching requirements (must be module-scope)
+- Async fire-and-forget patterns (unhandled rejections)
+- Order-dependent initialization
+- Platform-specific behavior (Windows paths, etc.)
+
+Add \\\`CLAUDE:WARN\\\` comments where found.
+
+### Phase 4 — Manifest Audit
+Ensure \\\`AGENTS.md\\\` (or equivalent) at repo root is accurate:
+- Lists all top-level modules with 1-line descriptions.
+- Documents build / test / lint commands.
+- Documents environment variables.
+- Documents commit conventions.
+- Lists known constraints or gotchas.
+
+If the file is outdated or missing sections, append corrections.
+
+### Phase 5 — Conformity Check
+Re-scan all annotations and validate:
+- \\\`CLAUDE:SUMMARY\\\` is present in every non-trivial source file.
+- \\\`CLAUDE:WARN\\\` exists for files with known pitfalls.
+- No stale annotations reference symbols/functions that no longer exist.
+
+Output: \\\`.bosun/audit/conformity-report.json\\\`
+
+### Phase 6 — Regeneration Schedule
+Annotations rot. Add a \\\`.bosun/audit/schedule.json\\\` with:
+\\\`\\\`\\\`json
+{
+  "lastFullAudit": "<ISO timestamp>",
+  "nextRecommendedAudit": "<ISO timestamp + 30 days>",
+  "filesAudited": <count>,
+  "summariesAdded": <count>,
+  "warningsAdded": <count>,
+  "conformityScore": <0-100>
+}
+\\\`\\\`\\\`
+
+## Hard Rules
+
+1. **Do NOT change program behavior.** Only add/update comments and documentation.
+2. **Do NOT refactor, fix bugs, or rename symbols.** Documentation only.
+3. **Do NOT annotate generated files** (lockfiles, build output, .min.js, etc.).
+4. **Keep summaries ≤ 3 lines.** Agents need density, not essays.
+5. **Keep warnings actionable.** "This is complex" is useless.
+   "Must call init() before query() — throws otherwise" is helpful.
+6. **Stage files individually** — never \\\`git add .\\\`.
+7. **Commit with** \\\`docs(audit): annotate <module>\\\` — not feat/fix.
+
+## Success Metrics
+- A/B tested: annotated repos show 4× faster agent navigation.
+- 20% fewer tokens consumed per task.
+- Zero false-positive code changes from confused agents.
+`,
+  },
+  {
+    filename: "custom-tool-creation.md",
+    title: "Custom Tool Creation & Reuse",
+    tags: ["tools", "custom-tool", "reflect", "reuse", "automation", "script"],
+    scope: "global",
+    content: `# Skill: Custom Tool Creation & Reuse
+
+## Purpose
+Bosun agents can author and persist **executable helper scripts** in
+\`.bosun/tools/\` that survive beyond a single session. This avoids repeating
+the same inline logic across tasks and lets the whole agent team benefit from
+tools discovered during previous runs.
+
+Inspired by the Live-SWE-agent architecture: agents that can create tools
+solve more complex tasks and accumulate institutional knowledge over time.
+
+## When to Create a Custom Tool
+
+Create a custom tool when you find yourself:
+- Writing the same ≥ 10-line utility more than once across tasks
+- Needing a project-specific helper that \`npm run *\` or built-in tools don't cover
+- Doing complex pattern matching / analysis that would be easier with a dedicated script
+- Building a test generator or codemod that future tasks will need
+
+**Do NOT** create a tool for single-use throwaway logic — keep it inline.
+
+## Tool Storage Layout
+
+\`\`\`
+<workspace>/
+  .bosun/tools/
+    index.json             ← manifest (id, title, description, tags, category, lang)
+    <tool-id>.mjs          ← Node.js ES module scripts
+    <tool-id>.sh           ← bash scripts
+    <tool-id>.py           ← Python 3 scripts
+
+~/.bosun/tools/            ← global scope (shared across all workspaces)
+\`\`\`
+
+## Registering a Tool (via Bosun SDK)
+
+Import \`registerCustomTool\` from \`./agent-custom-tools.mjs\`:
+
+\`\`\`js
+import { registerCustomTool } from "./agent-custom-tools.mjs";
+
+await registerCustomTool(rootDir, {
+  title:       "Find unused exports",
+  description: "Scans src/ for exports that are never imported elsewhere",
+  category:    "analysis",   // one of: analysis|testing|git|build|transform|search|validation|utility
+  lang:        "mjs",
+  tags:        ["unused", "exports", "dead-code"],
+  createdBy:   agentId,
+  taskId:      taskId,
+  script: \`#!/usr/bin/env node
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+// ... implementation ...
+\`,
+});
+\`\`\`
+
+## Discovering Available Tools
+
+At task start, the agent system prompt includes a **Custom Tools Library** block
+listing all tools by category. Always check it before writing repetitive code.
+
+You can also query directly:
+\`\`\`js
+import { listCustomTools, getCustomTool } from "./agent-custom-tools.mjs";
+
+const tools = listCustomTools(rootDir, { category: "analysis" });
+const { entry, script } = getCustomTool(rootDir, "find-unused-exports");
+\`\`\`
+
+## Invoking a Tool
+
+\`\`\`js
+import { invokeCustomTool } from "./agent-custom-tools.mjs";
+
+const { stdout, stderr, exitCode } = await invokeCustomTool(
+  rootDir,
+  "find-unused-exports",
+  ["--dir", "src"],
+  { timeout: 15000 }
+);
+\`\`\`
+
+## Promoting to Global Scope
+
+If a tool proves valuable across projects, promote it so all workspaces see it:
+
+\`\`\`js
+import { promoteToGlobal } from "./agent-custom-tools.mjs";
+await promoteToGlobal(rootDir, "find-unused-exports");
+\`\`\`
+
+## Reflect Checklist (run at end of each task)
+
+Before marking a task complete, reflect:
+
+1. Did I write any utility code I'd write again?
+   → Extract it into a custom tool.
+2. Did an existing tool help me? (usage stats are tracked automatically)
+3. Is there a workspace tool that deserves global promotion?
+4. Did I discover a pattern the current skill set doesn't cover?
+   → Write a new skill (Markdown knowledge) or tool (executable) as appropriate.
+
+## Tool Categories
+
+| Category    | Use for                                                     |
+|-------------|-------------------------------------------------------------|
+| analysis    | Codebase inspection, metrics, dependency graphs             |
+| testing     | Test generation, assertion helpers, coverage reporters       |
+| git         | Multi-step git operations, branch utilities                 |
+| build       | Compile, bundle, transpile helpers beyond npm scripts       |
+| transform   | Codemods, formatters, data reshaping                        |
+| search      | Grep/ripgrep wrappers, semantic search, ref-tracing         |
+| validation  | Linting, type-checking, schema validation                   |
+| utility     | Miscellaneous helpers not covered by any other category     |
+`,
+  },
 ];
 
 // ── Skills directory helpers ──────────────────────────────────────────────────

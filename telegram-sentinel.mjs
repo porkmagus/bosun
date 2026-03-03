@@ -51,6 +51,11 @@ import {
   initPrimaryAgent,
 } from "./primary-agent.mjs";
 import { resolveRepoRoot } from "./repo-root.mjs";
+import {
+  claimTelegramPollOwner,
+  getActiveTelegramPollOwner,
+  releaseTelegramPollOwner,
+} from "./telegram-poll-owner.mjs";
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -59,7 +64,9 @@ const __dirname = dirname(__filename);
 const repoRoot = resolveRepoRoot();
 const cacheDir = resolve(repoRoot, ".cache");
 
-const MONITOR_PID_FILE = resolve(__dirname, ".cache", "bosun.pid");
+const MONITOR_PID_FILE = resolve(cacheDir, "bosun.pid");
+const MONITOR_PID_FILE_LEGACY = resolve(__dirname, ".cache", "bosun.pid");
+const MONITOR_PID_FILE_CWD = resolve(process.cwd(), ".cache", "bosun.pid");
 const SENTINEL_PID_FILE = resolve(cacheDir, "telegram-sentinel.pid");
 const SENTINEL_HEARTBEAT_FILE = resolve(cacheDir, "sentinel-heartbeat.json");
 const SENTINEL_LOCK_FILE = resolve(cacheDir, "telegram-sentinel.lock");
@@ -80,6 +87,12 @@ const MAX_MESSAGE_LEN = 4000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const POLL_ERROR_BACKOFF_BASE_MS = 5_000;
 const POLL_ERROR_BACKOFF_MAX_MS = 120_000;
+const POLL_OWNER_HANDOFF_CHECKS = 3;
+const POLL_OWNER_HANDOFF_DELAY_MS = 500;
+const SENTINEL_POLL_OWNER_TTL_MS = Math.max(
+  30_000,
+  Number(process.env.TELEGRAM_POLL_OWNER_TTL_MS || "120000") || 120_000,
+);
 const COMMAND_QUEUE_MAX_SIZE = 50;
 const COMMAND_QUEUE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MONITOR_START_TIMEOUT_MS = 60_000; // 60s to wait for monitor to become healthy
@@ -571,7 +584,7 @@ async function attemptMonitorRecovery(triggerReason) {
 
   try {
     await ensureMonitorRunning(`sentinel recovery: ${triggerReason}`);
-    const pid = readAlivePid(MONITOR_PID_FILE);
+    const pid = readMonitorPid();
     const pidSuffix = pid ? ` (PID ${pid})` : "";
     await sendTelegram(
       telegramChatId,
@@ -667,6 +680,20 @@ function removePidFile(pidPath) {
   } catch {
     /* best effort */
   }
+}
+
+function readMonitorPid() {
+  return (
+    readAlivePid(MONITOR_PID_FILE) ||
+    readAlivePid(MONITOR_PID_FILE_LEGACY) ||
+    readAlivePid(MONITOR_PID_FILE_CWD)
+  );
+}
+
+function removeMonitorPidFiles() {
+  removePidFile(MONITOR_PID_FILE);
+  removePidFile(MONITOR_PID_FILE_LEGACY);
+  removePidFile(MONITOR_PID_FILE_CWD);
 }
 
 // ── Sentinel Lock ────────────────────────────────────────────────────────────
@@ -866,6 +893,9 @@ async function pollUpdates() {
         "warn",
         "Telegram 409 conflict — another poller is active, backing off",
       );
+      const conflictError = new Error("getUpdates conflict: another poller is active");
+      conflictError.code = "TELEGRAM_POLL_CONFLICT";
+      throw conflictError;
     }
     throw new Error(`getUpdates failed: ${res.status} ${body}`);
   }
@@ -881,28 +911,44 @@ async function pollUpdates() {
 async function pollLoop() {
   log("info", "polling loop started");
 
-  while (running && polling && mode === "standalone") {
-    try {
-      const updates = await pollUpdates();
-      consecutivePollErrors = 0;
+  try {
+    while (running && polling && mode === "standalone") {
+      try {
+        await claimTelegramPollOwner("telegram-sentinel", {
+          ttlMs: SENTINEL_POLL_OWNER_TTL_MS,
+        });
 
-      for (const update of updates) {
-        lastUpdateId = Math.max(lastUpdateId, update.update_id);
-        await handleUpdate(update);
+        const updates = await pollUpdates();
+        consecutivePollErrors = 0;
+
+        for (const update of updates) {
+          lastUpdateId = Math.max(lastUpdateId, update.update_id);
+          await handleUpdate(update);
+        }
+      } catch (err) {
+        if (!running) break;
+        if (err?.code === "TELEGRAM_POLL_CONFLICT") {
+          polling = false;
+          await releaseSentinelPollLock();
+          await releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
+          break;
+        }
+
+        consecutivePollErrors++;
+        const backoff = Math.min(
+          POLL_ERROR_BACKOFF_BASE_MS * Math.pow(2, consecutivePollErrors - 1),
+          POLL_ERROR_BACKOFF_MAX_MS,
+        );
+        log(
+          "warn",
+          `poll error (attempt ${consecutivePollErrors}): ${err.message} — retry in ${Math.round(backoff / 1000)}s`,
+        );
+        await sleep(backoff);
       }
-    } catch (err) {
-      if (!running) break;
-      consecutivePollErrors++;
-      const backoff = Math.min(
-        POLL_ERROR_BACKOFF_BASE_MS * Math.pow(2, consecutivePollErrors - 1),
-        POLL_ERROR_BACKOFF_MAX_MS,
-      );
-      log(
-        "warn",
-        `poll error (attempt ${consecutivePollErrors}): ${err.message} — retry in ${Math.round(backoff / 1000)}s`,
-      );
-      await sleep(backoff);
     }
+  } finally {
+    await releaseSentinelPollLock();
+    await releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
   }
 
   log("info", "polling loop stopped");
@@ -1012,7 +1058,7 @@ async function handleStandaloneCommand(chatId, command, fullText) {
  * @param {string} chatId
  */
 async function handlePing(chatId) {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   const monStatus = monPid ? `:check: running (PID ${monPid})` : ":close: not running";
   const uptime = formatUptime(Date.now() - new Date(startedAt).getTime());
   await sendTelegram(
@@ -1108,7 +1154,7 @@ async function handleSentinelInfo(chatId) {
  * @param {string} chatId
  */
 async function handleStartMonitor(chatId) {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   if (monPid) {
     await sendTelegram(
       chatId,
@@ -1119,7 +1165,7 @@ async function handleStartMonitor(chatId) {
   await sendTelegram(chatId, ":rocket: Starting bosun...");
   try {
     await ensureMonitorRunning("manual /start command");
-    const pid = readAlivePid(MONITOR_PID_FILE);
+    const pid = readMonitorPid();
     await sendTelegram(
       chatId,
       `:check: bosun started${pid ? ` (PID ${pid})` : ""}.`,
@@ -1137,7 +1183,7 @@ async function handleStartMonitor(chatId) {
  * @param {string} chatId
  */
 async function handleStopMonitor(chatId) {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   if (!monPid) {
     await sendTelegram(chatId, ":help: bosun is not running.");
     return;
@@ -1161,7 +1207,7 @@ async function handleStopMonitor(chatId) {
         /* best effort */
       }
     }
-    removePidFile(MONITOR_PID_FILE);
+    removeMonitorPidFiles();
     await sendTelegram(chatId, ":check: bosun stopped.");
     monitorManualStopUntil = Date.now() + sentinelConfig.manualStopHoldMs;
     saveRecoveryState();
@@ -1177,7 +1223,7 @@ async function handleStopMonitor(chatId) {
  * @param {string} chatId
  */
 async function handleHelp(chatId) {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   const monStatus = monPid ? "running" : "stopped";
 
   const lines = [
@@ -1206,7 +1252,7 @@ async function handleHelp(chatId) {
  * @param {string} command
  */
 async function handleMonitorCommand(chatId, text, command) {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   const requiresMonitor = MONITOR_REQUIRED_COMMANDS.has(command);
 
   if (monPid) {
@@ -1313,7 +1359,7 @@ export function getQueuedCommands() {
  * @returns {boolean}
  */
 export function isMonitorRunning() {
-  return readAlivePid(MONITOR_PID_FILE) !== null;
+  return readMonitorPid() !== null;
 }
 
 /**
@@ -1325,7 +1371,7 @@ export function isMonitorRunning() {
  */
 export async function ensureMonitorRunning(reason) {
   // Already running
-  if (readAlivePid(MONITOR_PID_FILE)) return;
+  if (readMonitorPid()) return;
 
   // Another call is already starting the monitor — piggyback on it
   if (monitorStartPromise) {
@@ -1413,7 +1459,7 @@ async function startAndWaitForMonitor(reason) {
   while (Date.now() < deadline) {
     await sleep(MONITOR_HEALTH_POLL_MS);
 
-    const alivePid = readAlivePid(MONITOR_PID_FILE);
+    const alivePid = readMonitorPid();
     if (alivePid) {
       log("info", `monitor is healthy (PID ${alivePid})`);
       lastMonitorStartAt = Date.now();
@@ -1451,16 +1497,32 @@ async function transitionToStandalone(reason) {
   log("info", `transitioning to standalone mode: ${reason}`);
   mode = "standalone";
 
-  // Check if the main bot poll lock is held by a live process
-  const mainBotPolling = await isMainBotPolling();
-  if (mainBotPolling) {
-    log("info", "main bot is still polling — skipping sentinel poll start");
+  // Debounced handoff check to avoid racing monitor startup
+  const canStartPolling = await canStartSentinelPolling();
+  if (!canStartPolling) {
+    log(
+      "info",
+      "main bot ownership/polling still active — skipping sentinel poll start",
+    );
+    return;
+  }
+
+  const ownerClaim = await claimTelegramPollOwner("telegram-sentinel", {
+    ttlMs: SENTINEL_POLL_OWNER_TTL_MS,
+  });
+  if (!ownerClaim?.ok) {
+    const activeOwner =
+      ownerClaim?.owner && ownerClaim.owner.owner
+        ? `${ownerClaim.owner.owner} (pid ${ownerClaim.owner.pid})`
+        : "another active poll owner";
+    log("info", `sentinel poll owner claim denied — ${activeOwner}`);
     return;
   }
 
   // Acquire sentinel poll lock and start polling
   const lockAcquired = await acquireSentinelPollLock();
   if (!lockAcquired) {
+    await releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
     log(
       "warn",
       "failed to acquire sentinel poll lock — another sentinel may be running",
@@ -1488,6 +1550,7 @@ async function transitionToStandalone(reason) {
   pollLoop().catch((err) => {
     log("error", `poll loop crashed: ${err.message}`);
     polling = false;
+    releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
   });
 
   await writeHeartbeat();
@@ -1511,6 +1574,7 @@ async function transitionToCompanion(monitorPid) {
     }
   }
   await releaseSentinelPollLock();
+  await releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
 
   await writeHeartbeat();
 }
@@ -1532,19 +1596,38 @@ async function isMainBotPolling() {
   }
 }
 
+async function isMainBotOwnerActive() {
+  const activeOwner = await getActiveTelegramPollOwner().catch(() => null);
+  return Boolean(activeOwner && activeOwner.owner === "telegram-bot");
+}
+
+async function canStartSentinelPolling() {
+  for (let attempt = 0; attempt < POLL_OWNER_HANDOFF_CHECKS; attempt += 1) {
+    const [mainPolling, mainOwnerActive] = await Promise.all([
+      isMainBotPolling(),
+      isMainBotOwnerActive(),
+    ]);
+    if (mainPolling || mainOwnerActive) return false;
+    if (attempt < POLL_OWNER_HANDOFF_CHECKS - 1) {
+      await sleep(POLL_OWNER_HANDOFF_DELAY_MS);
+    }
+  }
+  return true;
+}
+
 // ── Health Monitoring ────────────────────────────────────────────────────────
 
 /**
  * Periodic health check for bosun. Runs every HEALTH_CHECK_INTERVAL_MS.
  */
 async function healthCheck() {
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
 
   if (mode === "companion") {
     if (!monPid) {
       // Monitor died while in companion mode — send crash notification and go standalone
       log("warn", "monitor process died — transitioning to standalone");
-      removePidFile(MONITOR_PID_FILE);
+      removeMonitorPidFiles();
       recordMonitorCrashEvent();
 
       const recentStartAge =
@@ -1597,6 +1680,7 @@ async function healthCheck() {
           }
         }
         await releaseSentinelPollLock();
+        await releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
       } else if (!mainPolling && !polling) {
         // Neither is polling — sentinel should resume
         log("info", "no poller active — resuming sentinel polling");
@@ -1636,7 +1720,7 @@ async function writeHeartbeat() {
     pid: process.pid,
     startedAt,
     mode,
-    monitorPid: readAlivePid(MONITOR_PID_FILE),
+    monitorPid: readMonitorPid(),
     lastCheck: new Date().toISOString(),
     commandsQueued: commandQueue.length,
     commandsProcessed,
@@ -1705,7 +1789,7 @@ export async function startSentinel(options = {}) {
   log("info", `sentinel started (PID ${process.pid})`);
 
   // Determine initial mode
-  const monPid = readAlivePid(MONITOR_PID_FILE);
+  const monPid = readMonitorPid();
   if (monPid) {
     log(
       "info",
@@ -1787,6 +1871,7 @@ export function stopSentinel() {
 
   // Release locks and PID files
   releaseSentinelPollLock().catch(() => {});
+  releaseTelegramPollOwner("telegram-sentinel").catch(() => {});
   removePidFile(SENTINEL_PID_FILE);
 
   // Clean up heartbeat file
@@ -1810,7 +1895,7 @@ export function getSentinelStatus() {
     running,
     startedAt,
     mode,
-    monitorPid: readAlivePid(MONITOR_PID_FILE),
+    monitorPid: readMonitorPid(),
     polling,
     commandsQueued: commandQueue.length,
     commandsProcessed,

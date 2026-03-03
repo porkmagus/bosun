@@ -27,6 +27,10 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { resolveRepoRoot } from "./repo-root.mjs";
 import {
+  claimTelegramPollOwner,
+  releaseTelegramPollOwner,
+} from "./telegram-poll-owner.mjs";
+import {
   execPrimaryPrompt,
   isPrimaryBusy,
   getPrimaryAgentInfo,
@@ -206,6 +210,10 @@ const TELEGRAM_POLL_CONFLICT_COOLDOWN_MS = Math.max(
   60_000,
   Number(process.env.TELEGRAM_POLL_CONFLICT_COOLDOWN_MS) || 900_000,
 );
+const TELEGRAM_POLL_OWNER_TTL_MS = Math.max(
+  30_000,
+  Number(process.env.TELEGRAM_POLL_OWNER_TTL_MS || "120000") || 120_000,
+);
 let TELEGRAM_HTTP_TIMEOUT_MS = Math.max(
   2000,
   Number(process.env.TELEGRAM_HTTP_TIMEOUT_MS || "15000") || 15000,
@@ -243,7 +251,7 @@ let telegramApiReachable = null; // null = unknown, true/false after probe
 
 /**
  * Read persisted 409 conflict state from disk.
- * Returns { untilMs, reason } or null if missing or corrupt.
+ * Returns { untilMs, reason, pid } or null if missing or corrupt.
  */
 function readTelegramPollConflictState() {
   try {
@@ -251,7 +259,11 @@ function readTelegramPollConflictState() {
     const raw = readFileSync(telegramPollConflictStatePath, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.untilMs !== "number") return null;
-    return { untilMs: parsed.untilMs, reason: parsed.reason || "" };
+    return {
+      untilMs: parsed.untilMs,
+      reason: parsed.reason || "",
+      pid: Number(parsed.pid) || 0,
+    };
   } catch {
     return null;
   }
@@ -1206,6 +1218,7 @@ let _readStatusData = null;
 let _readStatusSummary = null;
 let _getCurrentChild = null;
 let _startProcess = null;
+let _requestFullBosunRestart = null;
 let _getVibeKanbanUrl = null;
 let _fetchVk = null;
 let _getRepoRoot = null;
@@ -1240,6 +1253,7 @@ export function injectMonitorFunctions({
   readStatusSummary,
   getCurrentChild,
   startProcess,
+  requestFullBosunRestart,
   getVibeKanbanUrl,
   fetchVk,
   getRepoRoot,
@@ -1270,6 +1284,7 @@ export function injectMonitorFunctions({
   _readStatusSummary = readStatusSummary;
   _getCurrentChild = getCurrentChild;
   _startProcess = startProcess;
+  _requestFullBosunRestart = requestFullBosunRestart || null;
   _getVibeKanbanUrl = getVibeKanbanUrl;
   _fetchVk = fetchVk;
   _getRepoRoot = getRepoRoot;
@@ -2471,6 +2486,7 @@ async function pollUpdates() {
       writeTelegramPollConflictState(untilMs, `409 Conflict — cooldown until ${new Date(untilMs).toISOString()}`);
       polling = false;
       await releaseTelegramPollLock();
+      await releaseTelegramPollOwner("telegram-bot").catch(() => {});
       return [];
     }
     if (polling) await delayMs(getPollBackoffMs());
@@ -2478,6 +2494,9 @@ async function pollUpdates() {
   }
   resetPollFailureStreak();
   clearTelegramPollConflictState();
+  await claimTelegramPollOwner("telegram-bot", {
+    ttlMs: TELEGRAM_POLL_OWNER_TTL_MS,
+  }).catch(() => {});
   if (!telegramApiReachable) {
     telegramApiReachable = true;
     // API came back — register commands that were deferred at startup
@@ -3342,7 +3361,7 @@ const COMMANDS = {
   "/log": { handler: cmdLogs, desc: "Alias for /logs" },
   "/branches": { handler: cmdBranches, desc: "Recent git branches" },
   "/diff": { handler: cmdDiff, desc: "Git diff summary (staged)" },
-  "/restart": { handler: cmdRestart, desc: "Restart orchestrator process" },
+  "/restart": { handler: cmdRestart, desc: "Full Bosun restart (all services)" },
   // Hidden — no desc so it's excluded from /help, /helpfull, and Telegram autocomplete.
   // Only surfaces in the security warning when TELEGRAM_UI_ALLOW_UNSAFE=true.
   "/disable_unsafe_access": { handler: cmdDisableUnsafeAccess },
@@ -7868,28 +7887,38 @@ async function cmdRestart(chatId, args) {
   if (!confirmFlag) {
     await sendReply(
       chatId,
-      ":alert: Restart will stop the orchestrator process and let the monitor respawn it.\nProceed?",
-      { reply_markup: buildConfirmKeyboard("cb:do_restart", "Confirm Restart") },
+      ":alert: This will perform a *full Bosun restart* — all services, agent process, and monitor will stop and restart from scratch (equivalent to Ctrl+C + relaunch).\nProceed?",
+      { reply_markup: buildConfirmKeyboard("cb:do_restart", "Confirm Full Restart") },
     );
     return;
   }
-  await sendReply(chatId, ":refresh: Restarting orchestrator process...");
-  try {
-    if (_getCurrentChild) {
-      const child = _getCurrentChild();
-      if (child && child.pid) {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          /* best effort */
+
+  if (!_requestFullBosunRestart) {
+    // Fallback: legacy agent-only restart if hook not injected (shouldn't happen)
+    await sendReply(chatId, ":alert: Full restart hook not available — falling back to agent-only restart.");
+    try {
+      if (_getCurrentChild) {
+        const child = _getCurrentChild();
+        if (child && child.pid) {
+          try { child.kill("SIGTERM"); } catch { /* best effort */ }
         }
       }
+      await sendReply(chatId, ":check: Agent restart signal sent.");
+    } catch (err) {
+      await sendReply(chatId, `:close: Restart failed: ${err.message}`);
     }
-    // The monitor's handleExit will auto-restart the process
+    return;
+  }
+
+  try {
+    // Send confirmation BEFORE triggering restart — the bot shuts down ~1.5 s later
     await sendReply(
       chatId,
-      ":check: Restart signal sent. Monitor will auto-restart the orchestrator.",
+      ":refresh: Full Bosun restart initiated. All services stopping now — will be back in a few seconds...",
     );
+    // Trigger monitor.mjs to exit with SELF_RESTART_EXIT_CODE (75).
+    // cli.mjs detects this and immediately forks a completely fresh monitor process.
+    _requestFullBosunRestart("telegram-restart-command");
   } catch (err) {
     await sendReply(chatId, `:close: Restart failed: ${err.message}`);
   }
@@ -11037,25 +11066,6 @@ export async function startTelegramBot(options = {}) {
     return;
   }
 
-  // ── 409 conflict cooldown guard ──────────────────────────────────────────
-  const conflictState = readTelegramPollConflictState();
-  if (conflictState && conflictState.untilMs > Date.now()) {
-    const remainSec = Math.ceil((conflictState.untilMs - Date.now()) / 1000);
-    console.warn(
-      `[telegram-bot] polling suppressed — 409 conflict cooldown active for ${remainSec}s` +
-      (conflictState.reason ? ` (${conflictState.reason})` : ""),
-    );
-    return;
-  }
-
-  const lockOk = await acquireTelegramPollLock("telegram-bot");
-  if (!lockOk) {
-    console.warn(
-      "[telegram-bot] polling disabled (another getUpdates poller is active)",
-    );
-    return;
-  }
-
   // Initialize the primary agent context
   await initPrimaryAgent();
 
@@ -11069,7 +11079,10 @@ export async function startTelegramBot(options = {}) {
     );
   }
 
-  // Start Telegram UI server (Mini App) when configured
+  // Start Telegram UI server (Mini App) when configured.
+  // Portal startup is independent of Telegram polling state — it must always
+  // run when TELEGRAM_UI_PORT or TELEGRAM_MINIAPP_ENABLED is set, even when
+  // polling is suppressed by a 409 conflict cooldown or another poll owner.
   const miniAppEnabled = ["1", "true", "yes"].includes(
     String(process.env.TELEGRAM_MINIAPP_ENABLED || "").toLowerCase(),
   );
@@ -11194,6 +11207,54 @@ export async function startTelegramBot(options = {}) {
 
   // Start batched notification / live digest system
   await startBatchFlushLoop();
+
+  // ── Polling guards ─────────────────────────────────────────────────────
+  // These only gate Telegram getUpdates polling — the portal / UI server,
+  // presence loop, and batch flush are already running above.
+
+  const conflictState = readTelegramPollConflictState();
+  if (conflictState && conflictState.untilMs > Date.now()) {
+    // If the recorded cooldown owner process is no longer alive, clear stale
+    // conflict cooldown immediately so polling can recover without waiting
+    // the full backoff window.
+    if (
+      Number.isFinite(Number(conflictState.pid)) &&
+      Number(conflictState.pid) > 0 &&
+      !canSignalProcess(Number(conflictState.pid))
+    ) {
+      clearTelegramPollConflictState();
+    } else {
+    const remainSec = Math.ceil((conflictState.untilMs - Date.now()) / 1000);
+    console.warn(
+      `[telegram-bot] polling suppressed — 409 conflict cooldown active for ${remainSec}s` +
+      (conflictState.reason ? ` (${conflictState.reason})` : ""),
+    );
+    return;
+    }
+  }
+
+  const ownerClaim = await claimTelegramPollOwner("telegram-bot", {
+    ttlMs: TELEGRAM_POLL_OWNER_TTL_MS,
+  });
+  if (!ownerClaim?.ok) {
+    const activeOwner =
+      ownerClaim?.owner && ownerClaim.owner.owner
+        ? `${ownerClaim.owner.owner} (pid ${ownerClaim.owner.pid})`
+        : "another active poll owner";
+    console.warn(
+      `[telegram-bot] polling disabled (${activeOwner} owns getUpdates arbitration)`,
+    );
+    return;
+  }
+
+  const lockOk = await acquireTelegramPollLock("telegram-bot");
+  if (!lockOk) {
+    await releaseTelegramPollOwner("telegram-bot").catch(() => {});
+    console.warn(
+      "[telegram-bot] polling disabled (another getUpdates poller is active)",
+    );
+    return;
+  }
 
   // Clear any pending updates that arrived while we were offline
   try {
@@ -11346,6 +11407,7 @@ export function stopTelegramBot(options = {}) {
     stopBatchFlushLoop();
   }
   safeDetach("poll-lock-release", releaseTelegramPollLock);
+  safeDetach("poll-owner-release", () => releaseTelegramPollOwner("telegram-bot"));
   stopTelegramUiServer();
   if (menuButtonRefreshTimer) {
     clearInterval(menuButtonRefreshTimer);

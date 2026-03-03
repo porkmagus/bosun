@@ -347,6 +347,49 @@ function parseObjectArg(value, fieldName) {
   throw new Error(`${fieldName} must be an object or JSON string`);
 }
 
+function normalizeStringArrayArg(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => String(item || "").trim())
+          .filter(Boolean);
+      }
+    } catch {
+      // fall through to delimiter splitting
+    }
+  }
+  return raw
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function hasExplicitConfirmation(args = {}) {
+  if (!args || typeof args !== "object") return false;
+  if (args.confirm === true) return true;
+  const confirmation = String(args.confirmation || "").trim();
+  if (!confirmation) return false;
+  return /\b(yes|confirm|confirmed|confirmation|proceed|proceeding)\b/i.test(confirmation);
+}
+
+function toCompactPromptSyncUpdate(entry) {
+  return {
+    key: String(entry?.key || ""),
+    updateAvailable: entry?.updateAvailable === true,
+    needsReview: entry?.needsReview === true,
+    reason: String(entry?.reason || "unknown"),
+  };
+}
+
 function parseAnyJson(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -547,7 +590,7 @@ const TOOL_DEFS = [
   {
     type: "function",
     name: "delegate_to_agent",
-    description: "Execute a task directly via a coding agent (codex, copilot, claude, gemini, or opencode). Creates a new live session and returns the result directly — no background handoff. Use for code changes, file creation, debugging, or any operation requiring workspace access.",
+    description: "Execute a CODE MODIFICATION task via a coding agent (codex, copilot, claude, gemini, or opencode). Creates a live session for writing code, modifying files, creating PRs, or running multi-step workflows. Do NOT use this for questions, status checks, or information retrieval — use ask_agent_context or direct tools instead. Only use when the user explicitly asks to write, fix, create, implement, refactor, or deploy code.",
     parameters: {
       type: "object",
       properties: {
@@ -1083,6 +1126,25 @@ const TOOL_DEFS = [
     description: "List available agent prompt definitions.",
     parameters: { type: "object", properties: {} },
   },
+  {
+    type: "function",
+    name: "sync_prompt_defaults",
+    description: "Compare current workspace prompt files against Bosun defaults and return update candidates; optionally apply safe default updates for selected prompt keys.",
+    parameters: {
+      type: "object",
+      properties: {
+        apply: {
+          type: "boolean",
+          description: "When true, apply default updates for prompt keys with updateAvailable=true. Default: false",
+        },
+        keys: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional prompt key filter when apply=true. Example: ['orchestrator', 'voiceAgent']",
+        },
+      },
+    },
+  },
   // ── Batch Action ──
   {
     type: "function",
@@ -1142,6 +1204,7 @@ const TOOL_DEFS = [
       "/ask <prompt> (read-only agent answer), " +
       "/agent <prompt> or /handoff <prompt> (create a dedicated live handoff session), " +
       "/status, /tasks, /agents, /health, /version, /commands, " +
+      "/prompts, /promptsync [apply [keys...]], " +
       "/mcp <tool_name> [server] (invoke an MCP tool). " +
       "Use this when the user explicitly says a slash command or when you need a fast inline " +
       "answer vs a direct handoff session.",
@@ -1155,6 +1218,7 @@ const TOOL_DEFS = [
             "'/instant what does the auth module do?', " +
             "'/agent write unit tests for config.mjs', " +
             "'/ask summarize the git log', " +
+            "'/promptsync', '/promptsync apply orchestrator,voiceAgent', " +
             "'/mcp create_issue server=github', " +
             "'/status'",
         },
@@ -1364,6 +1428,7 @@ const TOOL_HANDLERS = {
       model,
       cwd,
       timeoutMs: 5 * 60_000,
+      sessionType,
     })
       .then(async (result) => {
         const text = typeof result === "string"
@@ -1451,6 +1516,7 @@ const TOOL_HANDLERS = {
         model,
         cwd,
         timeoutMs: 15_000,
+        sessionType: "voice-ask",
       });
       const text = typeof result === "string"
         ? result
@@ -1755,6 +1821,7 @@ const TOOL_HANDLERS = {
     const slashCommands = [
       "/instant <prompt>", "/ask <prompt>", "/agent <task>", "/handoff <task>",
       "/status", "/health", "/tasks [status]", "/agents", "/fleet", "/version",
+      "/prompts", "/promptsync [apply [keys...]]",
       "/config", "/commands", "/mcp <tool> [server=<name>]", "/workspace <shell cmd>",
       "/shell <cmd>", "/run <cmd>",
     ];
@@ -2197,6 +2264,7 @@ const TOOL_HANDLERS = {
       sessionId: context?.sessionId || `voice-workflow-generate-${Date.now()}`,
       metadata: { source: "voice-workflow-generator" },
       timeoutMs: 45_000,
+      sessionType: "voice-workflow-generate",
     });
     const text = typeof result === "string"
       ? result
@@ -2490,6 +2558,31 @@ const TOOL_HANDLERS = {
       const defs = prompts.getAgentPromptDefinitions
         ? prompts.getAgentPromptDefinitions()
         : prompts.AGENT_PROMPT_DEFINITIONS || [];
+      let sync = {
+        summary: {
+          total: 0,
+          missing: 0,
+          upToDate: 0,
+          updateAvailable: 0,
+          needsReview: 0,
+        },
+        updateCandidates: [],
+      };
+      try {
+        if (typeof prompts.getPromptDefaultUpdateStatus === "function") {
+          const cwd = await resolveToolCwd({});
+          const status = prompts.getPromptDefaultUpdateStatus(cwd);
+          const updates = Array.isArray(status?.updates) ? status.updates : [];
+          sync = {
+            summary: status?.summary || sync.summary,
+            updateCandidates: updates
+              .filter((entry) => entry?.updateAvailable === true || entry?.needsReview === true)
+              .map(toCompactPromptSyncUpdate),
+          };
+        }
+      } catch {
+        // best effort prompt sync metadata
+      }
       return {
         count: defs.length,
         prompts: defs.map((d) => ({
@@ -2497,10 +2590,69 @@ const TOOL_HANDLERS = {
           filename: d.filename,
           description: (d.description || "").slice(0, 80),
         })),
+        sync,
       };
     } catch {
-      return { count: 0, prompts: [] };
+      return {
+        count: 0,
+        prompts: [],
+        sync: {
+          summary: {
+            total: 0,
+            missing: 0,
+            upToDate: 0,
+            updateAvailable: 0,
+            needsReview: 0,
+          },
+          updateCandidates: [],
+        },
+      };
     }
+  },
+
+  async sync_prompt_defaults(args, context) {
+    const apply = args?.apply === true;
+    const cwd = await resolveToolCwd(context);
+    const prompts = await import("./agent-prompts.mjs");
+    const getStatus = prompts.getPromptDefaultUpdateStatus;
+    const applyUpdates = prompts.applyPromptDefaultUpdates;
+    if (typeof getStatus !== "function" || typeof applyUpdates !== "function") {
+      return {
+        ok: false,
+        error: "Prompt sync helpers are unavailable in agent-prompts.mjs.",
+      };
+    }
+
+    if (!apply) {
+      const status = getStatus(cwd);
+      const updates = Array.isArray(status?.updates) ? status.updates : [];
+      return {
+        ok: true,
+        workspaceDir: status?.workspaceDir || null,
+        summary: status?.summary || {
+          total: 0,
+          missing: 0,
+          upToDate: 0,
+          updateAvailable: 0,
+          needsReview: 0,
+        },
+        updates: updates.map(toCompactPromptSyncUpdate),
+      };
+    }
+
+    const keys = normalizeStringArrayArg(args?.keys);
+    const updateResult = applyUpdates(cwd, keys.length ? { keys } : {});
+    return {
+      ok: true,
+      workspaceDir: updateResult?.workspaceDir || null,
+      updated: Array.isArray(updateResult?.updated) ? updateResult.updated : [],
+      skipped: Array.isArray(updateResult?.skipped) ? updateResult.skipped : [],
+      summary: {
+        requestedKeys: keys,
+        updated: Array.isArray(updateResult?.updated) ? updateResult.updated.length : 0,
+        skipped: Array.isArray(updateResult?.skipped) ? updateResult.skipped.length : 0,
+      },
+    };
   },
 
   async dispatch_action(args, context) {
@@ -2527,8 +2679,8 @@ const TOOL_HANDLERS = {
    *   • Request a short spoken confirmation as the VOICE_RESPONSE: reply
    *   • Fall back gracefully if the agent can't find the tool
    *
-   * This deliberately reuses `ask_agent_context` so MCP calls get the same
-   * 10 s timeout + auto-delegation path on failure.
+  * This deliberately reuses the pooled agent for one-shot execution and
+  * returns a clear error if invocation fails.
    */
   async invoke_mcp_tool(args, context) {
     const tool = String(args.tool || "").trim();
@@ -2568,6 +2720,7 @@ const TOOL_HANDLERS = {
         model,
         cwd,
         timeoutMs: 15_000,
+        sessionType: "voice-mcp",
       });
       const text = typeof result === "string"
         ? result
@@ -2577,13 +2730,7 @@ const TOOL_HANDLERS = {
       return `{RESPONSE}: ${formatVoiceToolResult(trimmed)}`;
     } catch (err) {
       const reason = String(err?.message || "tool invocation failed").trim();
-      // On timeout, background-delegate so the MCP call can still complete.
-      const bgMsg = await TOOL_HANDLERS.delegate_to_agent(
-        { message: taskPrompt, executor, mode: "agent", model },
-        context,
-      );
-      const cleaned = String(bgMsg || "").replace(/^\{RESPONSE\}:\s*/i, "").trim();
-      return `{RESPONSE}: MCP call timed out (${reason}); continuing in background. ${cleaned}`;
+      return `{RESPONSE}: MCP tool invocation failed: ${reason}. Please verify the tool/server name and arguments.`;
     }
   },
 
@@ -2613,8 +2760,8 @@ const TOOL_HANDLERS = {
 
   /**
    * Routes Bosun slash commands to the appropriate tool handler.
-   * Supports /instant, /ask, /background (/bg), /status, /tasks, /agents,
-   * /health, /version, /mcp, and delegates unrecognised commands to the agent.
+  * Supports /instant, /ask, /background (/bg), /status, /tasks, /agents,
+  * /health, /version, /mcp, /prompts, /promptsync.
    */
   async bosun_slash_command(args, context) {
     const raw = String(args.command || "").trim();
@@ -2702,28 +2849,44 @@ const TOOL_HANDLERS = {
       return TOOL_HANDLERS.bosun_slash_command({ command: "/helpfull" }, context);
     }
 
+    // ── /prompts + /promptsync [apply [keys...]] ────────────────────────
+    if (base === "prompts" || base === "promptsync") {
+      if (!rest) {
+        return TOOL_HANDLERS.sync_prompt_defaults({ apply: false }, context);
+      }
+      const applyMatch = rest.match(/^apply(?:\s+(.*))?$/i);
+      if (applyMatch) {
+        const keyText = String(applyMatch[1] || "").trim();
+        const keys = normalizeStringArrayArg(keyText);
+        return TOOL_HANDLERS.sync_prompt_defaults(
+          keys.length ? { apply: true, keys } : { apply: true },
+          context,
+        );
+      }
+      return "{RESPONSE}: Usage: /promptsync [apply [key1,key2 or key1 key2]]";
+    }
+
     // ── /workspace <shell command> ────────────────────────────────────────
     if (base === "workspace" || base === "shell" || base === "run") {
       if (!rest) return `{RESPONSE}: Usage: /${base} <shell command>`;
       return TOOL_HANDLERS.run_workspace_command({ command: rest }, context);
     }
 
-    // ── Fallback: delegate unrecognised commands to the agent ─────────────
-    const fallbackPrompt =
-      `Execute this Bosun slash command: ${raw}\n` +
-      `VOICE_RESPONSE: [1-sentence result or outcome]`;
-    return TOOL_HANDLERS.ask_agent_context(
-      { message: fallbackPrompt, mode: "instant" },
-      context,
-    );
+    const supported = [
+      "/instant", "/ask", "/agent", "/handoff", "/status", "/health", "/tasks", "/agents",
+      "/fleet", "/version", "/config", "/effectiveconfig", "/commands", "/help", "/helpfull",
+      "/logs", "/sessions", "/history", "/pr", "/prs", "/pullrequests", "/mcp", "/workspace",
+      "/shell", "/run", "/prompts", "/promptsync",
+    ];
+    return `{RESPONSE}: Unknown slash command "${raw}". Supported commands: ${supported.join(", ")}.`;
   },
 
   // ── Workspace Shell Execution ────────────────────────────────────────────
 
   /**
-   * Runs a safe, read-only shell command in the workspace and returns stdout.
-   * Commands that look destructive are automatically delegated to the agent
-   * rather than executed directly.
+  * Runs a safe, read-only shell command in the workspace and returns stdout.
+  * Non-safe commands are blocked for non-owner sessions and require explicit
+  * confirmation for owner/admin direct execution.
    */
   async run_workspace_command(args, context) {
     const rawCmd = String(args.command || "").trim();
@@ -2753,19 +2916,12 @@ const TOOL_HANDLERS = {
     const isSafe = SAFE_PATTERNS.some((p) => p.test(rawCmd));
     const isOwnerSession = context?.isOwner === true || context?.role === "owner" || context?.role === "admin";
     if (!isSafe && !isOwnerSession) {
-      // Non-owner sessions: delegate potentially-mutating commands to the agent.
-      return TOOL_HANDLERS.ask_agent_context(
-        {
-          message:
-            `Run this command in the workspace and report the output: ${rawCmd}\n` +
-            `VOICE_RESPONSE: [key result in 1–2 sentences]`,
-          mode: "instant",
-        },
-        context,
-      );
+      return "{RESPONSE}: Blocked non-read-only workspace command for this session. Ask an owner/admin to run it, or switch to a delegated agent workflow.";
+    }
+    if (!isSafe && isOwnerSession && !hasExplicitConfirmation(args)) {
+      return "{RESPONSE}: Non-read-only command requires explicit confirmation for owner/admin direct execution (confirm=true or confirmation='yes').";
     }
     if (!isSafe && isOwnerSession) {
-      // Owner/admin: allow direct execution with explicit confirmation in response.
       console.log(`[voice-tools] Owner direct shell: ${rawCmd.slice(0, 100)}`);
     }
 

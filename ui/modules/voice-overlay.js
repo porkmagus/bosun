@@ -46,6 +46,11 @@ import {
 } from "./vision-stream.js";
 import { AudioVisualizer } from "./audio-visualizer.js";
 import { resolveIcon } from "./icon-utils.js";
+import {
+  Select, MenuItem, TextField, Switch, FormControlLabel,
+  Button, IconButton, Typography, Box, Stack, Chip,
+  Tooltip, Divider, Paper, Slider,
+} from "@mui/material";
 
 const html = htm.bind(h);
 const CHAT_UPDATE_PREFIX_RE = /^\[Chat Update [—-] [A-Z]+]:\s*/;
@@ -1905,27 +1910,29 @@ export function VoiceOverlay({
                         : (activeVoiceAgent?.description || "Pick the voice agent for this call.")}
                     </div>
                   </div>
-                  <select
+                  <${Select}
+                    size="small"
                     class="vm-settings-select"
                     disabled=${loadingVoiceAgents || switchingVoiceAgent}
                     value=${selectedVoiceAgentId || ""}
                     onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
                   >
                     ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
-                      <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                      <${MenuItem} key=${agent.id} value=${agent.id}>${agent.name || agent.id}<//>
                     `)}
-                  </select>
+                  <//>
                 </div>
               </div>
               <div class="library-actions" style="margin-top:10px;">
-                <button class="btn-ghost" onClick=${onClose}>Cancel</button>
-                <button
-                  class="btn-primary"
+                <${Button} variant="text" size="small" onClick=${onClose}>Cancel<//>
+                <${Button}
+                  variant="contained"
+                  size="small"
                   disabled=${loadingVoiceAgents || !String(selectedVoiceAgentId || "").trim()}
                   onClick=${() => setStartRequested(true)}
                 >
                   Start Call
-                </button>
+                <//>
               </div>
             </div>
           </div>
@@ -2029,14 +2036,14 @@ export function VoiceOverlay({
         <!-- Top bar -->
         <div class="vm-topbar">
           <div class="vm-topbar-left">
-            <button
-              class="vm-topbar-icon-btn"
+            <${IconButton}
+              size="small"
               onClick=${handleBackToApp}
               title="Back to Bosun UI (keep call running)"
             >
               <span>${resolveIcon("chevronLeft") || "←"}</span>
               <span class="vm-topbar-back-text">Back</span>
-            </button>
+            <//>
             <span class="vm-topbar-title">
               ${normalizedCallType === "video" ? "Video Call" : "AI Agent Call"}
             </span>
@@ -2048,13 +2055,13 @@ export function VoiceOverlay({
             `}
           </div>
           <div class="vm-topbar-right">
-            <button
-              class="vm-topbar-icon-btn vm-minimize-btn"
+            <${IconButton}
+              size="small"
               onClick=${handleMinimize}
               title="Minimise to floating widget"
             >
               ${resolveIcon("chevronDown") || "⌵"}
-            </button>
+            <//>
           </div>
         </div>
 
@@ -2218,31 +2225,34 @@ export function VoiceOverlay({
               </div>
               ${!isCompactFollowMode && html`
                 <div class="voice-overlay-chat-input-wrap">
-                  <input
-                    ref=${meetingFileInputRef}
+                  <${TextField}
+                    inputRef=${meetingFileInputRef}
                     type="file"
-                    accept="image/*,application/pdf,.pdf"
-                    multiple
-                    style="display:none"
+                    size="small"
+                    variant="outlined"
+                    inputProps=${{ accept: "image/*,application/pdf,.pdf", multiple: true }}
+                    sx=${{ display: "none" }}
                     onChange=${(e) => {
                       const files = e?.target?.files;
                       if (files?.length) uploadMeetingAttachments(files);
                       if (e?.target) e.target.value = "";
                     }}
                   />
-                  <button
-                    class="voice-overlay-chat-send"
+                  <${IconButton}
+                    size="small"
                     onClick=${() => meetingFileInputRef.current?.click?.()}
                     disabled=${meetingUploadingAttachments || meetingChatSending}
                     title="Attach image/PDF"
-                  >📎</button>
-                  <button
-                    class="voice-overlay-chat-send"
+                  >📎<//>
+                  <${IconButton}
+                    size="small"
                     onClick=${() => captureScreenAttachment().catch(() => {})}
                     disabled=${meetingUploadingAttachments || meetingChatSending}
                     title="Capture screenshot"
-                  >📸</button>
-                  <input
+                  >📸<//>
+                  <${TextField}
+                    size="small"
+                    variant="outlined"
                     class="voice-overlay-chat-input"
                     placeholder="Message the agent…"
                     value=${meetingChatInput}
@@ -2261,25 +2271,26 @@ export function VoiceOverlay({
                       }
                     }}
                   />
-                  <button
-                    class="voice-overlay-chat-send"
+                  <${IconButton}
+                    size="small"
                     onClick=${() => handleSendMeetingChat().catch(() => {})}
                     disabled=${!meetingChatInput.trim() || meetingChatSending}
                     title="Send"
-                  >↑</button>
+                  >↑<//>
                 </div>
               `}
               ${!isCompactFollowMode && meetingPendingAttachments.length > 0 && html`
                 <div style="padding:0 10px 10px;display:flex;gap:6px;flex-wrap:wrap">
                   ${meetingPendingAttachments.map((att, index) => html`
-                    <button
-                      class="vm-floating-expand"
-                      style="flex:0 1 auto;padding:0 10px"
+                    <${Button}
+                      variant="text"
+                      size="small"
+                      style=${{flex:"0 1 auto",padding:"0 10px"}}
                       onClick=${() => removeMeetingAttachment(index)}
                       title="Remove attachment"
                     >
                       ${(att?.name || "attachment")} ✕
-                    </button>
+                    <//>
                   `)}
                 </div>
               `}
@@ -2292,38 +2303,38 @@ export function VoiceOverlay({
           <!-- Left: three-dot menu + duration -->
           <div class="vm-bar-group left">
             <div class="vm-btn-wrap" style="position:relative">
-              <button
-                class="vm-btn"
+              <${IconButton}
+                size="small"
                 onClick=${(e) => { e.stopPropagation(); setShowMoreMenu(p => !p); setShowMicPicker(false); setShowSpeakerPicker(false); setShowPeoplePanel(false); }}
                 title="More options"
-              >⋯</button>
+              >⋯<//>
               <span class="vm-btn-label">More</span>
               ${showMoreMenu && html`
                 <div class="vm-more-menu" onClick=${(e) => e.stopPropagation()}>
-                  <button class="vm-more-item" onClick=${() => { setShowSettings(true); setShowMoreMenu(false); }}>
+                  <${MenuItem} onClick=${() => { setShowSettings(true); setShowMoreMenu(false); }}>
                     <span class="vm-more-icon">⚙️</span> Settings
-                  </button>
-                  <button class="vm-more-item" onClick=${() => { setShowMoreMenu(false); handleMinimize(); }}>
+                  <//>
+                  <${MenuItem} onClick=${() => { setShowMoreMenu(false); handleMinimize(); }}>
                     <span class="vm-more-icon">🖼</span> Open picture-in-picture
-                  </button>
-                  <button class="vm-more-item" onClick=${() => {
+                  <//>
+                  <${MenuItem} onClick=${() => {
                     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); }
                     else { document.documentElement.requestFullscreen?.().catch(() => {}); }
                     setShowMoreMenu(false);
                   }}>
                     <span class="vm-more-icon">${document.fullscreenElement ? "↙" : "⛶"}</span> ${document.fullscreenElement ? "Exit full screen" : "Full screen"}
-                  </button>
+                  <//>
                   <div class="vm-more-divider"></div>
-                  <button class="vm-more-item disabled" disabled>
+                  <${MenuItem} disabled>
                     <span class="vm-more-icon">⏺</span> Recording unavailable
-                  </button>
+                  <//>
                   <div class="vm-more-divider"></div>
-                  <button class="vm-more-item" onClick=${() => {
+                  <${MenuItem} onClick=${() => {
                     showToast("Troubleshooting: Check mic permissions and network connection", "info");
                     setShowMoreMenu(false);
                   }}>
                     <span class="vm-more-icon">🔧</span> Troubleshooting & help
-                  </button>
+                  <//>
                 </div>
               `}
             </div>
@@ -2339,18 +2350,20 @@ export function VoiceOverlay({
             <!-- Mic toggle with device picker arrow -->
             <div class="vm-btn-wrap">
               <div class="vm-btn-with-arrow">
-                <button
+                <${IconButton}
+                  size="small"
                   class=${`vm-btn has-arrow${micMuted ? " muted" : ""}`}
                   onClick=${handleToggleMic}
                   title=${micMuted ? "Unmute mic" : "Mute mic"}
                 >
                   ${micMuted ? "🔇" : "🎙"}
-                </button>
-                <button
+                <//>
+                <${IconButton}
+                  size="small"
                   class="vm-btn-arrow"
                   onClick=${(e) => { e.stopPropagation(); setShowMicPicker(p => !p); setShowSpeakerPicker(false); setShowMoreMenu(false); }}
                   title="Audio settings"
-                >▲</button>
+                >▲<//>
               </div>
               <span class="vm-btn-label">${micMuted ? "Unmute" : "Mute"}</span>
               ${showMicPicker && html`
@@ -2358,7 +2371,7 @@ export function VoiceOverlay({
                   <div class="vm-device-picker-section">
                     <div class="vm-device-picker-label">Microphone</div>
                     ${audioInputDevices.value.map(d => html`
-                      <button
+                      <${MenuItem}
                         key=${d.deviceId}
                         class=${`vm-device-item${(selectedAudioInput.value || "") === d.deviceId || (!selectedAudioInput.value && d.deviceId === "default") ? " active" : ""}`}
                         onClick=${() => { switchAudioInput(d.deviceId); }}
@@ -2370,7 +2383,7 @@ export function VoiceOverlay({
                           ${d.label || "Microphone " + d.deviceId.slice(0, 8)}
                           ${d.deviceId === "default" ? html`<div class="vm-device-default">System default</div>` : ""}
                         </div>
-                      </button>
+                      <//>
                     `)}
                     ${audioInputDevices.value.length === 0 && html`
                       <div style="padding:8px 16px;font-size:12px;color:rgba(255,255,255,0.45)">No microphones detected</div>
@@ -2382,7 +2395,7 @@ export function VoiceOverlay({
                   <div class="vm-device-picker-section">
                     <div class="vm-device-picker-label">Speakers</div>
                     ${audioOutputDevices.value.map(d => html`
-                      <button
+                      <${MenuItem}
                         key=${d.deviceId}
                         class=${`vm-device-item${(selectedAudioOutput.value || "") === d.deviceId || (!selectedAudioOutput.value && d.deviceId === "default") ? " active" : ""}`}
                         onClick=${() => { switchAudioOutput(d.deviceId); }}
@@ -2394,7 +2407,7 @@ export function VoiceOverlay({
                           ${d.label || "Speaker " + d.deviceId.slice(0, 8)}
                           ${d.deviceId === "default" ? html`<div class="vm-device-default">System default</div>` : ""}
                         </div>
-                      </button>
+                      <//>
                     `)}
                     ${audioOutputDevices.value.length === 0 && html`
                       <div style="padding:8px 16px;font-size:12px;color:rgba(255,255,255,0.45)">No speakers detected</div>
@@ -2406,35 +2419,37 @@ export function VoiceOverlay({
 
             <!-- Camera toggle -->
             <div class="vm-btn-wrap">
-              <button
+              <${IconButton}
+                size="small"
                 class=${`vm-btn${visionState === "streaming" && visionSource === "camera" ? " screen-on" : ""}`}
                 onClick=${handleToggleCameraShare}
                 disabled=${!canShareCamera}
                 title=${canShareCamera ? (visionState === "streaming" && visionSource === "camera" ? "Stop camera" : "Share camera") : (!canShareVision ? "Session required" : "Camera not supported in this browser")}
               >
                 ${visionState === "streaming" && visionSource === "camera" ? "📷" : "📷"}
-              </button>
+              <//>
               <span class="vm-btn-label">${visionState === "streaming" && visionSource === "camera" ? "Stop cam" : "Camera"}</span>
             </div>
 
             <!-- Screen share toggle -->
             <div class="vm-btn-wrap">
-              <button
+              <${IconButton}
+                size="small"
                 class=${`vm-btn${visionState === "streaming" && visionSource === "screen" ? " screen-on" : ""}`}
                 onClick=${handleToggleScreenShare}
                 disabled=${!canShareScreen}
                 title=${canShareScreen ? (visionState === "streaming" && visionSource === "screen" ? "Stop screen share" : "Share screen") : (!canShareVision ? "Session required" : "Screen share not supported in this browser/runtime")}
               >
                 🖥
-              </button>
+              <//>
               <span class="vm-btn-label">${visionState === "streaming" && visionSource === "screen" ? "Stop share" : "Share screen"}</span>
             </div>
 
             <!-- End call pill -->
             <div class="vm-end-pill-wrap">
-              <button class="vm-end-pill" onClick=${handleClose} title="End call">
+              <${Button} variant="contained" color="error" size="small" onClick=${handleClose} title="End call">
                 📵
-              </button>
+              <//>
               <span class="vm-end-pill-label">End call</span>
             </div>
           </div>
@@ -2443,25 +2458,27 @@ export function VoiceOverlay({
           <div class="vm-bar-group right">
             ${!isCompactFollowMode && html`
               <div class="vm-btn-wrap">
-                <button
+                <${IconButton}
+                  size="small"
                   class=${`vm-btn${chatOpen && sessionId ? " active" : ""}`}
                   onClick=${() => setChatOpen((p) => !p)}
                   disabled=${!sessionId}
                   title=${sessionId ? "Toggle chat panel" : "Session required"}
                 >
                   💬
-                </button>
+                <//>
                 <span class="vm-btn-label">Chat</span>
               </div>
             `}
             <div class="vm-btn-wrap" style="position:relative">
-              <button
+              <${IconButton}
+                size="small"
                 class=${`vm-btn${showPeoplePanel ? " active" : ""}`}
                 onClick=${(e) => { e.stopPropagation(); setShowPeoplePanel(p => !p); setShowMoreMenu(false); setShowMicPicker(false); setShowSpeakerPicker(false); }}
                 title="Participants"
               >
                 👥
-              </button>
+              <//>
               <span class="vm-btn-label">People</span>
               ${showPeoplePanel && html`
                 <div class="vm-more-menu" style="bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);min-width:220px" onClick=${(e) => e.stopPropagation()}>
@@ -2475,19 +2492,18 @@ export function VoiceOverlay({
                   <div class="vm-more-divider"></div>
                   <div style="padding:8px 12px 6px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600;letter-spacing:0.04em">SWITCH AGENT</div>
                   ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
-                    <button
+                    <${MenuItem}
                       key=${agent.id}
-                      class="vm-more-item"
                       disabled=${switchingVoiceAgent}
                       onClick=${() => handleVoiceAgentSelection(agent.id)}
                       style=${String(agent.id) === String(selectedVoiceAgentId || "").trim() ? "opacity:0.95;border:1px solid rgba(138,180,248,0.35);" : ""}
                     >
                       <span class="vm-more-icon">${String(agent.id) === String(selectedVoiceAgentId || "").trim() ? "✅" : "🤖"}</span>
                       ${agent.name || agent.id}
-                    </button>
+                    <//>
                   `)}
                   <div class="vm-more-divider"></div>
-                  <button class="vm-more-item" onClick=${() => {
+                  <${MenuItem} onClick=${() => {
                     const url = window.location.href;
                     navigator.clipboard?.writeText(url).then(() => {
                       showToast("Invite link copied!", "success");
@@ -2497,14 +2513,14 @@ export function VoiceOverlay({
                     setShowPeoplePanel(false);
                   }}>
                     <span class="vm-more-icon">🔗</span> Copy invite link
-                  </button>
+                  <//>
                 </div>
               `}
             </div>
             <div class="vm-btn-wrap">
-              <button class="vm-btn" onClick=${() => setShowSettings(true)} title="Settings">
+              <${IconButton} size="small" onClick=${() => setShowSettings(true)} title="Settings">
                 ⚙️
-              </button>
+              <//>
               <span class="vm-btn-label">Settings</span>
             </div>
           </div>
@@ -2512,7 +2528,9 @@ export function VoiceOverlay({
 
         <!-- Device chips bar (below main controls, like Meet) -->
         <div class="vm-bar-device-chips">
-          <button
+          <${Button}
+            variant="text"
+            size="small"
             class="vm-bar-device-chip"
             onClick=${() => { setShowMicPicker(p => !p); setShowSpeakerPicker(false); }}
           >
@@ -2523,8 +2541,10 @@ export function VoiceOverlay({
               return dev?.label || "System default";
             })()}
             <span style="font-size:10px;margin-left:2px">▲</span>
-          </button>
-          <button
+          <//>
+          <${Button}
+            variant="text"
+            size="small"
             class="vm-bar-device-chip"
             onClick=${() => { setShowSpeakerPicker(p => !p); setShowMicPicker(false); }}
           >
@@ -2535,7 +2555,7 @@ export function VoiceOverlay({
               return dev?.label || "System default";
             })()}
             <span style="font-size:10px;margin-left:2px">▲</span>
-          </button>
+          <//>
         </div>
 
         <!-- Settings panel overlay -->
@@ -2544,7 +2564,7 @@ export function VoiceOverlay({
             <div class="vm-settings-panel" onClick=${(e) => e.stopPropagation()}>
               <div class="vm-settings-header">
                 <span class="vm-settings-title">Settings</span>
-                <button class="vm-settings-close" onClick=${() => setShowSettings(false)}>✕</button>
+                <${IconButton} size="small" onClick=${() => setShowSettings(false)}>✕<//>
               </div>
               <div class="vm-settings-body">
                 <!-- Audio section -->
@@ -2555,15 +2575,16 @@ export function VoiceOverlay({
                     <div class="vm-settings-row-info">
                       <div class="vm-settings-row-label">Microphone</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       value=${selectedAudioInput.value || ""}
                       onChange=${(e) => switchAudioInput(e.target.value)}
                     >
                       ${audioInputDevices.value.map(d => html`
-                        <option key=${d.deviceId} value=${d.deviceId}>${d.label || "Mic " + d.deviceId.slice(0, 8)}</option>
+                        <${MenuItem} key=${d.deviceId} value=${d.deviceId}>${d.label || "Mic " + d.deviceId.slice(0, 8)}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
 
                   <!-- Mic level -->
@@ -2575,15 +2596,16 @@ export function VoiceOverlay({
                     <div class="vm-settings-row-info">
                       <div class="vm-settings-row-label">Speakers</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       value=${selectedAudioOutput.value || ""}
                       onChange=${(e) => switchAudioOutput(e.target.value)}
                     >
                       ${audioOutputDevices.value.map(d => html`
-                        <option key=${d.deviceId} value=${d.deviceId}>${d.label || "Speaker " + d.deviceId.slice(0, 8)}</option>
+                        <${MenuItem} key=${d.deviceId} value=${d.deviceId}>${d.label || "Speaker " + d.deviceId.slice(0, 8)}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
                 </div>
 
@@ -2596,9 +2618,10 @@ export function VoiceOverlay({
                       <div class="vm-settings-row-label">Echo cancellation</div>
                       <div class="vm-settings-row-desc">Reduces echo from speakers being picked up by mic</div>
                     </div>
-                    <button
-                      class=${`vm-settings-toggle${audioSettings.value.echoCancellation ? " on" : ""}`}
-                      onClick=${() => updateAudioSettings({ echoCancellation: !audioSettings.value.echoCancellation })}
+                    <${Switch}
+                      size="small"
+                      checked=${audioSettings.value.echoCancellation}
+                      onChange=${() => updateAudioSettings({ echoCancellation: !audioSettings.value.echoCancellation })}
                     />
                   </div>
 
@@ -2607,9 +2630,10 @@ export function VoiceOverlay({
                       <div class="vm-settings-row-label">Noise suppression</div>
                       <div class="vm-settings-row-desc">Filters background noise from microphone input</div>
                     </div>
-                    <button
-                      class=${`vm-settings-toggle${audioSettings.value.noiseSuppression ? " on" : ""}`}
-                      onClick=${() => updateAudioSettings({ noiseSuppression: !audioSettings.value.noiseSuppression })}
+                    <${Switch}
+                      size="small"
+                      checked=${audioSettings.value.noiseSuppression}
+                      onChange=${() => updateAudioSettings({ noiseSuppression: !audioSettings.value.noiseSuppression })}
                     />
                   </div>
 
@@ -2618,9 +2642,10 @@ export function VoiceOverlay({
                       <div class="vm-settings-row-label">Auto gain control</div>
                       <div class="vm-settings-row-desc">Automatically adjusts microphone volume level</div>
                     </div>
-                    <button
-                      class=${`vm-settings-toggle${audioSettings.value.autoGainControl ? " on" : ""}`}
-                      onClick=${() => updateAudioSettings({ autoGainControl: !audioSettings.value.autoGainControl })}
+                    <${Switch}
+                      size="small"
+                      checked=${audioSettings.value.autoGainControl}
+                      onChange=${() => updateAudioSettings({ autoGainControl: !audioSettings.value.autoGainControl })}
                     />
                   </div>
                 </div>
@@ -2645,16 +2670,17 @@ export function VoiceOverlay({
                       <div class="vm-settings-row-label">Switch voice agent</div>
                       <div class="vm-settings-row-desc">Change persona/toolset without leaving this call</div>
                     </div>
-                    <select
+                    <${Select}
+                      size="small"
                       class="vm-settings-select"
                       disabled=${switchingVoiceAgent}
                       value=${selectedVoiceAgentId || ""}
                       onChange=${(e) => handleVoiceAgentSelection(e.target.value)}
                     >
                       ${(voiceAgents.length ? voiceAgents : [{ id: "voice-agent", name: "Voice Agent" }]).map((agent) => html`
-                        <option key=${agent.id} value=${agent.id}>${agent.name || agent.id}</option>
+                        <${MenuItem} key=${agent.id} value=${agent.id}>${agent.name || agent.id}<//>
                       `)}
-                    </select>
+                    <//>
                   </div>
                   <div class="vm-settings-row">
                     <div class="vm-settings-row-info">
@@ -2685,12 +2711,13 @@ export function VoiceOverlay({
     <!-- Floating minimized PiP widget -->
     ${minimized && html`
       <div class="vm-floating">
-        <input
-          ref=${meetingFileInputRef}
+        <${TextField}
+          inputRef=${meetingFileInputRef}
           type="file"
-          accept="image/*,application/pdf,.pdf"
-          multiple
-          style="display:none"
+          size="small"
+          variant="outlined"
+          inputProps=${{ accept: "image/*,application/pdf,.pdf", multiple: true }}
+          sx=${{ display: "none" }}
           onChange=${(e) => {
             const files = e?.target?.files;
             if (files?.length) uploadMeetingAttachments(files);
@@ -2716,26 +2743,31 @@ export function VoiceOverlay({
           </div>
         `}
         <div class="vm-floating-actions">
-          <button
+          <${IconButton}
+            size="small"
             class=${`vm-floating-mic${micMuted ? " muted" : ""}`}
             onClick=${handleToggleMic}
             title=${micMuted ? "Unmute" : "Mute"}
-          >${micMuted ? "🔇" : "🎙"}</button>
-          <button
-            class="vm-floating-expand"
+          >${micMuted ? "🔇" : "🎙"}<//>
+          <${Button}
+            variant="text"
+            size="small"
             onClick=${() => meetingFileInputRef.current?.click?.()}
             title="Attach image/PDF"
-          >📎</button>
-          <button
-            class="vm-floating-expand"
+          >📎<//>
+          <${Button}
+            variant="text"
+            size="small"
             onClick=${() => captureScreenAttachment().catch(() => {})}
             title="Capture screenshot"
-          >📸</button>
-          <button class="vm-floating-expand" onClick=${handleExpand}>Expand</button>
-          <button class="vm-floating-end" onClick=${handleClose} title="End call">📵</button>
+          >📸<//>
+          <${Button} variant="text" size="small" onClick=${handleExpand}>Expand<//>
+          <${Button} variant="contained" color="error" size="small" onClick=${handleClose} title="End call">📵<//>
         </div>
         <div style="padding:0 12px 10px;display:flex;gap:6px;align-items:center">
-          <input
+          <${TextField}
+            size="small"
+            variant="outlined"
             class="voice-overlay-chat-input"
             style="padding:6px 12px;font-size:12px"
             placeholder="Quick message…"
@@ -2755,24 +2787,25 @@ export function VoiceOverlay({
               }
             }}
           />
-          <button
-            class="vm-floating-mic"
+          <${IconButton}
+            size="small"
             onClick=${() => handleSendMeetingChat(floatingChatInput).catch(() => {})}
             disabled=${meetingChatSending || (!floatingChatInput.trim() && meetingPendingAttachments.length === 0)}
             title="Send"
-          >↑</button>
+          >↑<//>
         </div>
         ${meetingPendingAttachments.length > 0 && html`
           <div style="padding:0 12px 12px;display:flex;gap:6px;flex-wrap:wrap">
             ${meetingPendingAttachments.map((att, index) => html`
-              <button
-                class="vm-floating-expand"
-                style="flex:0 1 auto;padding:0 8px;height:30px"
+              <${Button}
+                variant="text"
+                size="small"
+                style=${{flex:"0 1 auto",padding:"0 8px",height:"30px"}}
                 onClick=${() => removeMeetingAttachment(index)}
                 title="Remove attachment"
               >
                 ${(att?.name || "attachment")} ✕
-              </button>
+              <//>
             `)}
           </div>
         `}

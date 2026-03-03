@@ -21,16 +21,26 @@ import { ICONS } from "../modules/icons.js";
 import { iconText, resolveIcon } from "../modules/icon-utils.js";
 import { formatRelative, countChangedFields } from "../modules/utils.js";
 import {
-  Card,
-  Badge,
+  Card as LegacyCard,
+  Badge as LegacyBadge,
   EmptyState,
   Modal,
   ConfirmDialog,
   Spinner,
-  ListItem,
+  ListItem as LegacyListItem,
   SaveDiscardBar,
 } from "../components/shared.js";
 import { SearchInput, SegmentedControl, Toggle } from "../components/forms.js";
+import {
+  Typography, Box, Stack, Card, CardContent, CardHeader, CardActions,
+  Button, IconButton, Chip, Divider, Paper, TextField, InputAdornment,
+  CircularProgress, Alert, Tooltip, Switch, FormControlLabel, Dialog,
+  DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemButton,
+  ListItemText, ListItemIcon, ListItemSecondaryAction, Menu, MenuItem,
+  Tabs, Tab, Skeleton, Badge, Grid, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, Accordion, AccordionSummary,
+  AccordionDetails, LinearProgress, Select, FormControl, InputLabel, Avatar,
+} from "@mui/material";
 
 /* ═══════════════════════════════════════════════════════════════
  *  Styles
@@ -242,6 +252,7 @@ function injectStyles() {
  * ═══════════════════════════════════════════════════════════════ */
 
 const entries = signal([]);
+const allEntries = signal([]);
 const scopes = signal([]);
 const isLoading = signal(false);
 const initialized = signal(false);
@@ -450,32 +461,32 @@ const AUDIO_AGENT_TEMPLATES = Object.freeze({
  * ═══════════════════════════════════════════════════════════════ */
 
 function LibraryStats() {
-  const all = entries.value;
+  const all = allEntries.value;
   const counts = { prompt: 0, agent: 0, skill: 0, mcp: 0 };
   for (const e of all) { if (counts[e.type] !== undefined) counts[e.type]++; }
   return html`
-    <div class="library-stats">
-      <div class="library-stat">
-        <div class="library-stat-val">${all.length}</div>
-        <div class="library-stat-lbl">Total</div>
-      </div>
-      <div class="library-stat">
-        <div class="library-stat-val" style="color: ${TYPE_COLORS.prompt}">${counts.prompt}</div>
-        <div class="library-stat-lbl">${iconText(`${TYPE_ICONS.prompt} Prompts`)}</div>
-      </div>
-      <div class="library-stat">
-        <div class="library-stat-val" style="color: ${TYPE_COLORS.agent}">${counts.agent}</div>
-        <div class="library-stat-lbl">${iconText(`${TYPE_ICONS.agent} Agents`)}</div>
-      </div>
-      <div class="library-stat">
-        <div class="library-stat-val" style="color: ${TYPE_COLORS.skill}">${counts.skill}</div>
-        <div class="library-stat-lbl">${iconText(`${TYPE_ICONS.skill} Skills`)}</div>
-      </div>
-      <div class="library-stat">
-        <div class="library-stat-val" style="color: ${TYPE_COLORS.mcp}">${counts.mcp}</div>
-        <div class="library-stat-lbl">${iconText(`${TYPE_ICONS.mcp} MCP`)}</div>
-      </div>
-    </div>
+    <${Stack} direction="row" spacing=${2} flexWrap="wrap">
+      <${Paper} variant="outlined" sx=${{ p: 1.5, textAlign: "center", minWidth: 70 }}>
+        <${Typography} variant="h5" fontWeight=${700}>${all.length}<//>
+        <${Typography} variant="caption" color="text.secondary" sx=${{ textTransform: "uppercase", letterSpacing: 0.5 }}>Total<//>
+      <//>
+      <${Paper} variant="outlined" sx=${{ p: 1.5, textAlign: "center", minWidth: 70 }}>
+        <${Typography} variant="h5" fontWeight=${700} sx=${{ color: TYPE_COLORS.prompt }}>${counts.prompt}<//>
+        <${Typography} variant="caption" color="text.secondary">${iconText(`${TYPE_ICONS.prompt} Prompts`)}<//>
+      <//>
+      <${Paper} variant="outlined" sx=${{ p: 1.5, textAlign: "center", minWidth: 70 }}>
+        <${Typography} variant="h5" fontWeight=${700} sx=${{ color: TYPE_COLORS.agent }}>${counts.agent}<//>
+        <${Typography} variant="caption" color="text.secondary">${iconText(`${TYPE_ICONS.agent} Agents`)}<//>
+      <//>
+      <${Paper} variant="outlined" sx=${{ p: 1.5, textAlign: "center", minWidth: 70 }}>
+        <${Typography} variant="h5" fontWeight=${700} sx=${{ color: TYPE_COLORS.skill }}>${counts.skill}<//>
+        <${Typography} variant="caption" color="text.secondary">${iconText(`${TYPE_ICONS.skill} Skills`)}<//>
+      <//>
+      <${Paper} variant="outlined" sx=${{ p: 1.5, textAlign: "center", minWidth: 70 }}>
+        <${Typography} variant="h5" fontWeight=${700} sx=${{ color: TYPE_COLORS.mcp }}>${counts.mcp}<//>
+        <${Typography} variant="caption" color="text.secondary">${iconText(`${TYPE_ICONS.mcp} MCP`)}<//>
+      <//>
+    <//>
   `;
 }
 
@@ -488,15 +499,18 @@ function TypePills() {
     { id: "mcp", label: `${TYPE_ICONS.mcp} MCP Servers` },
   ];
   return html`
-    <div class="library-type-pills">
+    <${Stack} direction="row" spacing=${0.75} flexWrap="wrap">
       ${types.map((t) => html`
-        <button key=${t.id}
-          class=${`library-type-pill ${filterType.value === t.id ? "active" : ""}`}
-          onClick=${() => { filterType.value = t.id; }}>
-          ${iconText(t.label)}
-        </button>
+        <${Chip} key=${t.id}
+          label=${iconText(t.label)}
+          variant=${filterType.value === t.id ? "filled" : "outlined"}
+          color=${filterType.value === t.id ? "primary" : "default"}
+          onClick=${() => { filterType.value = t.id; }}
+          clickable
+          size="small"
+        />
       `)}
-    </div>
+    <//>
   `;
 }
 
@@ -505,33 +519,31 @@ function LibraryCard({ entry, onSelect }) {
   const typeLabel = TYPE_LABELS[entry.type] || entry.type;
   const typeColor = TYPE_COLORS[entry.type] || "#aaa";
   return html`
-    <div class="library-card" onClick=${() => onSelect(entry)}>
-      <div class="library-card-type">
-        <${Badge} text=${typeLabel} status="info"
-          className=${`badge-${entry.type}`}
-          style=${{ "--badge-color": typeColor }} />
-      </div>
-      <div class="library-card-header">
-        <span class="library-card-icon">${resolveIcon(icon) || icon}</span>
-        <div>
-          <div class="library-card-title">${entry.name}</div>
-        </div>
-      </div>
-      ${entry.description && html`
-        <div class="library-card-desc">${entry.description}</div>
-      `}
-      <div class="library-card-meta">
-        ${entry.type === "agent" && entry.agentType && html`
-          <span class="library-card-tag">${String(entry.agentType).toUpperCase()}</span>
+    <${Card} variant="outlined" sx=${{ cursor: "pointer", transition: "all 0.15s", "&:hover": { borderColor: "primary.main", transform: "translateY(-1px)", boxShadow: 3 }, position: "relative", bgcolor: "background.paper" }} onClick=${() => onSelect(entry)}>
+      <${CardContent}>
+        <${Box} sx=${{ position: "absolute", top: 8, right: 8 }}>
+          <${Chip} label=${typeLabel} size="small" sx=${{ bgcolor: typeColor + "22", color: typeColor, fontWeight: 500 }} />
+        <//>
+        <${Stack} direction="row" spacing=${1} alignItems="flex-start" sx=${{ mb: 1 }}>
+          <${Box} sx=${{ fontSize: "1.4em", width: 32, textAlign: "center", flexShrink: 0 }}>${resolveIcon(icon) || icon}<//>
+          <${Typography} fontWeight=${600} variant="body2" sx=${{ WebkitLineClamp: 2, WebkitBoxOrient: "vertical", display: "-webkit-box", overflow: "hidden" }}>${entry.name}<//>
+        <//>
+        ${entry.description && html`
+          <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 1, WebkitLineClamp: 2, WebkitBoxOrient: "vertical", display: "-webkit-box", overflow: "hidden", fontSize: "0.82em" }}>${entry.description}<//>
         `}
-        ${(entry.tags || []).slice(0, 5).map((tag) => html`
-          <span class="library-card-tag" key=${tag}>${tag}</span>
-        `)}
-        ${entry.scope && entry.scope !== "global" && html`
-          <span class="library-card-scope">${iconText(`:pin: ${entry.scope}`)}</span>
-        `}
-      </div>
-    </div>
+        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" alignItems="center">
+          ${entry.type === "agent" && entry.agentType && html`
+            <${Chip} label=${String(entry.agentType).toUpperCase()} size="small" variant="outlined" sx=${{ fontSize: "0.75em" }} />
+          `}
+          ${(entry.tags || []).slice(0, 5).map((tag) => html`
+            <${Chip} key=${tag} label=${tag} size="small" sx=${{ fontSize: "0.75em", bgcolor: "primary.main", color: "#fff", opacity: 0.8 }} />
+          `)}
+          ${entry.scope && entry.scope !== "global" && html`
+            <${Typography} variant="caption" color="text.secondary" sx=${{ ml: "auto !important" }}>${iconText(`:pin: ${entry.scope}`)}<//>
+          `}
+        <//>
+      <//>
+    <//>
   `;
 }
 
@@ -717,65 +729,49 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
       }}
       activeOperationLabel=${loading ? "Save/Delete request is still running" : ""}
     >
-      <div class="library-editor">
+      <${Stack} spacing=${2}>
         ${isNew && html`
-          <label>
-            Type
-            <select value=${form.type} onChange=${updateField("type")}>
-              <option value="prompt">Prompt</option>
-              <option value="agent">Agent Profile</option>
-              <option value="skill">Skill</option>
-              <option value="mcp">MCP Server</option>
-            </select>
-          </label>
+          <${FormControl} fullWidth size="small">
+            <${InputLabel}>Type<//>
+            <${Select} value=${form.type} onChange=${updateField("type")} label="Type">
+              <${MenuItem} value="prompt">Prompt<//>
+              <${MenuItem} value="agent">Agent Profile<//>
+              <${MenuItem} value="skill">Skill<//>
+              <${MenuItem} value="mcp">MCP Server<//>
+            <//>
+          <//>
         `}
-        <label>
-          Name
-          <input type="text" value=${form.name} onInput=${updateField("name")}
-            placeholder="e.g. Task Executor, UI Agent, Background Tasks" />
-        </label>
-        <label>
-          Description
-          <input type="text" value=${form.description} onInput=${updateField("description")}
-            placeholder="Brief one-line summary" />
-        </label>
-        <label>
-          Tags (comma-separated)
-          <input type="text" value=${form.tags} onInput=${updateField("tags")}
-            placeholder="e.g. frontend, ui, react" />
-        </label>
-        <label>
-          Scope
-          <select value=${form.scope} onChange=${updateField("scope")}>
-            <option value="global">Global</option>
-            <option value="workspace">Workspace</option>
-          </select>
-        </label>
+        <${TextField} size="small" fullWidth label="Name" value=${form.name} onInput=${updateField("name")} placeholder="e.g. Task Executor, UI Agent, Background Tasks" />
+        <${TextField} size="small" fullWidth label="Description" value=${form.description} onInput=${updateField("description")} placeholder="Brief one-line summary" />
+        <${TextField} size="small" fullWidth label="Tags (comma-separated)" value=${form.tags} onInput=${updateField("tags")} placeholder="e.g. frontend, ui, react" />
+        <${FormControl} fullWidth size="small">
+          <${InputLabel}>Scope<//>
+          <${Select} value=${form.scope} onChange=${updateField("scope")} label="Scope">
+            <${MenuItem} value="global">Global<//>
+            <${MenuItem} value="workspace">Workspace<//>
+          <//>
+        <//>
         ${form.type === "agent" && html`
-          <label>
-            Agent Type
-            <select value=${normalizeAgentType(form.agentType)} onChange=${updateField("agentType")}>
-              ${AGENT_TYPE_OPTIONS.map((opt) => html`
-                <option key=${opt.value} value=${opt.value}>${opt.label}</option>
-              `)}
-            </select>
-          </label>
+          <${FormControl} fullWidth size="small">
+            <${InputLabel}>Agent Type<//>
+            <${Select} value=${normalizeAgentType(form.agentType)} onChange=${updateField("agentType")} label="Agent Type">
+              ${AGENT_TYPE_OPTIONS.map((opt) => html`<${MenuItem} key=${opt.value} value=${opt.value}>${opt.label}<//>`)}
+            <//>
+          <//>
         `}
-        <label>
-          Content
+        <${Box}>
+          <${Typography} variant="caption" color="text.secondary" sx=${{ mb: 0.5, display: "block" }}>Content<//>
           ${loadingContent
-            ? html`<div style="text-align:center;padding:20px;"><${Spinner} /> Loading content...</div>`
-            : html`<textarea value=${form.content} onInput=${updateField("content")}
-                placeholder=${contentPlaceholder}
-                rows="12" />`
+            ? html`<${Box} sx=${{ textAlign: "center", py: 3 }}><${CircularProgress} size=${20} /> <${Typography} variant="caption">Loading content...<//><//>`
+            : html`<${TextField} fullWidth multiline rows=${12} value=${form.content} onInput=${updateField("content")} placeholder=${contentPlaceholder} size="small" InputProps=${{ sx: { fontFamily: "'Fira Code', monospace", fontSize: "0.82em" } }} />`
           }
-        </label>
-        <div style="font-size:0.78em;color:var(--text-tertiary,#666);margin-top:-8px;">
+        <//>
+        <${Typography} variant="caption" color="text.secondary" sx=${{ mt: -1 }}>
           ${form.type === "prompt" ? "Use {{VARIABLE_NAME}} for template variables. Reference in workflows as {{prompt:name}}."
           : form.type === "agent" ? "JSON format. Referenced in workflows as {{agent:name}}."
             : form.type === "mcp" ? "MCP server configuration. Managed via the MCP Servers panel."
             : "Markdown format. Referenced in workflows as {{skill:name}}."}
-        </div>
+        <//>
 
         ${/* ── Agent Tool Configuration Section ── */
           !isNew && form.type === "agent" && entry?.id && html`
@@ -783,36 +779,31 @@ function EntryEditor({ entry, onClose, onSaved, onDeleted }) {
           `
         }
 
-        <div class="library-actions">
+        <${Stack} direction="row" spacing=${1} justifyContent="flex-end" sx=${{ mt: 1 }}>
           ${!isNew && html`
-            <button class="btn-danger" onClick=${() => setConfirmDelete(true)} disabled=${loading}>
-              Delete
-            </button>
+            <${Button} color="error" onClick=${() => setConfirmDelete(true)} disabled=${loading}>Delete<//>
           `}
-          <div style="flex:1" />
-          <button class="btn-ghost" onClick=${onClose}>Cancel</button>
-          <button
-            class="btn-primary"
-            onClick=${() => {
-              void handleSave({ closeAfterSave: true });
-            }}
+          <${Box} sx=${{ flex: 1 }} />
+          <${Button} variant="outlined" onClick=${onClose}>Cancel<//>
+          <${Button}
+            variant="contained"
+            onClick=${() => { void handleSave({ closeAfterSave: true }); }}
             disabled=${loading}
+            startIcon=${loading ? html`<${CircularProgress} size=${14} />` : null}
           >
-            ${loading ? html`<${Spinner} size=${14} />` : (isNew ? "Create" : "Save")}
-          </button>
-        </div>
+            ${isNew ? "Create" : "Save"}
+          <//>
+        <//>
         <${SaveDiscardBar}
           dirty=${hasUnsaved}
           message=${`You have unsaved changes (${changeCount})`}
           saveLabel=${isNew ? "Create" : "Save Changes"}
           discardLabel="Discard"
-          onSave=${() => {
-            void handleSave({ closeAfterSave: false });
-          }}
+          onSave=${() => { void handleSave({ closeAfterSave: false }); }}
           onDiscard=${resetToBaseline}
           saving=${loading}
         />
-      </div>
+      <//>
       ${confirmDelete && html`
         <${ConfirmDialog}
           title="Delete resource?"
@@ -943,106 +934,101 @@ function AgentToolConfigurator({ agentId, agentName }) {
   );
 
   if (loading) {
-    return html`<div class="agent-tools-section">
-      <div style="text-align:center;padding:16px;"><${Spinner} size=${16} /> Loading tools...</div>
-    </div>`;
+    return html`<${Box} sx=${{ textAlign: "center", py: 2 }}>
+      <${CircularProgress} size=${16} /> <${Typography} variant="caption" sx=${{ ml: 1 }}>Loading tools...<//>
+    <//>`;
   }
 
   return html`
-    <div class="agent-tools-section">
-      <div class="tool-config-header">
-        <h4>${iconText(":settings: Tools & MCP Servers")}</h4>
-        ${saving && html`<${Spinner} size=${12} />`}
-      </div>
+    <${Box} sx=${{ mt: 2, pt: 2, borderTop: 1, borderColor: "divider" }}>
+      <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 1 }}>
+        <${Typography} variant="subtitle2">${iconText(":settings: Tools & MCP Servers")}<//>
+        ${saving && html`<${CircularProgress} size=${12} />`}
+      <//>
 
-      <div class="agent-tools-tabs">
-        <button class=${`agent-tools-tab ${toolsTab === "builtin" ? "active" : ""}`}
-          onClick=${() => setToolsTab("builtin")}>
-          ${iconText(":cpu: Built-in Tools")} (${(tools.builtinTools || []).filter((t) => t.enabled).length}/${(tools.builtinTools || []).length})
-        </button>
-        <button class=${`agent-tools-tab ${toolsTab === "bosun" ? "active" : ""}`}
-          onClick=${() => setToolsTab("bosun")}>
-          ${iconText(":zap: Bosun Tools")} (${enabledBosunSet.size}/${bosunTools.length})
-        </button>
-        <button class=${`agent-tools-tab ${toolsTab === "mcp" ? "active" : ""}`}
-          onClick=${() => setToolsTab("mcp")}>
-          ${iconText(":plug: MCP Servers")} (${enabledMcpSet.size}/${installed.length})
-        </button>
-      </div>
+      <${Tabs} value=${toolsTab} onChange=${(e, v) => setToolsTab(v)} variant="scrollable" scrollButtons="auto" sx=${{ mb: 1 }}>
+        <${Tab} value="builtin" label=${html`<${Stack} direction="row" spacing=${0.5} alignItems="center">
+          <span>${iconText(":cpu: Built-in")}</span>
+          <${Chip} label=${`${(tools.builtinTools || []).filter((t) => t.enabled).length}/${(tools.builtinTools || []).length}`} size="small" />
+        <//>`} />
+        <${Tab} value="bosun" label=${html`<${Stack} direction="row" spacing=${0.5} alignItems="center">
+          <span>${iconText(":zap: Bosun")}</span>
+          <${Chip} label=${`${enabledBosunSet.size}/${bosunTools.length}`} size="small" />
+        <//>`} />
+        <${Tab} value="mcp" label=${html`<${Stack} direction="row" spacing=${0.5} alignItems="center">
+          <span>${iconText(":plug: MCP")}</span>
+          <${Chip} label=${`${enabledMcpSet.size}/${installed.length}`} size="small" />
+        <//>`} />
+      <//>
 
       ${toolsTab === "builtin" && html`
-        <div class="tool-config-group">
+        <${List} dense>
           ${(tools.builtinTools || []).map((tool) => html`
-            <div class="tool-config-item" key=${tool.id}>
-              <span class="tool-config-item-icon">${resolveIcon(tool.icon) || iconText(tool.icon || ":cpu:")}</span>
-              <div class="tool-config-item-info">
-                <div class="tool-config-item-name">${tool.name}</div>
-                <div class="tool-config-item-desc">${tool.description}</div>
-              </div>
-              <div class="tool-config-toggle">
-                <${Toggle}
-                  checked=${tool.enabled}
-                  onChange=${(val) => toggleBuiltinTool(tool.id, val)}
-                />
-              </div>
-            </div>
+            <${ListItem} key=${tool.id}>
+              <${ListItemIcon} sx=${{ minWidth: 36 }}>${resolveIcon(tool.icon) || iconText(tool.icon || ":cpu:")}<//>
+              <${ListItemText} primary=${tool.name} secondary=${tool.description} primaryTypographyProps=${{ variant: "body2", fontWeight: 500 }} secondaryTypographyProps=${{ variant: "caption" }} />
+              <${Switch}
+                edge="end"
+                size="small"
+                checked=${tool.enabled}
+                onChange=${(e) => toggleBuiltinTool(tool.id, e.target.checked)}
+              />
+            <//>
           `)}
-        </div>
+        <//>
       `}
 
       ${toolsTab === "bosun" && html`
-        <details open class="tool-config-group">
-          <summary class="tool-config-group-label">
-            Runtime Voice Tools (collapsible)
-          </summary>
-          ${bosunTools.length === 0 && html`
-            <div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:0.85em;">
-              No Bosun runtime tools were discovered.
-            </div>
-          `}
-          ${bosunTools.map((tool) => html`
-            <div class="tool-config-item" key=${tool.id}>
-              <span class="tool-config-item-icon">${resolveIcon(":zap:") || iconText(":zap:")}</span>
-              <div class="tool-config-item-info">
-                <div class="tool-config-item-name">${tool.name}</div>
-                <div class="tool-config-item-desc">${tool.description || "Bosun runtime tool"}</div>
-              </div>
-              <div class="tool-config-toggle">
-                <${Toggle}
-                  checked=${enabledBosunSet.has(tool.id)}
-                  onChange=${(val) => toggleBosunTool(tool.id, val)}
-                />
-              </div>
-            </div>
-          `)}
-        </details>
+        <${Accordion} defaultExpanded>
+          <${AccordionSummary}>
+            <${Typography} variant="caption" sx=${{ textTransform: "uppercase", fontWeight: 600, letterSpacing: 0.5 }}>Runtime Voice Tools<//>
+          <//>
+          <${AccordionDetails}>
+            ${bosunTools.length === 0 && html`
+              <${Typography} variant="body2" color="text.secondary" sx=${{ textAlign: "center", py: 1.5 }}>
+                No Bosun runtime tools were discovered.
+              <//>
+            `}
+            <${List} dense>
+              ${bosunTools.map((tool) => html`
+                <${ListItem} key=${tool.id}>
+                  <${ListItemIcon} sx=${{ minWidth: 36 }}>${resolveIcon(":zap:") || iconText(":zap:")}<//>
+                  <${ListItemText} primary=${tool.name} secondary=${tool.description || "Bosun runtime tool"} primaryTypographyProps=${{ variant: "body2", fontWeight: 500 }} secondaryTypographyProps=${{ variant: "caption" }} />
+                  <${Switch}
+                    edge="end"
+                    size="small"
+                    checked=${enabledBosunSet.has(tool.id)}
+                    onChange=${(e) => toggleBosunTool(tool.id, e.target.checked)}
+                  />
+                <//>
+              `)}
+            <//>
+          <//>
+        <//>
       `}
 
       ${toolsTab === "mcp" && html`
-        <div class="tool-config-group">
+        <${List} dense>
           ${installed.length === 0 && html`
-            <div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:0.85em;">
+            <${Typography} variant="body2" color="text.secondary" sx=${{ textAlign: "center", py: 1.5 }}>
               No MCP servers installed. Use the MCP Servers tab to install from the marketplace.
-            </div>
+            <//>
           `}
           ${installed.map((srv) => html`
-            <div class="tool-config-item" key=${srv.id}>
-              <span class="tool-config-item-icon">${resolveIcon(":plug:") || iconText(":plug:")}</span>
-              <div class="tool-config-item-info">
-                <div class="tool-config-item-name">${srv.name}</div>
-                <div class="tool-config-item-desc">${srv.description || `Transport: ${srv.meta?.transport || "stdio"}`}</div>
-              </div>
-              <div class="tool-config-toggle">
-                <${Toggle}
-                  checked=${enabledMcpSet.has(srv.id)}
-                  onChange=${(val) => toggleMcpServer(srv.id, val)}
-                />
-              </div>
-            </div>
+            <${ListItem} key=${srv.id}>
+              <${ListItemIcon} sx=${{ minWidth: 36 }}>${resolveIcon(":plug:") || iconText(":plug:")}<//>
+              <${ListItemText} primary=${srv.name} secondary=${srv.description || `Transport: ${srv.meta?.transport || "stdio"}`} primaryTypographyProps=${{ variant: "body2", fontWeight: 500 }} secondaryTypographyProps=${{ variant: "caption" }} />
+              <${Switch}
+                edge="end"
+                size="small"
+                checked=${enabledMcpSet.has(srv.id)}
+                onChange=${(e) => toggleMcpServer(srv.id, e.target.checked)}
+              />
+            <//>
           `)}
-        </div>
+        <//>
       `}
-    </div>
+    <//>
   `;
 }
 
@@ -1188,14 +1174,14 @@ function McpMarketplace({ onInstalled }) {
                 ${(srv.tags || []).map((t) => html`<span class="mcp-card-tag" key=${t}>${t}</span>`)}
               </div>
               <div class="mcp-card-actions">
-                <button class="btn-uninstall"
+                <${Button} variant="outlined" color="error" size="small"
                   onClick=${() => handleUninstall(srv.id)}
                   disabled=${uninstalling === srv.id}>
                   ${uninstalling === srv.id ? html`<${Spinner} size=${12} />` : "Uninstall"}
-                </button>
-                <button onClick=${() => setConfiguring(configuring === srv.id ? null : srv.id)}>
+                <//>
+                <${Button} variant="outlined" size="small" onClick=${() => setConfiguring(configuring === srv.id ? null : srv.id)}>
                   ${iconText(":settings: Configure")}
-                </button>
+                <//>
               </div>
               ${configuring === srv.id && html`
                 <div class="mcp-env-editor">
@@ -1205,7 +1191,7 @@ function McpMarketplace({ onInstalled }) {
                   ${Object.entries(srv.meta?.env || {}).map(([key, val]) => html`
                     <div class="mcp-env-row" key=${key}>
                       <span class="mcp-env-key">${key}</span>
-                      <input class="mcp-env-input"
+                      <${TextField} size="small" variant="outlined"
                         type=${key.toLowerCase().includes("key") || key.toLowerCase().includes("token") || key.toLowerCase().includes("secret") ? "password" : "text"}
                         value=${envEdits[srv.id]?.[key] ?? val}
                         placeholder="Enter value..."
@@ -1216,10 +1202,10 @@ function McpMarketplace({ onInstalled }) {
                     <div style="font-size:0.82em;color:var(--text-tertiary,#666);">No environment variables required.</div>
                   `}
                   <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-                    <button class="library-type-pill" onClick=${() => setConfiguring(null)}>Cancel</button>
-                    <button class="library-type-pill active" onClick=${() => handleConfigure(srv.id)}>
+                    <${Button} variant="text" size="small" onClick=${() => setConfiguring(null)}>Cancel<//>
+                    <${Button} variant="contained" size="small" onClick=${() => handleConfigure(srv.id)}>
                       ${iconText(":check: Save")}
-                    </button>
+                    <//>
                   </div>
                 </div>
               `}
@@ -1231,9 +1217,9 @@ function McpMarketplace({ onInstalled }) {
       <!-- Marketplace Catalog -->
       <div class="mcp-section-header">
         <h3>${iconText(":shopping: MCP Marketplace")}</h3>
-        <button class="library-type-pill" onClick=${() => setShowCustom(!showCustom)}>
+        <${Button} variant="outlined" size="small" onClick=${() => setShowCustom(!showCustom)}>
           ${iconText("➕ Custom Server")}
-        </button>
+        <//>
       </div>
 
       <div style="margin-bottom:8px;">
@@ -1270,7 +1256,7 @@ function McpMarketplace({ onInstalled }) {
                   ${Object.entries(srv.env).map(([key, val]) => html`
                     <div class="mcp-env-row" key=${key}>
                       <span class="mcp-env-key">${key}</span>
-                      <input class="mcp-env-input"
+                      <${TextField} size="small" variant="outlined"
                         type=${key.toLowerCase().includes("key") || key.toLowerCase().includes("token") || key.toLowerCase().includes("secret") ? "password" : "text"}
                         value=${envEdits[srv.id]?.[key] ?? ""}
                         placeholder=${val || "Enter value..."}
@@ -1289,13 +1275,13 @@ function McpMarketplace({ onInstalled }) {
               `}
               <div class="mcp-card-actions">
                 ${isInstalled
-                  ? html`<button class="btn-installed" disabled>✓ Installed</button>`
+                  ? html`<${Button} variant="outlined" size="small" disabled>✓ Installed<//>`
                   : html`
-                    <button class="btn-install"
+                    <${Button} variant="contained" size="small"
                       onClick=${() => handleInstall(srv.id)}
                       disabled=${isInstalling}>
                       ${isInstalling ? html`<${Spinner} size=${12} />` : iconText(":download: Install")}
-                    </button>
+                    <//>
                   `
                 }
               </div>
@@ -1363,54 +1349,54 @@ function McpCustomInstallForm({ onInstall, installing }) {
       </div>
       <label>
         Name *
-        <input type="text" value=${form.name} onInput=${updateField("name")}
-          placeholder="e.g. My Custom Server" />
+        <${TextField} size="small" variant="outlined" value=${form.name} onInput=${updateField("name")}
+          placeholder="e.g. My Custom Server" fullWidth />
       </label>
       <label>
         Description
-        <input type="text" value=${form.description} onInput=${updateField("description")}
-          placeholder="Brief description" />
+        <${TextField} size="small" variant="outlined" value=${form.description} onInput=${updateField("description")}
+          placeholder="Brief description" fullWidth />
       </label>
       <label>
         Transport
-        <select value=${form.transport} onChange=${updateField("transport")}>
-          <option value="stdio">stdio (command + args)</option>
-          <option value="url">URL (HTTP/SSE endpoint)</option>
-        </select>
+        <${Select} size="small" value=${form.transport} onChange=${updateField("transport")}>
+          <${MenuItem} value="stdio">stdio (command + args)<//>
+          <${MenuItem} value="url">URL (HTTP/SSE endpoint)<//>
+        <//>
       </label>
       ${form.transport === "stdio" && html`
         <label>
           Command
-          <input type="text" value=${form.command} onInput=${updateField("command")}
-            placeholder="npx" />
+          <${TextField} size="small" variant="outlined" value=${form.command} onInput=${updateField("command")}
+            placeholder="npx" fullWidth />
         </label>
         <label>
           Arguments (space-separated)
-          <input type="text" value=${form.args} onInput=${updateField("args")}
-            placeholder="-y @scope/mcp-server" />
+          <${TextField} size="small" variant="outlined" value=${form.args} onInput=${updateField("args")}
+            placeholder="-y @scope/mcp-server" fullWidth />
         </label>
       `}
       ${form.transport === "url" && html`
         <label>
           URL
-          <input type="text" value=${form.url} onInput=${updateField("url")}
-            placeholder="https://example.com/mcp" />
+          <${TextField} size="small" variant="outlined" value=${form.url} onInput=${updateField("url")}
+            placeholder="https://example.com/mcp" fullWidth />
         </label>
       `}
       <label>
         Tags (comma-separated)
-        <input type="text" value=${form.tags} onInput=${updateField("tags")}
-          placeholder="custom, tools" />
+        <${TextField} size="small" variant="outlined" value=${form.tags} onInput=${updateField("tags")}
+          placeholder="custom, tools" fullWidth />
       </label>
       <label>
         Environment Variable Keys (comma-separated, values set after install)
-        <input type="text" value=${form.envKeys} onInput=${updateField("envKeys")}
-          placeholder="API_KEY, SECRET_TOKEN" />
+        <${TextField} size="small" variant="outlined" value=${form.envKeys} onInput=${updateField("envKeys")}
+          placeholder="API_KEY, SECRET_TOKEN" fullWidth />
       </label>
       <div class="library-actions">
-        <button class="btn-primary" onClick=${handleSubmit} disabled=${installing}>
+        <${Button} variant="contained" size="small" onClick=${handleSubmit} disabled=${installing}>
           ${installing ? html`<${Spinner} size=${14} />` : iconText(":download: Install")}
-        </button>
+        <//>
       </div>
     </div>
   `;
@@ -1437,9 +1423,9 @@ function ScopeDetector() {
 
   return html`
     <div>
-      <button class="btn-ghost library-type-pill" onClick=${loadScopes} style="font-size:0.82em;">
+      <${Button} variant="text" size="small" onClick=${loadScopes} sx=${{ fontSize: "0.82em" }}>
         ${loading ? html`<${Spinner} size=${12} />` : iconText(":search: Detect Scopes")}
-      </button>
+      <//>
       ${showing && scopes.value.length > 0 && html`
         <div class="library-scopes">
           ${scopes.value.map((s) => html`
@@ -1482,14 +1468,18 @@ function ProfileMatcher() {
   return html`
     <div style="margin-bottom:12px;">
       <div style="display:flex;gap:8px;align-items:center;">
-        <input type="text" placeholder="Test task title, e.g. feat(portal): add login page"
-          value=${title} onInput=${(e) => setTitle(e.target.value)}
+        <${TextField}
+          size="small"
+          variant="outlined"
+          placeholder="Test task title, e.g. feat(portal): add login page"
+          value=${title}
+          onInput=${(e) => setTitle(e.target.value)}
           onKeyDown=${(e) => e.key === "Enter" && doMatch()}
-          style="flex:1;padding:6px 10px;border-radius:8px;border:1px solid var(--border,#333);
-            background:var(--bg-input,#0d1117);color:var(--text-primary,#eee);font-size:0.85em;" />
-        <button class="library-type-pill active" onClick=${doMatch} style="font-size:0.82em;" disabled=${loading}>
+          sx=${{ flex: 1, fontSize: "0.85em" }}
+        />
+        <${Button} variant="contained" size="small" onClick=${doMatch} sx=${{ fontSize: "0.82em" }} disabled=${loading}>
           ${loading ? html`<${Spinner} size=${12} />` : iconText(":target: Match")}
-        </button>
+        <//>
       </div>
       ${match && html`
         <div class="library-profile-match" style="margin-top:8px;">
@@ -1525,9 +1515,13 @@ export function LibraryTab() {
   const loadEntries = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchEntries(filterType.value);
-      entries.value = data;
-      initialized.value = data.length > 0;
+      const [filteredEntries, globalEntries] = await Promise.all([
+        fetchEntries(filterType.value),
+        apiFetch("/api/library").then((res) => res?.data || []),
+      ]);
+      entries.value = filteredEntries;
+      allEntries.value = globalEntries;
+      initialized.value = globalEntries.length > 0;
     } catch (err) {
       showToast("Failed to load library: " + err.message, "error");
     }
@@ -1618,26 +1612,26 @@ export function LibraryTab() {
     <div class="library-root">
       <div class="library-header">
         <h2>${iconText(":book: Library")}</h2>
-        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("female")}>
+        <${Button} variant="outlined" size="small" onClick=${() => handleCreateAudioAgent("female")}>
           ${iconText(":mic: New Female Audio Agent")}
-        </button>
-        <button class="library-type-pill" onClick=${() => handleCreateAudioAgent("male")}>
+        <//>
+        <${Button} variant="outlined" size="small" onClick=${() => handleCreateAudioAgent("male")}>
           ${iconText(":mic: New Male Audio Agent")}
-        </button>
-        <button class="library-type-pill" onClick=${handleRebuild}
+        <//>
+        <${Button} variant="outlined" size="small" onClick=${handleRebuild}
           title="Rescan directories and rebuild manifest">
           ${iconText(":refresh: Rebuild")}
-        </button>
-        <button class="library-type-pill active" onClick=${() => setEditing({})}>
+        <//>
+        <${Button} variant="contained" size="small" onClick=${() => setEditing({})}>
           ${iconText("➕ New")}
-        </button>
+        <//>
       </div>
 
       ${!initialized.value && !loading && html`
         <div class="library-init-banner">
           <p><b>Welcome to the Library!</b></p>
           <p>Initialize to scaffold built-in agent profiles and index existing prompts and skills.</p>
-          <button onClick=${handleInit}>${iconText(":rocket: Initialize Library")}</button>
+          <${Button} variant="contained" size="small" onClick=${handleInit}>${iconText(":rocket: Initialize Library")}<//>
         </div>
       `}
 

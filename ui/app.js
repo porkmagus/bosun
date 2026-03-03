@@ -271,6 +271,7 @@ import {
   TAB_CONFIG,
 } from "./modules/router.js";
 import { formatRelative } from "./modules/utils.js";
+import { VeTheme, CssBaseline, AppBar, Toolbar, Tabs, Tab, Drawer, Box, IconButton, Typography, Chip, Badge, BottomNavigation, BottomNavigationAction, Tooltip, Avatar, Stack, Paper, CircularProgress, Button, Divider, Menu, MenuItem, Fab, Snackbar, Alert } from "./modules/mui.js";
 
 /* ── Component imports ── */
 import { ToastContainer, Modal } from "./components/shared.js";
@@ -308,6 +309,7 @@ import { TelemetryTab } from "./tabs/telemetry.js";
 import { SettingsTab } from "./tabs/settings.js";
 import { WorkflowsTab } from "./tabs/workflows.js";
 import { LibraryTab } from "./tabs/library.js";
+import { ManualFlowsTab } from "./tabs/manual-flows.js";
 
 /* ── Placeholder signals for connection quality (may be provided by api.js) ── */
 let wsLatency = signal(null);
@@ -507,38 +509,29 @@ function OfflineBanner() {
 
   const retryCount = backendRetryCount.value;
   const isPersistent = retryCount > 3;
-  const tone = isPersistent ? "red" : "orange";
   const title = isPersistent
     ? "Persistent connection failure"
     : "Backend Unreachable";
 
-  // Reconnect countdown drives the progress bar
   const countdown = wsReconnectIn.value;
-  const maxWait = 15; // max backoff seconds
-  const reconnectPct = countdown != null && countdown > 0
-    ? Math.round(((maxWait - Math.min(countdown, maxWait)) / maxWait) * 100)
-    : 100;
 
   return html`
-    <div class="offline-banner tone-${tone}">
-      <div class="offline-dot ${tone}"></div>
-      <div class="offline-banner-content">
-        <div class="offline-banner-title">${title}</div>
-        <div class="offline-banner-meta">${backendError.value || "Connection lost"}</div>
-        ${backendLastSeen.value
-          ? html`<div class="offline-banner-meta">Last connected: ${formatTimeAgo(backendLastSeen.value)}</div>`
-          : null}
-        <div class="offline-banner-meta">
-          ${countdown != null && countdown > 0
-            ? `Reconnecting in ${countdown}s…`
-            : `Retry attempt #${retryCount}`}
-        </div>
-        <div class="offline-reconnect-bar">
-          <div class="offline-reconnect-fill" style="width:${reconnectPct}%"></div>
-        </div>
-      </div>
-      <button class="btn btn-ghost btn-sm" onClick=${manualRetry}>Retry</button>
-    </div>
+    <${Alert}
+      severity="error"
+      variant="outlined"
+      sx=${{m: 1, mx: 2, animation: "slideDown 0.3s ease-out"}}
+      action=${html`<${Button} color="inherit" size="small" onClick=${manualRetry}>Retry</${Button}>`}
+    >
+      <strong>${title}</strong> — ${backendError.value || "Connection lost"}
+      ${backendLastSeen.value
+        ? html`<${Typography} variant="caption" display="block">Last connected: ${formatTimeAgo(backendLastSeen.value)}</${Typography}>`
+        : null}
+      <${Typography} variant="caption" display="block">
+        ${countdown != null && countdown > 0
+          ? `Reconnecting in ${countdown}s…`
+          : `Retry attempt #${retryCount}`}
+      </${Typography}>
+    </${Alert}>
   `;
 }
 
@@ -582,16 +575,16 @@ class TabErrorBoundary extends Component {
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
-            <button class="btn btn-primary btn-sm" onClick=${retry}>Retry</button>
-            <button class="btn btn-ghost btn-sm" onClick=${copyError}>Copy Error</button>
-            ${stack ? html`<button class="btn btn-ghost btn-sm" onClick=${toggleStack}>
+            <${Button} variant="contained" size="small" onClick=${retry}>Retry<//>
+            <${Button} variant="text" size="small" onClick=${copyError}>Copy Error<//>
+            ${stack ? html`<${Button} variant="text" size="small" onClick=${toggleStack}>
               ${stackToggleLabel}
-            </button>` : null}
-            <button class="btn btn-ghost btn-sm" onClick=${() => {
+            <//>` : null}
+            <${Button} variant="text" size="small" onClick=${() => {
               console.group("[ve:error-log]");
               getErrorLog().forEach((e, i) => console.log(i, e));
               console.groupEnd();
-            }}>Error Log</button>
+            }}>Error Log<//>
           </div>
           ${this.state.showStack && stack ? html`
             <div class="tab-error-stack">${stack}</div>
@@ -615,6 +608,7 @@ const TAB_COMPONENTS = {
   logs: LogsTab,
   telemetry: TelemetryTab,
   workflows: WorkflowsTab,
+  "manual-flows": ManualFlowsTab,
   library: LibraryTab,
   settings: SettingsTab,
 };
@@ -676,30 +670,36 @@ function Header() {
     }
   }
 
+  const logoSrc = getAppLogoSource(0);
+  const connColorMap = { connected: "success", reconnecting: "warning" };
+  const connColor = connColorMap[connClass] || "error";
+  const userLabel = user ? `@${user.username || user.first_name}` : "";
   return html`
-    <header class="app-header">
-      <div class="app-header-left">
-        <div class="app-header-workspace">
+    <${AppBar} position="fixed" sx=${{zIndex: 1201}} className="app-header">
+      <${Toolbar} variant="dense">
+        <img src=${logoSrc} alt="Bosun" style=${{height: 24, width: 24, marginRight: 4}} data-logo-fallback-index="0" onError=${handleAppLogoLoadError} />
+        <${Typography} variant="h6" sx=${{ml: 1, flexGrow: 0}}>Bosun</${Typography}>
+        <${Box} sx=${{ml: 2}}>
           <${WorkspaceSwitcher} />
-        </div>
-      </div>
-      <div class="app-header-right">
-        <div class="header-actions">
-          <div class="header-status">
-            <div class="connection-pill ${connClass}">
-              <span class="connection-dot"></span>
-              ${connLabel}
-            </div>
-            ${freshnessLabel
-              ? html`<div class="header-freshness">${freshnessLabel}</div>`
-              : null}
-          </div>
-          ${user
-            ? html`<div class="app-header-user">@${user.username || user.first_name}</div>`
+        </${Box}>
+        <${Box} sx=${{flexGrow: 1}} />
+        <${Stack} direction="row" spacing=${1} alignItems="center">
+          <${Chip}
+            size="small"
+            label=${connLabel}
+            color=${connColor}
+            variant="outlined"
+            sx=${{fontSize: "0.7rem"}}
+          />
+          ${freshnessLabel
+            ? html`<${Typography} variant="caption" sx=${{opacity: 0.7}}>${freshnessLabel}</${Typography}>`
             : null}
-        </div>
-      </div>
-    </header>
+          ${user
+            ? html`<${Chip} size="small" label=${userLabel} variant="outlined" />`
+            : null}
+        </${Stack}>
+      </${Toolbar}>
+    </${AppBar}>
   `;
 }
 
@@ -729,67 +729,68 @@ function SidebarNav({ collapsed = false, onToggle }) {
           </div>
           ${!collapsed && html`<div class="sidebar-title">Bosun</div>`}
         </div>
-        <button
+        <${IconButton}
+          size="small"
           class="sidebar-collapse-btn"
           onClick=${onToggle}
           title=${collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label=${collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           ${collapseIcon}
-        </button>
+        <//>
       </div>
       ${!collapsed && html`
         <div class="sidebar-actions">
-          <button class="btn btn-primary btn-block" onClick=${() => createSession({ type: "primary" })}>
+          <${Button} variant="contained" fullWidth onClick=${() => createSession({ type: "primary" })}>
             <span class="btn-icon">${resolveIcon(":plus:")}</span> New Session
-          </button>
-          <button class="btn btn-ghost btn-block" onClick=${() => navigateTo("tasks")}>
+          <//>
+          <${Button} variant="text" fullWidth onClick=${() => navigateTo("tasks")}>
             <span class="btn-icon">${resolveIcon(":clipboard:")}</span> View Tasks
-          </button>
+          <//>
         </div>
       `}
       ${collapsed && html`
         <div class="sidebar-actions-icon">
-          <button
+          <${IconButton}
+            size="small"
             class="sidebar-icon-action"
             onClick=${() => createSession({ type: "primary" })}
             title="New Session"
             aria-label="New Session"
-          >${resolveIcon(":plus:")}</button>
+          >${resolveIcon(":plus:")}<//>
         </div>
       `}
-      <nav class="sidebar-nav" aria-label="Main navigation">
+      <${Tabs}
+        orientation="vertical"
+        value=${Math.max(0, TAB_CONFIG.findIndex((t) => t.id === activeTab.value))}
+        onChange=${(_, idx) => {
+          const tab = TAB_CONFIG[idx];
+          if (tab) navigateTo(tab.id, { resetHistory: tab.id === "dashboard", forceRefresh: tab.id === "dashboard" && activeTab.value === "dashboard" });
+        }}
+        aria-label="Main navigation"
+        sx=${{
+          flexGrow: 1,
+          "& .MuiTab-root": { minHeight: 40, justifyContent: collapsed ? "center" : "flex-start", px: collapsed ? 1 : 2 },
+          "& .MuiTabs-indicator": { left: 0, right: "auto", width: 3, borderRadius: 2 },
+        }}
+      >
         ${TAB_CONFIG.map((tab) => {
-          const isActive = activeTab.value === tab.id;
-          const isHome = tab.id === "dashboard";
-          const isChild = !!tab.parent;
           let badge = 0;
-          if (tab.id === "tasks") {
-            badge = getActiveTaskCount();
-          } else if (tab.id === "agents") {
-            badge = getActiveAgentCount();
-          }
-          return html`
-            <button
-              key=${tab.id}
-              class="sidebar-nav-item ${isActive ? "active" : ""} ${isChild ? "sidebar-nav-child" : ""}"
-              style="position:relative"
-              aria-label=${tab.label}
-              aria-current=${isActive ? "page" : null}
-              title=${collapsed ? tab.label : undefined}
-              onClick=${() =>
-                navigateTo(tab.id, {
-                  resetHistory: isHome,
-                  forceRefresh: isHome && isActive,
-                })}
-            >
-              ${ICONS[tab.icon]}
-              ${!collapsed && html`<span>${tab.label}</span>`}
-              ${badge > 0 ? html`<span class="nav-badge" title=${tab.id === "tasks" ? "Active work items" : "Active agents"}>${badge}</span>` : null}
-            </button>
-          `;
+          if (tab.id === "tasks") badge = getActiveTaskCount();
+          else if (tab.id === "agents") badge = getActiveAgentCount();
+          const icon = badge > 0
+            ? html`<${Badge} badgeContent=${badge} color="primary" max=${99}>${ICONS[tab.icon]}</${Badge}>`
+            : ICONS[tab.icon];
+          return html`<${Tab}
+            key=${tab.id}
+            icon=${icon}
+            label=${collapsed ? undefined : tab.label}
+            iconPosition="start"
+            title=${collapsed ? tab.label : undefined}
+            sx=${{ minWidth: 0, textAlign: "left", ...(tab.parent ? { pl: collapsed ? 1 : 4, fontSize: "0.75rem" } : {}) }}
+          />`;
         })}
-      </nav>
+      </${Tabs}>
       <div class="sidebar-footer">
         <div class="sidebar-status ${isConn ? "online" : "offline"}" title=${collapsed ? (isConn ? "Connected" : "Offline") : undefined}>
           <span class="sidebar-status-dot"></span>
@@ -837,7 +838,8 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
 
     return html`
       <aside class="session-rail session-rail--collapsed" aria-label="Sessions (collapsed)">
-        <button
+        <${IconButton}
+          size="small"
           class="rail-expand-btn"
           onClick=${onExpand}
           title="Expand sessions panel"
@@ -846,7 +848,7 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
             <path d="M6 3l5 5-5 5"/>
           </svg>
-        </button>
+        <//>
         <div class="rail-dots">
           ${dots.map((s) => html`
             <div
@@ -882,7 +884,8 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
             ${activeCount} active · ${sessions.length} total
           </div>
         </div>
-        <button
+        <${IconButton}
+          size="small"
           class="rail-collapse-btn"
           onClick=${onCollapse}
           title="Collapse sessions panel"
@@ -891,7 +894,7 @@ function SessionRail({ onResizeStart, onResizeReset, showResizer, collapsed, onC
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="14" height="14">
             <path d="M10 3l-5 5 5 5"/>
           </svg>
-        </button>
+        <//>
       </div>
       <${SessionList}
         showArchived=${showArchived}
@@ -1038,9 +1041,9 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
             <div class="inspector-section">
               <div class="inspector-title">Smart Logs</div>
               ${smartLogsContent}
-              <button class="btn btn-ghost btn-sm" onClick=${() => navigateTo("logs")}>
+              <${Button} variant="text" size="small" onClick=${() => navigateTo("logs")}>
                 Open Logs
-              </button>
+              <//>
             </div>
           `
         : html`
@@ -1070,7 +1073,7 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
  *  Bottom Navigation
  * ═══════════════════════════════════════════════ */
 const PRIMARY_NAV_TABS = ["dashboard", "chat", "tasks", "agents"];
-const MORE_NAV_TABS = ["control", "infra", "logs", "telemetry", "library", "workflows", "settings"];
+const MORE_NAV_TABS = ["control", "infra", "logs", "telemetry", "library", "workflows", "manual-flows", "settings"];
 
 function getTabsById(ids) {
   return ids
@@ -1106,45 +1109,42 @@ function BottomNav({ compact, moreOpen, onToggleMore, onNavigate }) {
   const primaryTabs = getTabsById(PRIMARY_NAV_TABS);
   const tasksBadge = getActiveTaskCount();
   const agentsBadge = getActiveAgentCount();
+  const activeIndex = primaryTabs.findIndex((t) => t.id === activeTab.value);
+  const navValue = moreOpen ? primaryTabs.length : Math.max(activeIndex, 0);
   return html`
-    <nav class=${`bottom-nav ${compact ? "compact" : ""}`}>
-      ${primaryTabs.map((tab) => {
-        const isHome = tab.id === "dashboard";
-        const isActive = activeTab.value === tab.id;
-        let badge = 0;
-        if (tab.id === "tasks") badge = tasksBadge;
-        else if (tab.id === "agents") badge = agentsBadge;
-        return html`
-          <button
-            key=${tab.id}
-            class="nav-item ${isActive ? "active" : ""}"
-            style="position:relative"
-            aria-label=${`Go to ${tab.label}`}
-            type="button"
-            onClick=${() =>
-              onNavigate(tab.id, {
-                resetHistory: isHome,
-                forceRefresh: isHome && isActive,
-              })}
-          >
-            ${ICONS[tab.icon]}
-            <span class="nav-label">${tab.label}</span>
-            ${badge > 0 ? html`<span class="nav-badge" title=${tab.id === "tasks" ? "Active work items" : "Active agents"}>${badge}</span>` : null}
-          </button>
-        `;
-      })}
-      <button
-        class="nav-item nav-item-more ${moreOpen ? "active" : ""}"
-        aria-haspopup="dialog"
-        aria-expanded=${moreOpen ? "true" : "false"}
-        aria-label=${moreOpen ? "Close more menu" : "Open more menu"}
-        type="button"
-        onClick=${onToggleMore}
+    <${Paper} sx=${{position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 1200}} elevation=${3}>
+      <${BottomNavigation}
+        value=${navValue}
+        onChange=${(_, idx) => {
+          if (idx === primaryTabs.length) { onToggleMore(); return; }
+          const tab = primaryTabs[idx];
+          if (!tab) return;
+          const isHome = tab.id === "dashboard";
+          onNavigate(tab.id, { resetHistory: isHome, forceRefresh: isHome && activeTab.value === tab.id });
+        }}
+        showLabels
+        sx=${{
+          bgcolor: "background.paper",
+          borderTop: "1px solid",
+          borderColor: "divider",
+          ...(compact ? { "& .MuiBottomNavigationAction-root": { minWidth: 52, px: 0.5 } } : {}),
+        }}
       >
-        ${ICONS.ellipsis}
-        <span class="nav-label">More</span>
-      </button>
-    </nav>
+        ${primaryTabs.map((tab) => {
+          let badge = 0;
+          if (tab.id === "tasks") badge = tasksBadge;
+          else if (tab.id === "agents") badge = agentsBadge;
+          const icon = badge > 0
+            ? html`<${Badge} badgeContent=${badge} color="primary" max=${99}>${ICONS[tab.icon]}</${Badge}>`
+            : ICONS[tab.icon];
+          return html`<${BottomNavigationAction} key=${tab.id} label=${tab.label} icon=${icon} />`;
+        })}
+        <${BottomNavigationAction}
+          label="More"
+          icon=${ICONS.ellipsis}
+        />
+      </${BottomNavigation}>
+    </${Paper}>
   `;
 }
 
@@ -1161,8 +1161,9 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               const isHome = tab.id === "dashboard";
               const isActive = activeTab.value === tab.id;
               return html`
-                <button
+                <${Button}
                   key=${tab.id}
+                  variant="text"
                   class="more-menu-item ${isActive ? "active" : ""}"
                   aria-label=${`Open ${tab.label}`}
                   onClick=${() =>
@@ -1172,7 +1173,7 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
                 >
                   <span class="more-menu-icon">${ICONS[tab.icon]}</span>
                   <span class="more-menu-label">${tab.label}</span>
-                </button>
+                <//>
               `;
             })}
           </div>
@@ -1184,8 +1185,9 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               const isHome = tab.id === "dashboard";
               const isActive = activeTab.value === tab.id;
               return html`
-                <button
+                <${Button}
                   key=${tab.id}
+                  variant="text"
                   class="more-menu-item ${isActive ? "active" : ""}"
                   aria-label=${`Open ${tab.label}`}
                   onClick=${() =>
@@ -1195,14 +1197,15 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
                 >
                   <span class="more-menu-icon">${ICONS[tab.icon]}</span>
                   <span class="more-menu-label">${tab.label}</span>
-                </button>
+                <//>
               `;
             })}
           </div>
         </div>
         <div class="more-menu-section">
           <div class="more-menu-section-title">Quick Actions</div>
-          <button
+          <${Button}
+            variant="text"
             class="more-menu-bot-btn"
             type="button"
             aria-label="Open Bot Controls"
@@ -1214,7 +1217,7 @@ function MoreSheet({ open, onClose, onNavigate, onOpenBot }) {
               <span class="more-menu-bot-sub">Commands, executor, routing</span>
             </div>
             <span class="more-menu-bot-chevron">›</span>
-          </button>
+          <//>
         </div>
       </div>
     <//>
@@ -1368,13 +1371,13 @@ function BotControlsSheet({ open, onClose }) {
       <div class="bot-controls">
         ${navStack.length > 0 ? html`
           <div class="bot-controls-breadcrumb">
-            <button class="btn btn-ghost btn-sm" type="button" onClick=${botGoBack} aria-label="Go back">
+            <${Button} variant="text" size="small" type="button" onClick=${botGoBack} aria-label="Go back">
               ← Back
-            </button>
+            <//>
             ${navStack.length > 1 ? html`
-              <button class="btn btn-ghost btn-sm" type="button" onClick=${botGoHome} aria-label="Go to home">
+              <${Button} variant="text" size="small" type="button" onClick=${botGoHome} aria-label="Go to home">
                 ${iconText(":home: Home")}
-              </button>
+              <//>
             ` : null}
           </div>
         ` : null}
@@ -1400,15 +1403,16 @@ function BotControlsSheet({ open, onClose }) {
           ${currentDef.keyboard.map((row, ri) => html`
             <div key=${ri} class="bot-kb-row">
               ${row.map((btn, bi) => html`
-                <button
+                <${Button}
                   key=${bi}
                   type="button"
+                  variant="text"
                   class="bot-kb-btn ${btn.go ? "nav-btn" : ""}"
                   disabled=${cmdLoading}
                   onClick=${() => btn.go ? botNavigateTo(btn.go) : runBotCommand(btn.cmd)}
                 >
                   ${iconText(btn.text)}
-                </button>
+                <//>
               `)}
             </div>
           `)}
@@ -1463,6 +1467,9 @@ function App() {
   }, [isLoading]);
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [voiceOverlayOpen, setVoiceOverlayOpen] = useState(false);
+  const voiceOverlayOpenRef = useRef(false);
+  // Keep ref in sync for access inside stale closures (e.g. retry loops)
+  voiceOverlayOpenRef.current = voiceOverlayOpen;
   const [voiceTier, setVoiceTier] = useState(2);
   const [voiceSessionId, setVoiceSessionId] = useState(null);
   const [voiceExecutor, setVoiceExecutor] = useState(null);
@@ -1507,7 +1514,7 @@ function App() {
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (!globalThis.window) return 320;
     const stored = Number(localStorage.getItem("ve-inspector-width"));
-    return Number.isFinite(stored) ? stored : 320;
+    return Number.isFinite(stored) && stored >= 200 ? stored : 320;
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (!globalThis.window) return false;
@@ -1856,39 +1863,13 @@ function App() {
           return;
         }
         const nextTier = Number(cfg?.tier) === 1 ? 1 : 2;
-        const desktopFollowApi = globalThis?.veDesktop?.follow;
-        const canOpenDesktopFollow =
-          !followWindowMode &&
-          typeof desktopFollowApi?.open === "function";
 
-        if (canOpenDesktopFollow) {
-          const followResult = await desktopFollowApi.open({
-            call: requestedCallType,
-            sessionId: currentSessionId,
-            initialVisionSource: requestedVisionSource || undefined,
-            executor: currentExecutor || undefined,
-            mode: currentMode || undefined,
-            model: currentModel || undefined,
-            voiceAgentId: currentVoiceAgentId || undefined,
-          });
-          if (followResult?.ok) {
-            const nextFloatingState = {
-              active: true,
-              call: requestedCallType,
-              sessionId: currentSessionId,
-              executor: currentExecutor,
-              mode: currentMode,
-              model: currentModel,
-              voiceAgentId: currentVoiceAgentId,
-              initialVisionSource: requestedVisionSource,
-            };
-            setFloatingCallState(nextFloatingState);
-            writeFloatingCallState(nextFloatingState);
-            setVoiceOverlayOpen(false);
-            return;
-          }
-        }
-
+        // Always open the voice overlay inline — even in Electron.
+        // The desktop follow window (always-on-top pop-out) is available
+        // via the tray menu or the "externalize" button inside the overlay.
+        // Auto-delegating to the follow window on mic-button click was
+        // fragile (required URL redirect + cold-start + retry dispatch)
+        // and frequently failed, leaving the user with no voice UI.
         setVoiceTier(nextTier);
         setVoiceOverlayOpen(true);
       } catch (err) {
@@ -2018,14 +1999,25 @@ function App() {
           navigateTo("chat", { replace: true, skipGuard: true });
         }
       }
-      // Wait for UI components to mount before dispatching the voice launch
-      // event.  60 ms was too aggressive for cold-start Electron windows where
-      // JS bundles are still being parsed; 200 ms is reliably sufficient.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      if (cancelled) return;
-      globalThis.dispatchEvent?.(
-        new CustomEvent("ve:open-voice-mode", { detail: launch.detail }),
-      );
+      // Wait for UI components and the voice-mode event listener to mount.
+      // Cold-start Electron windows need more time — JS bundles are still
+      // being parsed.  We retry the dispatch up to 5 times with increasing
+      // delays to ensure the listener is registered before we give up.
+      const delays = [400, 600, 1000, 1500, 2000];
+      for (const delay of delays) {
+        if (cancelled) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (cancelled) return;
+        // Check if voice overlay is already open (a previous dispatch succeeded).
+        // Use the ref to read current state — the closure-captured useState
+        // value is stale inside this async loop.
+        if (voiceOverlayOpenRef.current) return;
+        globalThis.dispatchEvent?.(
+          new CustomEvent("ve:open-voice-mode", { detail: launch.detail }),
+        );
+        // Brief wait to let the event handler run and update state
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     };
 
     start()
@@ -2077,6 +2069,7 @@ function App() {
   useEffect(() => {
     const el = mainRef.current;
     if (!el) return;
+    if (!getTg()) return;
     const swipeTabs = TAB_CONFIG.filter((t) => t.id !== "settings" && !t.parent);
     let startX = 0;
     let startY = 0;
@@ -2198,29 +2191,33 @@ function App() {
     : "Open inspector";
   const inspectorToggleButton = showInspectorToggle
     ? html`
-        <button
-          class="btn btn-ghost btn-sm tablet-toggle"
+        <${Button}
+          variant="text"
+          size="small"
+          class="tablet-toggle"
           onClick=${toggleInspector}
           aria-label=${inspectorToggleLabel}
         >
           <span class="btn-icon">${resolveIcon("clipboard")}</span>
           Inspector
-        </button>
+        <//>
       `
     : null;
   const moreToggleButton = showDrawerToggles
     ? html`
-        <button
-          class="btn btn-ghost btn-sm tablet-toggle"
+        <${Button}
+          variant="text"
+          size="small"
+          class="tablet-toggle"
           onClick=${toggleMore}
           aria-label=${isMoreOpen ? "Close navigation menu" : "Open navigation menu"}
         >
           ⋯ Navigation
-        </button>
+        <//>
       `
     : null;
 
-  return html`
+  return html`<${VeTheme}><${CssBaseline} />
     <div class="top-loading-bar" style="width: ${loadingPct}%; opacity: ${loadingVisible ? 1 : 0}"></div>
     <div
       class="app-shell"
@@ -2298,15 +2295,18 @@ function App() {
           <//>
           ${showScrollTop &&
           html`
-            <button
-              class="scroll-top"
-              title="Back to top"
-              onClick=${() => {
-                mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-              }}
-            >
-              Top
-            </button>
+            <${Tooltip} title="Back to top">
+              <${Fab}
+                size="small"
+                color="primary"
+                sx=${{position: "absolute", bottom: 16, right: 16}}
+                onClick=${() => {
+                  mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                ↑
+              </${Fab}>
+            </${Tooltip}>
           `}
         </div>
       </div>
@@ -2338,8 +2338,11 @@ function App() {
     />
     ${showRestoreFloatingCall
       ? html`
-          <button
-            class="btn btn-primary floating-call-restore"
+          <${Fab}
+            variant="extended"
+            color="primary"
+            size="medium"
+            sx=${{position: "fixed", bottom: 80, right: 16, zIndex: 1100}}
             title=${floatingCallLabel}
             onClick=${async () => {
               try {
@@ -2377,7 +2380,7 @@ function App() {
             ${String(floatingCallState?.call || "").trim().toLowerCase() === "video"
               ? " Restore Video Call"
               : " Restore Voice Call"}
-          </button>
+          </${Fab}>
         `
       : null}
     <${VoiceOverlay}
@@ -2473,7 +2476,7 @@ function App() {
       initialVisionSource=${voiceInitialVisionSource}
       compact=${followWindowMode}
     />
-  `;
+  </${VeTheme}>`;
 }
 
 /* ─── Mount ─── */

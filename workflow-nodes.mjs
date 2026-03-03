@@ -22,6 +22,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { getAgentToolConfig, getEffectiveTools } from "./agent-tool-config.mjs";
 
 const TAG = "[workflow-nodes]";
 const PORTABLE_WORKTREE_COUNT_COMMAND = "node -e \"const cp=require('node:child_process');const wt=cp.execSync('git worktree list --porcelain',{encoding:'utf8'});const count=(wt.match(/^worktree /gm)||[]).length;process.stdout.write(String(count)+'\\\\n');\"";
@@ -781,6 +782,44 @@ function buildTaskContextBlock(task) {
   return lines.join("\n");
 }
 
+function buildWorkflowAgentToolContract(rootDir, agentProfileId = "") {
+  const profileId = String(agentProfileId || "").trim();
+  const effective = profileId
+    ? getEffectiveTools(rootDir, profileId)
+    : getEffectiveTools(rootDir, "__default__");
+  const rawCfg = profileId ? getAgentToolConfig(rootDir, profileId) : null;
+  const enabledBuiltinTools = (Array.isArray(effective?.builtinTools) ? effective.builtinTools : [])
+    .filter((tool) => tool?.enabled)
+    .map((tool) => ({
+      id: String(tool?.id || "").trim(),
+      name: String(tool?.name || "").trim(),
+      description: String(tool?.description || "").trim(),
+    }))
+    .filter((tool) => tool.id);
+  const enabledMcpServers = Array.isArray(rawCfg?.enabledMcpServers)
+    ? rawCfg.enabledMcpServers.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  const manifest = {
+    agentProfileId: profileId || null,
+    enabledBuiltinTools,
+    enabledMcpServers,
+    toolBridge: {
+      module: "./voice-tools.mjs",
+      function: "executeToolCall(toolName, args, context)",
+      quickUse: "node -e \"import('./voice-tools.mjs').then(async m=>{const r=await m.executeToolCall('get_workspace_context', {}, {});console.log(r?.result||r);})\"",
+    },
+  };
+  return [
+    "## Tool Capability Contract",
+    "Use enabled tools by default before claiming work is blocked.",
+    "Enabled tools JSON:",
+    "```json",
+    JSON.stringify(manifest, null, 2),
+    "```",
+    "When uncertain about arguments, call get_admin_help via executeToolCall.",
+  ].join("\n");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  TRIGGERS — Events that initiate a workflow
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1304,6 +1343,7 @@ registerNodeType("action.run_agent", {
       prompt: { type: "string", description: "Agent prompt (supports {{variables}})" },
       sdk: { type: "string", enum: ["codex", "copilot", "claude", "auto"], default: "auto" },
       model: { type: "string", description: "Optional model override for the selected SDK" },
+      taskId: { type: "string", description: "Optional task ID used for task metadata lookup" },
       cwd: { type: "string", description: "Working directory for the agent" },
       timeoutMs: { type: "number", default: 3600000, description: "Agent timeout in ms" },
       agentProfile: { type: "string", description: "Agent profile name (e.g., 'frontend', 'backend')" },
@@ -1317,6 +1357,18 @@ registerNodeType("action.run_agent", {
       sessionRetries: { type: "number", default: 2, description: "Additional session-aware retries for execWithRetry" },
       maxContinues: { type: "number", default: 2, description: "Max idle-continue attempts for execWithRetry" },
       maxRetainedEvents: { type: "number", default: WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT, description: "Maximum agent events retained in run output" },
+      candidateCount: { type: "number", default: 1, description: "Run N isolated agent candidates and select the best (N>1 enables selector mode)" },
+      candidateSelector: {
+        type: "string",
+        enum: ["score", "first_success", "last_success"],
+        default: "score",
+        description: "Candidate selection strategy when candidateCount > 1",
+      },
+      candidatePromptTemplate: {
+        type: "string",
+        description:
+          "Optional prompt suffix template for candidate mode. Supports {{candidateIndex}} and {{candidateCount}}",
+      },
     },
     required: ["prompt"],
   },
@@ -1324,9 +1376,13 @@ registerNodeType("action.run_agent", {
     const prompt = ctx.resolve(node.config?.prompt || "");
     const sdk = node.config?.sdk || "auto";
     const cwd = ctx.resolve(node.config?.cwd || ctx.data?.worktreePath || process.cwd());
+    const agentProfileId = String(
+      ctx.resolve(node.config?.agentProfile || ctx.data?.agentProfile || ""),
+    ).trim();
     const timeoutMs = node.config?.timeoutMs || 3600000;
     const includeTaskContext = node.config?.includeTaskContext !== false;
-    let finalPrompt = prompt;
+    const toolContract = buildWorkflowAgentToolContract(cwd, agentProfileId);
+    let finalPrompt = `${toolContract}\n\n${prompt}`;
     if (includeTaskContext) {
       const explicitContext =
         ctx.data?.taskContext ||
@@ -1342,188 +1398,458 @@ registerNodeType("action.run_agent", {
     // Use the engine's service injection to call agent pool
     const agentPool = engine.services?.agentPool;
     if (agentPool?.launchEphemeralThread) {
-      let streamEventCount = 0;
-      let lastStreamLog = "";
-      const streamLines = [];
-      const startedAt = Date.now();
-      const resolvedSessionId = String(
-        ctx.resolve(
-          node.config?.sessionId || ctx.data?.sessionId || ctx.data?.threadId || "",
-        ) || "",
-      ).trim();
-      const sessionId = resolvedSessionId || null;
-      const explicitTaskKey = String(ctx.resolve(node.config?.taskKey || "") || "").trim();
-      const recoveryTaskKey =
-        explicitTaskKey ||
-        sessionId ||
-        `${ctx.data?._workflowId || "workflow"}:${ctx.id}:${node.id}`;
-      const autoRecover = node.config?.autoRecover !== false;
-      const continueOnSession = node.config?.continueOnSession !== false;
-      const continuePrompt = ctx.resolve(
-        node.config?.continuePrompt ||
-        "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end.",
-      );
-      const parsedSessionRetries = Number(node.config?.sessionRetries);
-      const parsedMaxContinues = Number(node.config?.maxContinues);
-      const sessionRetries = Number.isFinite(parsedSessionRetries)
-        ? Math.max(0, Math.min(10, Math.floor(parsedSessionRetries)))
-        : 2;
-      const maxContinues = Number.isFinite(parsedMaxContinues)
-        ? Math.max(0, Math.min(10, Math.floor(parsedMaxContinues)))
-        : 2;
-      const sdkOverride = sdk === "auto" ? undefined : sdk;
-      const modelOverride = node.config?.model
-        ? String(ctx.resolve(node.config.model) || "").trim() || undefined
-        : undefined;
-      const maxRetainedEvents = Number.isFinite(Number(node.config?.maxRetainedEvents))
-        ? Math.max(10, Math.min(500, Math.trunc(Number(node.config.maxRetainedEvents))))
-        : WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT;
-
-      const launchExtra = {};
-      if (sessionId) launchExtra.resumeThreadId = sessionId;
-      if (sdkOverride) launchExtra.sdk = sdkOverride;
-      if (modelOverride) launchExtra.model = modelOverride;
-      launchExtra.onEvent = (event) => {
-        try {
-          const line = summarizeAgentStreamEvent(event);
-          if (!line || line === lastStreamLog) return;
-          lastStreamLog = line;
-          streamEventCount += 1;
-          if (streamLines.length >= maxRetainedEvents) {
-            streamLines.shift();
-          }
-          streamLines.push(line);
-          ctx.log(node.id, line);
-        } catch {
-          // Stream callbacks must never crash workflow execution.
-        }
+      const parseCandidateCount = (value) => {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return null;
+        return Math.max(1, Math.min(12, Math.trunc(num)));
       };
-
-      const heartbeat = setInterval(() => {
-        const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-        ctx.log(node.id, `Agent still running (${elapsedSec}s elapsed)`);
-      }, WORKFLOW_AGENT_HEARTBEAT_MS);
-
-      let result = null;
-      let success = false;
-
-      try {
-        // Recovery step 1: continue the existing session when available.
-        if (
-          autoRecover &&
-          continueOnSession &&
-          sessionId &&
-          typeof agentPool.continueSession === "function"
-        ) {
-          ctx.log(node.id, `Recovery: continuing existing session ${sessionId}`);
+      let configuredCandidateCount = (() => {
+        const taskMeta = ctx.data?.task?.meta || {};
+        const execution = taskMeta?.execution || {};
+        const dataExecution = ctx.data?.execution || ctx.data?.meta?.execution || {};
+        const candidates = [
+          node.config?.candidateCount,
+          ctx.data?.candidateCount,
+          ctx.data?.task?.candidateCount,
+          ctx.data?.meta?.candidateCount,
+          dataExecution?.candidateCount,
+          ctx.data?.workflow?.candidateCount,
+          execution?.candidateCount,
+          taskMeta?.candidateCount,
+          taskMeta?.swebench?.candidate_count,
+        ];
+        for (const candidate of candidates) {
+          const parsed = parseCandidateCount(candidate);
+          if (parsed && parsed > 0) return parsed;
+        }
+        return 1;
+      })();
+      if (configuredCandidateCount <= 1) {
+        const taskIdForLookup = String(
+          ctx.data?.taskId ||
+            ctx.data?.task?.id ||
+            ctx.resolve(node.config?.taskId || "") ||
+            "",
+        ).trim();
+        const kanban = engine?.services?.kanban;
+        if (taskIdForLookup && kanban && typeof kanban.getTask === "function") {
           try {
-            result = await agentPool.continueSession(sessionId, continuePrompt, {
-              timeout: timeoutMs,
-              cwd,
-              sdk: sdkOverride,
-              model: modelOverride,
-            });
-            if (result?.success) {
-              ctx.log(node.id, "Recovery: continue-session succeeded");
-            } else {
+            const task = await kanban.getTask(taskIdForLookup);
+            const taskMeta = task?.meta || {};
+            const execution = taskMeta?.execution || {};
+            const lookedUp = [
+              task?.candidateCount,
+              taskMeta?.candidateCount,
+              execution?.candidateCount,
+              taskMeta?.swebench?.candidate_count,
+            ]
+              .map((value) => parseCandidateCount(value))
+              .find((value) => Number.isFinite(value) && value > 0);
+            if (lookedUp && lookedUp > configuredCandidateCount) {
+              configuredCandidateCount = lookedUp;
+            }
+          } catch {
+            // best-effort lookup only
+          }
+        }
+      }
+      const selectorMode = String(
+        ctx.resolve(node.config?.candidateSelector || "score") || "score",
+      ).trim().toLowerCase();
+      const candidatePromptTemplate = String(
+        ctx.resolve(node.config?.candidatePromptTemplate || "") || "",
+      ).trim();
+      const runSinglePass = async (passPrompt, options = {}) => {
+        const passLabel = String(options.passLabel || "").trim();
+        const persistSession = options.persistSession !== false;
+        let streamEventCount = 0;
+        let lastStreamLog = "";
+        const streamLines = [];
+        const startedAt = Date.now();
+        const resolvedSessionId = String(
+          ctx.resolve(
+            options.sessionId ??
+              node.config?.sessionId ??
+              ctx.data?.sessionId ??
+              ctx.data?.threadId ??
+              "",
+          ) || "",
+        ).trim();
+        const sessionId = resolvedSessionId || null;
+        const explicitTaskKey = String(ctx.resolve(node.config?.taskKey || "") || "").trim();
+        const fallbackTaskKey =
+          sessionId ||
+          `${ctx.data?._workflowId || "workflow"}:${ctx.id}:${node.id}`;
+        const recoveryTaskKey = options.taskKey || explicitTaskKey || fallbackTaskKey;
+        const autoRecover = options.autoRecover ?? (node.config?.autoRecover !== false);
+        const continueOnSession =
+          options.continueOnSession ?? (node.config?.continueOnSession !== false);
+        const continuePrompt = ctx.resolve(
+          node.config?.continuePrompt ||
+            "Continue exactly where you left off. Resume execution from the last incomplete step, avoid redoing completed work, and finish the task end-to-end.",
+        );
+        const parsedSessionRetries = Number(node.config?.sessionRetries);
+        const parsedMaxContinues = Number(node.config?.maxContinues);
+        const sessionRetries = Number.isFinite(parsedSessionRetries)
+          ? Math.max(0, Math.min(10, Math.floor(parsedSessionRetries)))
+          : 2;
+        const maxContinues = Number.isFinite(parsedMaxContinues)
+          ? Math.max(0, Math.min(10, Math.floor(parsedMaxContinues)))
+          : 2;
+        const sdkOverride = sdk === "auto" ? undefined : sdk;
+        const modelOverride = node.config?.model
+          ? String(ctx.resolve(node.config.model) || "").trim() || undefined
+          : undefined;
+        const maxRetainedEvents = Number.isFinite(Number(node.config?.maxRetainedEvents))
+          ? Math.max(10, Math.min(500, Math.trunc(Number(node.config.maxRetainedEvents))))
+          : WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT;
+
+        const launchExtra = {};
+        if (sessionId) launchExtra.resumeThreadId = sessionId;
+        if (sdkOverride) launchExtra.sdk = sdkOverride;
+        if (modelOverride) launchExtra.model = modelOverride;
+        launchExtra.onEvent = (event) => {
+          try {
+            const line = summarizeAgentStreamEvent(event);
+            if (!line || line === lastStreamLog) return;
+            lastStreamLog = line;
+            streamEventCount += 1;
+            if (streamLines.length >= maxRetainedEvents) {
+              streamLines.shift();
+            }
+            streamLines.push(line);
+            ctx.log(node.id, passLabel ? `${passLabel} ${line}` : line);
+          } catch {
+            // Stream callbacks must never crash workflow execution.
+          }
+        };
+
+        const heartbeat = setInterval(() => {
+          const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+          ctx.log(node.id, `${passLabel || "Agent"} still running (${elapsedSec}s elapsed)`);
+        }, WORKFLOW_AGENT_HEARTBEAT_MS);
+
+        let result = null;
+        let success = false;
+        try {
+          if (
+            autoRecover &&
+            continueOnSession &&
+            sessionId &&
+            typeof agentPool.continueSession === "function"
+          ) {
+            ctx.log(node.id, `${passLabel} Recovery: continuing existing session ${sessionId}`.trim());
+            try {
+              result = await agentPool.continueSession(sessionId, continuePrompt, {
+                timeout: timeoutMs,
+                cwd,
+                sdk: sdkOverride,
+                model: modelOverride,
+              });
+              if (result?.success) {
+                ctx.log(node.id, `${passLabel} Recovery: continue-session succeeded`.trim());
+              } else {
+                ctx.log(
+                  node.id,
+                  `${passLabel} Recovery: continue-session failed (${result?.error || "unknown error"})`.trim(),
+                  "warn",
+                );
+                result = null;
+              }
+            } catch (err) {
               ctx.log(
                 node.id,
-                `Recovery: continue-session failed (${result?.error || "unknown error"})`,
+                `${passLabel} Recovery: continue-session threw (${err?.message || err})`.trim(),
                 "warn",
               );
               result = null;
             }
-          } catch (err) {
+          }
+
+          if (!result && autoRecover && typeof agentPool.execWithRetry === "function") {
             ctx.log(
               node.id,
-              `Recovery: continue-session threw (${err?.message || err})`,
-              "warn",
+              `${passLabel} Recovery: execWithRetry taskKey=${recoveryTaskKey} retries=${sessionRetries} continues=${maxContinues}`.trim(),
             );
-            result = null;
+            result = await agentPool.execWithRetry(passPrompt, {
+              taskKey: recoveryTaskKey,
+              cwd,
+              timeoutMs,
+              maxRetries: sessionRetries,
+              maxContinues,
+              sessionType: "flow",
+              sdk: sdkOverride,
+              model: modelOverride,
+            });
           }
+
+          if (!result && autoRecover && typeof agentPool.launchOrResumeThread === "function") {
+            ctx.log(node.id, `${passLabel} Recovery: launchOrResumeThread taskKey=${recoveryTaskKey}`.trim());
+            result = await agentPool.launchOrResumeThread(passPrompt, cwd, timeoutMs, {
+              taskKey: recoveryTaskKey,
+              sessionType: "flow",
+              sdk: sdkOverride,
+              model: modelOverride,
+            });
+          }
+
+          if (!result) {
+            result = await agentPool.launchEphemeralThread(passPrompt, cwd, timeoutMs, launchExtra);
+          }
+          success = result?.success === true;
+        } finally {
+          clearInterval(heartbeat);
         }
+        ctx.log(node.id, `${passLabel || "Agent"} completed: success=${success} streamEvents=${streamEventCount}`);
 
-        // Recovery step 2: session-aware retry chain (resume -> fresh -> fallback SDKs).
-        if (!result && autoRecover && typeof agentPool.execWithRetry === "function") {
-          ctx.log(
-            node.id,
-            `Recovery: execWithRetry taskKey=${recoveryTaskKey} retries=${sessionRetries} continues=${maxContinues}`,
-          );
-          result = await agentPool.execWithRetry(finalPrompt, {
-            taskKey: recoveryTaskKey,
-            cwd,
-            timeoutMs,
-            maxRetries: sessionRetries,
-            maxContinues,
-            sdk: sdkOverride,
-            model: modelOverride,
-          });
+        const threadId = result?.threadId || result?.sessionId || sessionId || null;
+        if (persistSession && threadId) {
+          ctx.data.sessionId = threadId;
+          ctx.data.threadId = threadId;
         }
+        const digest = buildAgentExecutionDigest(result, streamLines, maxRetainedEvents);
 
-        // Recovery step 3: best-effort launch/resume if execWithRetry is unavailable.
-        if (!result && autoRecover && typeof agentPool.launchOrResumeThread === "function") {
-          ctx.log(node.id, `Recovery: launchOrResumeThread taskKey=${recoveryTaskKey}`);
-          result = await agentPool.launchOrResumeThread(finalPrompt, cwd, timeoutMs, {
-            taskKey: recoveryTaskKey,
-            sdk: sdkOverride,
-            model: modelOverride,
-          });
+        if (!success) {
+          return {
+            success: false,
+            error:
+              result?.error ||
+              `Agent execution failed in node "${node.label || node.id}"`,
+            output: result?.output,
+            sdk: result?.sdk,
+            items: result?.items,
+            threadId,
+            sessionId: threadId,
+            attempts: result?.attempts,
+            continues: result?.continues,
+            resumed: result?.resumed,
+            summary: digest.summary,
+            narrative: digest.narrative,
+            thoughts: digest.thoughts,
+            stream: digest.stream,
+            itemCount: digest.itemCount,
+            omittedItemCount: digest.omittedItemCount,
+          };
         }
-
-        // Fallback: single launch (optionally resumes when session ID exists).
-        if (!result) {
-          result = await agentPool.launchEphemeralThread(finalPrompt, cwd, timeoutMs, launchExtra);
-        }
-        success = result?.success === true;
-      } finally {
-        clearInterval(heartbeat);
-      }
-      ctx.log(node.id, `Agent completed: success=${success} streamEvents=${streamEventCount}`);
-
-      // Propagate session/thread IDs for downstream chaining
-      const threadId = result?.threadId || result?.sessionId || sessionId || null;
-      if (threadId) {
-        ctx.data.sessionId = threadId;
-        ctx.data.threadId = threadId;
-      }
-      const digest = buildAgentExecutionDigest(result, streamLines, maxRetainedEvents);
-
-      if (!success) {
-        const errorMessage =
-          result?.error ||
-          `Agent execution failed in node "${node.label || node.id}"`;
-        if (node.config?.failOnError) throw new Error(errorMessage);
         return {
-          success: false,
-          error: errorMessage,
+          success: true,
           output: result?.output,
+          summary: digest.summary,
+          narrative: digest.narrative,
+          thoughts: digest.thoughts,
+          stream: digest.stream,
           sdk: result?.sdk,
-          items: result?.items,
+          items: digest.items,
+          itemCount: digest.itemCount,
+          omittedItemCount: digest.omittedItemCount,
           threadId,
           sessionId: threadId,
           attempts: result?.attempts,
           continues: result?.continues,
           resumed: result?.resumed,
         };
+      };
+
+      if (configuredCandidateCount <= 1) {
+        const singleResult = await runSinglePass(finalPrompt, { persistSession: true });
+        if (!singleResult.success && node.config?.failOnError) {
+          throw new Error(singleResult.error || "Agent execution failed");
+        }
+        return singleResult;
       }
 
-      return {
-        success: result.success,
-        output: result.output,
-        summary: digest.summary,
-        narrative: digest.narrative,
-        thoughts: digest.thoughts,
-        stream: digest.stream,
-        sdk: result.sdk,
-        items: digest.items,
-        itemCount: digest.itemCount,
-        omittedItemCount: digest.omittedItemCount,
-        threadId,
-        sessionId: threadId,
-        attempts: result?.attempts,
-        continues: result?.continues,
-        resumed: result?.resumed,
+      const repoGitReady = (() => {
+        try {
+          execSync("git rev-parse --is-inside-work-tree", {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 5000,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      if (!repoGitReady) {
+        ctx.log(
+          node.id,
+          `candidateCount=${configuredCandidateCount} requested but cwd is not a git repo. Falling back to single-pass.`,
+          "warn",
+        );
+        const fallbackResult = await runSinglePass(finalPrompt, { persistSession: true });
+        if (!fallbackResult.success && node.config?.failOnError) {
+          throw new Error(fallbackResult.error || "Agent execution failed");
+        }
+        return fallbackResult;
+      }
+
+      const originalSessionId = ctx.data?.sessionId || null;
+      const originalThreadId = ctx.data?.threadId || null;
+      const safeBranchPart = (value) =>
+        String(value || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9._/-]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 40) || "candidate";
+      const currentBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 5000,
+      }).trim();
+      const baselineHead = execSync("git rev-parse HEAD", {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 5000,
+      }).trim();
+      const batchToken = randomUUID().slice(0, 8);
+      const candidateRuns = [];
+
+      try {
+        for (let idx = 1; idx <= configuredCandidateCount; idx += 1) {
+          const candidateBranch =
+            `${safeBranchPart(currentBranch)}-cand-${idx}-${batchToken}`.slice(0, 120);
+          execSync(`git checkout -B "${candidateBranch}" "${baselineHead}"`, {
+            cwd,
+            stdio: ["ignore", "pipe", "pipe"],
+            encoding: "utf8",
+            timeout: 20000,
+          });
+          const suffix = candidatePromptTemplate
+            ? candidatePromptTemplate
+                .replace(/\{\{\s*candidateIndex\s*\}\}/g, String(idx))
+                .replace(/\{\{\s*candidateCount\s*\}\}/g, String(configuredCandidateCount))
+            : [
+                "",
+                `### Candidate Strategy ${idx}/${configuredCandidateCount}`,
+                "You are one candidate solution in a multi-candidate selection workflow.",
+                "Provide an end-to-end fix with clear verification; do not reference other candidates.",
+              ].join("\n");
+          const candidatePrompt = `${finalPrompt}\n${suffix}`;
+          ctx.log(node.id, `Candidate ${idx}/${configuredCandidateCount}: running on branch ${candidateBranch}`);
+          const run = await runSinglePass(candidatePrompt, {
+            persistSession: false,
+            autoRecover: false,
+            continueOnSession: false,
+            sessionId: null,
+            taskKey: `${ctx.data?._workflowId || "workflow"}:${ctx.id}:${node.id}:candidate:${idx}`,
+            passLabel: `[candidate ${idx}/${configuredCandidateCount}]`,
+          });
+          const postHead = execSync("git rev-parse HEAD", {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 5000,
+          }).trim();
+          const hasCommit = Boolean(postHead && baselineHead && postHead !== baselineHead);
+          const summaryLength = String(run?.summary || run?.output || "").trim().length;
+          const scoreBase = run.success ? 100 : 0;
+          const commitBonus = hasCommit ? 20 : 0;
+          const outputBonus = Math.min(20, Math.trunc(summaryLength / 80));
+          const score = scoreBase + commitBonus + outputBonus;
+          candidateRuns.push({
+            index: idx,
+            branch: candidateBranch,
+            head: postHead,
+            hasCommit,
+            score,
+            ...run,
+          });
+        }
+      } finally {
+        if (originalSessionId) ctx.data.sessionId = originalSessionId;
+        else delete ctx.data.sessionId;
+        if (originalThreadId) ctx.data.threadId = originalThreadId;
+        else delete ctx.data.threadId;
+      }
+
+      const selector = ["score", "first_success", "last_success"].includes(selectorMode)
+        ? selectorMode
+        : "score";
+      const successfulCandidates = candidateRuns.filter((entry) => entry.success === true);
+      let selected = null;
+      if (selector === "first_success") {
+        selected = successfulCandidates[0] || candidateRuns[0] || null;
+      } else if (selector === "last_success") {
+        selected =
+          (successfulCandidates.length
+            ? successfulCandidates[successfulCandidates.length - 1]
+            : null) ||
+          candidateRuns[candidateRuns.length - 1] ||
+          null;
+      } else {
+        selected = [...candidateRuns].sort((a, b) => {
+          if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+          if (Boolean(b.hasCommit) !== Boolean(a.hasCommit)) return b.hasCommit ? 1 : -1;
+          return (a.index || 0) - (b.index || 0);
+        })[0] || null;
+      }
+
+      if (!selected) {
+        const err = "Candidate selection failed: no candidate results produced";
+        if (node.config?.failOnError) throw new Error(err);
+        return { success: false, error: err };
+      }
+
+      const selectedHead = selected.hasCommit ? selected.head : baselineHead;
+      execSync(`git checkout -B "${currentBranch}" "${selectedHead}"`, {
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+        timeout: 20000,
+      });
+      for (const candidate of candidateRuns) {
+        if (!candidate?.branch) continue;
+        try {
+          execSync(`git branch -D "${candidate.branch}"`, {
+            cwd,
+            stdio: ["ignore", "pipe", "pipe"],
+            encoding: "utf8",
+            timeout: 10000,
+          });
+        } catch {
+          // best-effort cleanup only
+        }
+      }
+
+      if (selected?.threadId) {
+        ctx.data.sessionId = selected.threadId;
+        ctx.data.threadId = selected.threadId;
+      }
+      const selectionSummary = {
+        candidateCount: configuredCandidateCount,
+        selector,
+        selectedIndex: selected.index,
+        selectedScore: selected.score,
+        successfulCandidates: successfulCandidates.length,
+        selectedHasCommit: selected.hasCommit,
       };
+      ctx.data._agentCandidateSelection = selectionSummary;
+      ctx.log(
+        node.id,
+        `Candidate selector chose #${selected.index}/${configuredCandidateCount} (strategy=${selector}, success=${successfulCandidates.length})`,
+      );
+
+      const response = {
+        ...selected,
+        candidateSelection: selectionSummary,
+        candidates: candidateRuns.map((entry) => ({
+          index: entry.index,
+          success: entry.success === true,
+          hasCommit: Boolean(entry.hasCommit),
+          score: entry.score,
+          summary: trimLogText(entry.summary || entry.output || "", 240),
+          threadId: entry.threadId || null,
+          error: entry.success ? null : trimLogText(entry.error || "", 180) || null,
+        })),
+      };
+      if (!selected.success && node.config?.failOnError) {
+        throw new Error(selected.error || "All candidates failed");
+      }
+      return response;
     }
 
     // Fallback: shell-based execution
@@ -2952,6 +3278,113 @@ registerNodeType("transform.aggregate", {
   },
 });
 
+registerNodeType("transform.llm_parse", {
+  describe: () =>
+    "Parse unstructured LLM output into structured fields using regex patterns " +
+    "or keyword extraction. Essential for routing decisions based on LLM verdicts " +
+    "(e.g., PASS/FAIL/PARTIAL, correct/minor/critical).",
+  schema: {
+    type: "object",
+    properties: {
+      input: {
+        type: "string",
+        description: "Source text to parse — node ID, {{variable}}, or literal text",
+      },
+      field: {
+        type: "string",
+        default: "output",
+        description: "Field name within source node output (when input is a node ID)",
+      },
+      patterns: {
+        type: "object",
+        description:
+          "Map of field names to regex patterns. Each pattern is applied to the input; " +
+          "the first capture group (or full match) is stored under that key. " +
+          'Example: { "verdict": "\\\\b(PASS|FAIL|PARTIAL)\\\\b", "score": "score:\\\\s*(\\\\d+)" }',
+        additionalProperties: { type: "string" },
+      },
+      keywords: {
+        type: "object",
+        description:
+          "Map of field names to keyword lists. The first keyword found in the input is stored. " +
+          'Example: { "severity": ["critical", "minor", "correct"] }',
+        additionalProperties: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+      outputPort: {
+        type: "string",
+        description:
+          "Which parsed field to use as the matchedPort for downstream routing. " +
+          "If set, the value of that parsed field becomes the output port.",
+      },
+    },
+    required: [],
+  },
+  async execute(node, ctx) {
+    // Resolve the input text
+    let text = "";
+    const inputRef = ctx.resolve(node.config?.input || "");
+    const field = node.config?.field || "output";
+
+    if (inputRef && ctx.getNodeOutput(inputRef)) {
+      // Input is a node ID — grab the specified field
+      const nodeOutput = ctx.getNodeOutput(inputRef);
+      text = String(
+        nodeOutput?.[field] ?? nodeOutput?.reviewOutput ?? nodeOutput?.text ?? JSON.stringify(nodeOutput) ?? "",
+      );
+    } else {
+      // Input is a template/literal
+      text = String(inputRef || "");
+    }
+
+    const parsed = {};
+
+    // Apply regex patterns
+    const patterns = node.config?.patterns || {};
+    for (const [key, patternStr] of Object.entries(patterns)) {
+      try {
+        const regex = new RegExp(patternStr, "i");
+        const match = text.match(regex);
+        if (match) {
+          parsed[key] = match[1] !== undefined ? match[1] : match[0];
+        } else {
+          parsed[key] = null;
+        }
+      } catch (err) {
+        ctx.log(node.id, `Pattern "${key}" error: ${err.message}`, "warn");
+        parsed[key] = null;
+      }
+    }
+
+    // Apply keyword extraction
+    const keywords = node.config?.keywords || {};
+    const lowerText = text.toLowerCase();
+    for (const [key, wordList] of Object.entries(keywords)) {
+      if (!Array.isArray(wordList)) continue;
+      const found = wordList.find((w) => lowerText.includes(String(w).toLowerCase()));
+      parsed[key] = found || null;
+    }
+
+    // Determine output port for routing
+    const portField = node.config?.outputPort || "";
+    let matchedPort = "default";
+    if (portField && parsed[portField] != null) {
+      matchedPort = String(parsed[portField]).toLowerCase().trim();
+    }
+
+    ctx.log(node.id, `Parsed: ${JSON.stringify(parsed)}, port=${matchedPort}`);
+
+    return {
+      parsed,
+      matchedPort,
+      port: matchedPort,
+      inputLength: text.length,
+    };
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  NOTIFY — Notifications
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3659,6 +4092,142 @@ registerNodeType("loop.for_each", {
       results,
       successCount,
       failCount,
+    };
+  },
+});
+
+registerNodeType("loop.while", {
+  describe: () =>
+    "Repeat a sub-workflow until a condition evaluates to false or max iterations " +
+    "are reached. Enables convergence loops (generate→verify→revise) by executing " +
+    "a child workflow repeatedly and passing each iteration's output as input to the next.",
+  schema: {
+    type: "object",
+    properties: {
+      condition: {
+        type: "string",
+        description:
+          "JS expression evaluated AFTER each iteration. Loop continues while this is truthy. " +
+          "Access $data (accumulated state), $iteration (current 0-based index), $result (last iteration output).",
+      },
+      workflowId: { type: "string", description: "Sub-workflow to execute each iteration" },
+      maxIterations: { type: "number", default: 10, description: "Safety cap on total iterations" },
+      stateVariable: {
+        type: "string",
+        default: "loopState",
+        description: "Context key that accumulates state across iterations",
+      },
+      delayMs: { type: "number", default: 0, description: "Delay between iterations (ms)" },
+      earlyExitOn: {
+        type: "string",
+        enum: ["success", "failure", "never"],
+        default: "never",
+        description: "Stop early when sub-workflow succeeds or fails",
+      },
+    },
+    required: ["condition"],
+  },
+  async execute(node, ctx, engine) {
+    const condExpr = node.config?.condition || "false";
+    const subWorkflowId = ctx.resolve(node.config?.workflowId || "");
+    const maxIter = Math.max(1, Math.min(200, Number(node.config?.maxIterations) || 10));
+    const stateVar = node.config?.stateVariable || "loopState";
+    const delayMs = Math.max(0, Number(node.config?.delayMs) || 0);
+    const earlyExitOn = node.config?.earlyExitOn || "never";
+
+    const iterations = [];
+    let loopState = ctx.data[stateVar] || {};
+    let converged = false;
+    let lastResult = null;
+
+    for (let i = 0; i < maxIter; i++) {
+      ctx.log(node.id, `While-loop iteration ${i + 1}/${maxIter}`);
+
+      // Execute sub-workflow if specified
+      if (subWorkflowId && engine?.execute) {
+        const iterInput = {
+          ...ctx.data,
+          [stateVar]: loopState,
+          _whileIteration: i,
+          _whileMaxIterations: maxIter,
+          _previousAttempts: iterations.map((r) => r.output),
+        };
+
+        try {
+          const childCtx = await engine.execute(subWorkflowId, iterInput, { force: true });
+          const ok = !childCtx?.errors?.length;
+          const childOutputs = childCtx?.nodeOutputs
+            ? Object.fromEntries(childCtx.nodeOutputs)
+            : {};
+          lastResult = { success: ok, outputs: childOutputs, runId: childCtx?.id || null };
+
+          // Merge child outputs into loop state
+          loopState = { ...loopState, ...childOutputs, _lastSuccess: ok, _iteration: i };
+          iterations.push({ index: i, success: ok, output: childOutputs });
+
+          // Early exit
+          if (earlyExitOn === "success" && ok) {
+            ctx.log(node.id, `Early exit: sub-workflow succeeded on iteration ${i + 1}`);
+            converged = true;
+            break;
+          }
+          if (earlyExitOn === "failure" && !ok) {
+            ctx.log(node.id, `Early exit: sub-workflow failed on iteration ${i + 1}`);
+            converged = true;
+            break;
+          }
+        } catch (err) {
+          lastResult = { success: false, error: err.message };
+          iterations.push({ index: i, success: false, error: err.message });
+          loopState = { ...loopState, _lastSuccess: false, _lastError: err.message, _iteration: i };
+        }
+      } else {
+        // No sub-workflow — just evaluate condition each cycle (useful with
+        // back-edge patterns where downstream inline nodes modify context)
+        lastResult = { success: true, data: ctx.data };
+        loopState = { ...loopState, _iteration: i };
+        iterations.push({ index: i, success: true });
+      }
+
+      // Update context with accumulated state
+      ctx.data[stateVar] = loopState;
+
+      // Evaluate continue condition
+      try {
+        const fn = new Function("$data", "$iteration", "$result", "$state",
+          `return (${condExpr});`);
+        const shouldContinue = fn(ctx.data, i, lastResult, loopState);
+        if (!shouldContinue) {
+          ctx.log(node.id, `Condition false after iteration ${i + 1} — loop converged`);
+          converged = true;
+          break;
+        }
+      } catch (err) {
+        ctx.log(node.id, `Condition eval error: ${err.message} — stopping loop`, "warn");
+        converged = true;
+        break;
+      }
+
+      // Inter-iteration delay
+      if (delayMs > 0 && i < maxIter - 1) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    const totalIterations = iterations.length;
+    const successCount = iterations.filter((r) => r.success).length;
+    ctx.log(node.id,
+      `While-loop done: ${totalIterations} iteration(s), ${successCount} succeeded, converged=${converged}`);
+
+    return {
+      converged,
+      iterations: totalIterations,
+      maxIterations: maxIter,
+      successCount,
+      failCount: totalIterations - successCount,
+      results: iterations,
+      finalState: loopState,
+      lastResult,
     };
   },
 });
@@ -5467,6 +6036,190 @@ registerNodeType("action.push_branch", {
         branch: cleanBranch,
         remote,
         error: err.message?.slice(0, 500),
+      };
+    }
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WEB SEARCH — Structured web search for research workflows
+// ═══════════════════════════════════════════════════════════════════════════
+
+registerNodeType("action.web_search", {
+  describe: () =>
+    "Perform a structured web search query and return results. Useful for " +
+    "research workflows (e.g., Aletheia-style math/science agents) that need " +
+    "to navigate literature or verify claims against external sources.",
+  schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Search query (supports {{variables}})" },
+      maxResults: { type: "number", default: 5, description: "Maximum results to return" },
+      engine: {
+        type: "string",
+        enum: ["mcp", "fetch", "agent"],
+        default: "fetch",
+        description:
+          "Search method: 'mcp' uses registered MCP web search tool, " +
+          "'fetch' calls a search API directly, 'agent' delegates to an agent with web access",
+      },
+      extractContent: {
+        type: "boolean",
+        default: false,
+        description: "Fetch and extract text content from result URLs",
+      },
+      apiUrl: {
+        type: "string",
+        description: "Custom search API endpoint (for fetch engine)",
+      },
+    },
+    required: ["query"],
+  },
+  async execute(node, ctx, engine) {
+    const query = ctx.resolve(node.config?.query || "");
+    const maxResults = Math.max(1, Math.min(20, Number(node.config?.maxResults) || 5));
+    const searchEngine = node.config?.engine || "fetch";
+
+    if (!query) {
+      throw new Error("action.web_search: 'query' is required");
+    }
+
+    ctx.log(node.id, `Web search (${searchEngine}): "${query}" (max ${maxResults})`);
+
+    // ── MCP-based search ────────────────────────────────────────────────
+    if (searchEngine === "mcp") {
+      try {
+        const { getMcpRegistry } = await import("./mcp-registry.mjs");
+        const registry = getMcpRegistry?.();
+        if (registry?.callTool) {
+          const result = await registry.callTool("web_search", { query, maxResults });
+          const results = Array.isArray(result) ? result : result?.results || [result];
+          return {
+            success: true,
+            engine: "mcp",
+            query,
+            resultCount: results.length,
+            results: results.slice(0, maxResults),
+          };
+        }
+      } catch (err) {
+        ctx.log(node.id, `MCP search failed: ${err.message}, falling back to fetch`, "warn");
+      }
+    }
+
+    // ── Agent-based search ──────────────────────────────────────────────
+    if (searchEngine === "agent") {
+      const agentPool = engine?.services?.agentPool;
+      if (agentPool?.launchEphemeralThread) {
+        const searchPrompt =
+          `Search the web for: "${query}"\n\n` +
+          `Return the top ${maxResults} results as a JSON array of objects with ` +
+          `fields: title, url, snippet. Return ONLY the JSON array, no other text.`;
+        const result = await agentPool.launchEphemeralThread(
+          searchPrompt, process.cwd(), 120000,
+        );
+        let parsed = [];
+        try {
+          const jsonMatch = (result.output || "").match(/\[[\s\S]*\]/);
+          if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+        } catch { /* best-effort */ }
+        return {
+          success: true,
+          engine: "agent",
+          query,
+          resultCount: parsed.length,
+          results: parsed.slice(0, maxResults),
+          rawOutput: result.output?.slice(0, 2000),
+        };
+      }
+    }
+
+    // ── Fetch-based search (default) ────────────────────────────────────
+    try {
+      const { default: fetchFn } = await import("./fetch-runtime.mjs");
+      const fetch = fetchFn || globalThis.fetch;
+
+      // Use DuckDuckGo instant answer API (no API key required)
+      const apiUrl = node.config?.apiUrl ||
+        `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+
+      const response = await fetch(apiUrl, {
+        headers: { "User-Agent": "Bosun-Workflow/1.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      const data = await response.json();
+
+      const results = [];
+
+      // Parse DuckDuckGo response format
+      if (data.AbstractText) {
+        results.push({
+          title: data.Heading || query,
+          url: data.AbstractURL || "",
+          snippet: data.AbstractText,
+          source: data.AbstractSource || "DuckDuckGo",
+        });
+      }
+      for (const topic of data.RelatedTopics || []) {
+        if (results.length >= maxResults) break;
+        if (topic.Text) {
+          results.push({
+            title: topic.Text?.slice(0, 100),
+            url: topic.FirstURL || "",
+            snippet: topic.Text,
+          });
+        }
+        // Nested topics
+        for (const sub of topic.Topics || []) {
+          if (results.length >= maxResults) break;
+          if (sub.Text) {
+            results.push({
+              title: sub.Text?.slice(0, 100),
+              url: sub.FirstURL || "",
+              snippet: sub.Text,
+            });
+          }
+        }
+      }
+
+      // Extract content from URLs if requested
+      if (node.config?.extractContent && results.length > 0) {
+        for (let i = 0; i < Math.min(3, results.length); i++) {
+          if (!results[i].url) continue;
+          try {
+            const pageResp = await fetch(results[i].url, {
+              headers: { "User-Agent": "Bosun-Workflow/1.0" },
+              signal: AbortSignal.timeout(10000),
+            });
+            const html = await pageResp.text();
+            // Simple text extraction — strip tags
+            results[i].content = html
+              .replace(/<script[\s\S]*?<\/script>/gi, "")
+              .replace(/<style[\s\S]*?<\/style>/gi, "")
+              .replace(/<[^>]+>/g, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 5000);
+          } catch { /* best-effort */ }
+        }
+      }
+
+      return {
+        success: results.length > 0,
+        engine: "fetch",
+        query,
+        resultCount: results.length,
+        results,
+      };
+    } catch (err) {
+      ctx.log(node.id, `Fetch search failed: ${err.message}`, "warn");
+      return {
+        success: false,
+        engine: "fetch",
+        query,
+        resultCount: 0,
+        results: [],
+        error: err.message,
       };
     }
   },

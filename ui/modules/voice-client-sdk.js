@@ -75,6 +75,11 @@ let _assistantBaselineBeforeToolAck = "";
 const _sdkCapturedMicStreams = new Set();
 let _lastAutoBargeInAt = 0;
 const AUTO_BARGE_IN_COOLDOWN_MS = 700;
+let _traceTurnCounter = 0;
+let _traceCurrentTurnId = null;
+let _traceTurnActive = false;
+let _traceLlmFirstTokenMarked = false;
+let _traceTtsFirstAudioMarked = false;
 // Set to true by stopSdkVoiceSession() so that any in-flight getUserMedia
 // call in startAgentsSdkSession / startGeminiMicCapture releases the track
 // immediately instead of leaving the browser mic indicator active.
@@ -119,6 +124,91 @@ function maybeAutoInterruptSdkResponse(reason = "speech-started") {
   return true;
 }
 
+function _currentTraceSessionId() {
+  return String(_callContext?.sessionId || sdkVoiceSessionId.value || "").trim();
+}
+
+function _recordSdkTraceEvent(eventType, extra = {}) {
+  const sessionId = _currentTraceSessionId();
+  const normalizedEventType = String(eventType || "").trim();
+  if (!sessionId || !normalizedEventType) return;
+  const payload = {
+    sessionId,
+    turnId: String(extra?.turnId || _traceCurrentTurnId || "").trim() || null,
+    eventType: normalizedEventType,
+    source: "voice-client-sdk",
+    provider: String(extra?.provider || sdkVoiceProvider.value || "").trim() || undefined,
+    transport: String(extra?.transport || "sdk").trim() || "sdk",
+    reason: String(extra?.reason || "").trim() || undefined,
+    role: String(extra?.role || "").trim() || undefined,
+    timestamp: new Date().toISOString(),
+    meta: extra?.meta && typeof extra.meta === "object" ? extra.meta : undefined,
+  };
+  fetch("/api/voice/trace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch((err) => {
+    console.warn("[voice-client-sdk] trace persistence failed:", err?.message || err);
+  });
+}
+
+function _sdkTraceBeginTurn(eventType, extra = {}) {
+  if (_traceTurnActive && _traceCurrentTurnId) return;
+  _traceTurnCounter += 1;
+  _traceCurrentTurnId = `${_currentTraceSessionId() || "voice"}-turn-${Date.now()}-${_traceTurnCounter}`;
+  _traceTurnActive = true;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
+  _recordSdkTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _sdkTraceMarkLlmFirstToken(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId || _traceLlmFirstTokenMarked) return;
+  _traceLlmFirstTokenMarked = true;
+  _recordSdkTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _sdkTraceMarkTtsFirstAudio(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId || _traceTtsFirstAudioMarked) return;
+  _traceTtsFirstAudioMarked = true;
+  _recordSdkTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _sdkTraceEndTurn(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId) return;
+  _recordSdkTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+  _traceTurnActive = false;
+  _traceCurrentTurnId = null;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
+}
+
+function _sdkTraceInterrupt(eventType, extra = {}) {
+  _recordSdkTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+  if (_traceTurnActive) {
+    _sdkTraceEndTurn("turn_end", {
+      reason: "interrupted",
+      ...extra,
+    });
+  }
+}
+
 function _normalizeCallContext(options = {}) {
   return {
     sessionId: String(options?.sessionId || "").trim() || null,
@@ -151,6 +241,9 @@ function isNonFatalSdkSessionError(err) {
   if (lower.includes("not allowed for session-bound calls")) {
     return true;
   }
+  if (lower.includes("no active response found") || lower.includes("cancellation failed")) {
+    return true;
+  }
   if (!message) return false;
   // Seen during transient renegotiation on some browsers even when stream remains active.
   if (/setRemoteDescription/i.test(message) && /SessionDescription/i.test(message)) {
@@ -165,6 +258,11 @@ function isNonFatalSdkSessionError(err) {
     return true;
   }
   return false;
+}
+
+function isAzureGaRealtimeDeployment(deployment) {
+  const normalized = String(deployment || "").trim().toLowerCase();
+  return normalized.startsWith("gpt-realtime") && !normalized.startsWith("gpt-4o-realtime");
 }
 
 function isUsableAgentsRealtimeModule(mod) {
@@ -275,6 +373,11 @@ function _resetTranscriptPersistenceState() {
   }
   _awaitingToolCompletionAck = false;
   _assistantBaselineBeforeToolAck = "";
+  _traceTurnCounter = 0;
+  _traceCurrentTurnId = null;
+  _traceTurnActive = false;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
 }
 
 function _flushPendingTranscriptBuffers() {
@@ -376,10 +479,13 @@ function _scheduleAssistantTranscriptFinalize(text) {
     const finalText = String(_pendingAssistantTranscriptText || "").trim();
     if (!finalText) return;
     sdkVoiceState.value = "thinking";
+    _sdkTraceMarkLlmFirstToken("llm_first_token", { reason: "assistant_transcript.final" });
+    _sdkTraceMarkTtsFirstAudio("tts_first_audio", { reason: "assistant_transcript.final" });
     sdkVoiceResponse.value = finalText;
     emit("response-complete", { text: finalText });
     _persistTranscriptIfNew("assistant", finalText, "sdk.history_updated.assistant.final");
     _markAssistantToolResponseObserved(finalText);
+    _sdkTraceEndTurn("turn_end", { reason: "assistant_transcript.final" });
     sdkVoiceState.value = "listening";
   }, 700);
 }
@@ -460,13 +566,14 @@ async function startAgentsSdkSession(config, options = {}) {
           const message = String(result?.error || `Tool ${t.name} failed (${res.status})`).trim();
           throw new Error(message || `Tool ${t.name} failed`);
         }
-        return result.result || "No output";
+        // SDK expects string results — ensure we always return a string.
+        const output = result.result ?? result.output ?? "Done";
+        return typeof output === "string" ? output : JSON.stringify(output);
       };
 
-      // The @openai/agents SDK calls tool.invoke(runContext, inputString, details)
-      // where runContext is a RunContext object (contains context.history) and
-      // inputString is the raw JSON string of tool arguments from the model.
-      const invokeTool = async (_runContext, inputStr) => {
+      // The @openai/agents SDK calls invokeFunctionTool → tool.invoke(runContext, input, details)
+      // where input is the raw JSON string of tool arguments from the model.
+      const invokeTool = async (_runContext, inputStr, _details) => {
         let args = {};
         if (typeof inputStr === "string") {
           try { args = JSON.parse(inputStr || "{}"); } catch { args = {}; }
@@ -487,10 +594,8 @@ async function startAgentsSdkSession(config, options = {}) {
         name: t.name,
         description: t.description || "",
         parameters: t.parameters || { type: "object", properties: {} },
-        needsApproval() {
-          return false;
-        },
-        requiresApproval() {
+        // SDK calls: await tool.needsApproval(context, parsedArgs, callId)
+        async needsApproval() {
           return false;
         },
         execute: executeTool,
@@ -538,6 +643,8 @@ async function startAgentsSdkSession(config, options = {}) {
     model,
     config: {
       outputModalities: ["text", "audio"],
+      // Explicitly set toolChoice so the model proactively uses tools when appropriate.
+      toolChoice: "auto",
       audio: {
         input: {
           format: "pcm16",
@@ -577,6 +684,7 @@ async function startAgentsSdkSession(config, options = {}) {
     if (lastAssistantMsg) {
       const response = lastAssistantMsg.content?.map((c) => c.transcript || c.text || "").join("") || "";
       if (response) {
+        _sdkTraceMarkLlmFirstToken("llm_first_token", { reason: "history_updated.assistant" });
         _markAssistantToolResponseObserved(response);
         _scheduleAssistantTranscriptFinalize(response);
       }
@@ -586,18 +694,32 @@ async function startAgentsSdkSession(config, options = {}) {
   });
 
   session.on("audio_interrupted", () => {
+    _sdkTraceInterrupt("interrupt", { reason: "audio_interrupted" });
     sdkVoiceState.value = "listening";
     emit("interrupt", {});
   });
 
-  session.on("speech_started", () => {
-    maybeAutoInterruptSdkResponse("speech-started");
-    emit("speech-started", {});
+  // The SDK emits raw API events via "transport_event" — use it to detect user speech.
+  // "speech_started" is NOT a session-level event in @openai/agents SDK.
+  session.on("transport_event", (event) => {
+    const eventType = event?.type || "";
+    if (eventType === "input_audio_buffer.speech_started") {
+      _sdkTraceBeginTurn("turn_start", { reason: "speech_started" });
+      maybeAutoInterruptSdkResponse("speech-started");
+      emit("speech-started", {});
+    }
   });
 
-  session.on("tool_call_start", (event) => {
-    const callId = event?.callId || event?.call_id || `tc-${Date.now()}`;
-    const name = event?.name || event?.toolName || "unknown";
+  // ── Tool call events ──
+  // The @openai/agents SDK emits "agent_tool_start" and "agent_tool_end"
+  // (NOT "tool_call_start"/"tool_call_done"/"tool_call_error").
+  // Signature: (context, agent, tool, { toolCall }) for start,
+  //            (context, agent, tool, result, { toolCall }) for end.
+  session.on("agent_tool_start", (_ctx, _agent, tool, details) => {
+    const toolCall = details?.toolCall || {};
+    const callId = toolCall?.callId || toolCall?.call_id || `tc-${Date.now()}`;
+    const name = tool?.name || toolCall?.name || "unknown";
+    console.info(`[voice-client-sdk] tool call started: ${name} (${callId})`);
     sdkVoiceToolCalls.value = [
       ...sdkVoiceToolCalls.value,
       { callId, name, status: "running" },
@@ -606,8 +728,13 @@ async function startAgentsSdkSession(config, options = {}) {
     emit("tool-call-start", { callId, name });
   });
 
-  session.on("tool_call_done", (event) => {
-    const callId = event?.callId || event?.call_id;
+  session.on("agent_tool_end", (_ctx, _agent, tool, result, details) => {
+    const toolCall = details?.toolCall || {};
+    const callId = toolCall?.callId || toolCall?.call_id;
+    const resultPreview = typeof result === "string"
+      ? result.slice(0, 120) + (result.length > 120 ? "..." : "")
+      : "(non-string result)";
+    console.info(`[voice-client-sdk] tool call done: ${tool?.name} (${callId}) → ${resultPreview}`);
     sdkVoiceToolCalls.value = sdkVoiceToolCalls.value.map((tc) =>
       tc.callId === callId ? { ...tc, status: "complete" } : tc
     );
@@ -619,26 +746,30 @@ async function startAgentsSdkSession(config, options = {}) {
     if (!stillRunning) {
       _markToolCompletionPending();
     }
-    emit("tool-call-complete", { callId });
-  });
-
-  session.on("tool_call_error", (event) => {
-    const callId = event?.callId || event?.call_id;
-    const errMsg = String(event?.error?.message || event?.message || "Tool failed");
-    sdkVoiceToolCalls.value = sdkVoiceToolCalls.value.map((tc) =>
-      tc.callId === callId ? { ...tc, status: "error", error: errMsg } : tc
-    );
-    const stillRunning = sdkVoiceToolCalls.value.some((tc) => tc.status === "running");
-    if (!stillRunning && sdkVoiceState.value === "thinking") {
-      sdkVoiceState.value = "listening";
-    }
-    emit("tool-call-error", { callId, error: errMsg });
+    emit("tool-call-complete", { callId, name: tool?.name, result });
   });
 
   session.on("error", (err) => {
     const message = getSdkErrorMessage(err);
     if (isNonFatalSdkSessionError(err)) {
       console.warn("[voice-client-sdk] transient session warning:", message);
+      return;
+    }
+    // If we have running tool calls and get an error, mark them as failed.
+    // The SDK throws errors from tool invocation into the session error stream.
+    const runningTools = sdkVoiceToolCalls.value.filter((tc) => tc.status === "running");
+    if (runningTools.length > 0 && /tool|function/i.test(message)) {
+      sdkVoiceToolCalls.value = sdkVoiceToolCalls.value.map((tc) =>
+        tc.status === "running" ? { ...tc, status: "error", error: message } : tc
+      );
+      const stillRunning = sdkVoiceToolCalls.value.some((tc) => tc.status === "running");
+      if (!stillRunning && sdkVoiceState.value === "thinking") {
+        sdkVoiceState.value = "listening";
+      }
+      for (const tc of runningTools) {
+        emit("tool-call-error", { callId: tc.callId, name: tc.name, error: message });
+      }
+      // Don't propagate tool errors as fatal session errors
       return;
     }
     const currentState = String(sdkVoiceState.value || "").toLowerCase();
@@ -666,8 +797,10 @@ async function startAgentsSdkSession(config, options = {}) {
     connectOpts.url = explicitRealtimeUrl;
   } else if (tokenData.provider === "azure" && tokenData.azureEndpoint) {
     const endpoint = String(tokenData.azureEndpoint).replace(/\/+$/, "");
-    const deployment = tokenData.azureDeployment || "gpt-realtime-1.5";
-    connectOpts.url = `${endpoint}/openai/realtime?api-version=2025-04-01-preview&deployment=${deployment}`;
+    const deployment = String(tokenData.azureDeployment || tokenData.model || "gpt-realtime-1.5").trim();
+    connectOpts.url = isAzureGaRealtimeDeployment(deployment)
+      ? `${endpoint}/openai/v1/realtime?model=${encodeURIComponent(deployment)}`
+      : `${endpoint}/openai/realtime?api-version=2025-04-01-preview&deployment=${encodeURIComponent(deployment)}`;
   } else if (tokenData.provider === "openai") {
     const model = String(tokenData.model || resolvedConfig.model || "gpt-realtime-1.5").trim();
     connectOpts.url = `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
@@ -685,20 +818,30 @@ async function startAgentsSdkSession(config, options = {}) {
     // ignore URL logging issues
   }
 
-  // Attempt WebRTC connection first. For Azure, if it fails (404 — WebRTC not
-  // supported), retry with the WebSocket URL so the SDK uses WS transport.
+  // Attempt WebRTC connection first. For Azure 404 failures, signal legacy
+  // fallback so voice-client.js can use native browser WebSocket transport.
   // Wrap getUserMedia during connect so we can always stop SDK-owned mic tracks
   // on teardown, even if the SDK keeps hidden stream references.
   await _withGetUserMediaCapture(async () => {
+    const connectUrl = String(connectOpts.url || "").trim();
+    if (/^wss:/i.test(connectUrl)) {
+      const fallbackErr = new Error("Azure SDK connect requires WebRTC URL; fallback to legacy websocket transport");
+      fallbackErr.code = "AZURE_SDK_WSS_URL_UNSUPPORTED";
+      fallbackErr.fallbackToLegacy = true;
+      throw fallbackErr;
+    }
+
     try {
       await session.connect(connectOpts);
     } catch (connectErr) {
       const errMsg = String(connectErr?.message || "");
       const isWebRtc404 = /404|not found|SDP/i.test(errMsg);
-      const hasWsUrl = Boolean(String(tokenData?.wsUrl || "").trim());
-      if (isWebRtc404 && hasWsUrl && tokenData.provider === "azure") {
-        console.warn("[voice-client-sdk] WebRTC connect failed (404) — retrying via Azure WebSocket");
-        await session.connect({ ...connectOpts, url: tokenData.wsUrl });
+      if (tokenData.provider === "azure" && isWebRtc404) {
+        const fallbackErr = new Error("Azure WebRTC unavailable (404); fallback to legacy websocket transport");
+        fallbackErr.code = "AZURE_WEBRTC_404_FALLBACK";
+        fallbackErr.fallbackToLegacy = true;
+        fallbackErr.cause = connectErr;
+        throw fallbackErr;
       } else {
         throw connectErr;
       }
@@ -1000,10 +1143,12 @@ function handleGeminiServerEvent(msg) {
       break;
 
     case "transcript.assistant":
+      _sdkTraceMarkLlmFirstToken("llm_first_token", { reason: "gemini.transcript.assistant" });
       sdkVoiceResponse.value = msg.text || "";
       emit("response-complete", { text: msg.text });
       _persistTranscriptIfNew("assistant", msg.text, "gemini.assistant_transcript");
       _markAssistantToolResponseObserved(msg.text || "");
+      _sdkTraceEndTurn("turn_end", { reason: "gemini.transcript.assistant" });
       break;
 
     case "audio.delta":
@@ -1017,6 +1162,7 @@ function handleGeminiServerEvent(msg) {
       break;
 
     case "speech_started":
+      _sdkTraceBeginTurn("turn_start", { reason: "gemini.speech_started", transport: "websocket" });
       maybeAutoInterruptSdkResponse("speech-started");
       sdkVoiceState.value = "listening";
       emit("speech-started", {});
@@ -1092,6 +1238,7 @@ async function handleGeminiToolCall(msg) {
 function playGeminiAudio(data) {
   // Use Web Audio API to play PCM audio from Gemini
   try {
+    _sdkTraceMarkTtsFirstAudio("tts_first_audio", { reason: "gemini.audio.delta", transport: "websocket" });
     if (typeof AudioContext !== "undefined" || typeof webkitAudioContext !== "undefined") {
       const AudioCtx = globalThis.AudioContext || globalThis.webkitAudioContext;
       if (!playGeminiAudio._ctx) {
@@ -1178,6 +1325,9 @@ export async function startSdkVoiceSession(options = {}) {
       /SDK module unavailable in browser/i.test(reason) ||
       /Failed to resolve module specifier '@openai\/agents\/realtime'/i.test(reason) ||
       /Cannot find module '@openai\/agents\/realtime'/i.test(reason);
+    const expectedAzureFallback =
+      err?.code === "AZURE_WEBRTC_404_FALLBACK"
+      || err?.code === "AZURE_SDK_WSS_URL_UNSUPPORTED";
     if (expectedModuleMissing) {
       if (!_sdkModuleUnavailableLogged) {
         console.warn(
@@ -1185,6 +1335,8 @@ export async function startSdkVoiceSession(options = {}) {
         );
         _sdkModuleUnavailableLogged = true;
       }
+    } else if (expectedAzureFallback) {
+      console.warn("[voice-client-sdk] Azure SDK WebRTC unavailable; using legacy voice websocket transport.");
     } else {
       console.error("[voice-client-sdk] SDK session failed, signaling fallback:", err);
     }
@@ -1267,6 +1419,9 @@ export function stopSdkVoiceSession() {
     voiceAgentId: null,
   };
   _usingLegacyFallback = false;
+  if (_traceTurnActive) {
+    _sdkTraceEndTurn("turn_end", { reason: "session_ended" });
+  }
   _resetTranscriptPersistenceState();
 
   emit("session-ended", {});
@@ -1277,13 +1432,19 @@ export function stopSdkVoiceSession() {
  */
 export function interruptSdkResponse() {
   if (_session) {
+    // Always attempt to interrupt — don't gate on _traceTurnActive because
+    // the agent may be speaking audio even when turn tracking wasn't started.
     if (typeof _session.interrupt === "function") {
       // @openai/agents SDK
-      _session.interrupt();
+      try { _session.interrupt(); } catch { /* best effort */ }
+    } else if (typeof _session.cancelResponse === "function") {
+      try { _session.cancelResponse(); } catch { /* best effort */ }
     } else if (_session.readyState === WebSocket.OPEN) {
       // Gemini WebSocket
       _session.send(JSON.stringify({ type: "response.cancel" }));
     }
+    _sdkTraceInterrupt("interrupt", { reason: "interruptSdkResponse" });
+    sdkVoiceState.value = "listening";
     emit("interrupt", {});
   }
 }

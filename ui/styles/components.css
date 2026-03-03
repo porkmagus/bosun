@@ -1326,13 +1326,30 @@ select.input {
   animation: spin 0.8s linear infinite;
 }
 
+/* Pull arrow icon (used while dragging, before release) */
+.ptr-pull-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.ptr-pull-icon svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
 .modal-open .ptr-desktop-refresh {
   display: none;
 }
 
 @media (max-width: 768px) {
   .ptr-desktop-refresh {
-    display: none;
+    display: none !important;
   }
 }
 

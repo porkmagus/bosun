@@ -13,7 +13,10 @@ import {
   registerMicStream,
   stopTrackedMicStreams,
 } from "./mic-track-registry.js";
-import { shouldAutoBargeIn } from "./voice-barge-in.js";
+import {
+  shouldAutoBargeIn,
+  shouldAutoBargeInFromMicLevel,
+} from "./voice-barge-in.js";
 
 // ── State Signals ───────────────────────────────────────────────────────────
 
@@ -169,6 +172,13 @@ function _startMicLevelMonitor(stream) {
       const avg = sum / _micLevelAnalyser.buffer.length;
       const level = Math.min(1, avg / 128);
       micInputLevel.value = level;
+      if (shouldAutoBargeInFromMicLevel({
+        speaking: voiceState.value === "speaking",
+        level,
+        threshold: AUTO_BARGE_IN_MIC_LEVEL_THRESHOLD,
+      })) {
+        triggerAutoBargeIn("mic-level");
+      }
     }, 100);
   } catch {
     // AudioContext might not be available
@@ -231,10 +241,16 @@ let _assistantRespondedAfterTool = false;
 let _toolCompletionAckTimer = null;
 let _lastAutoBargeInAt = 0;
 let _autoBargeInTimer = null;
+let _traceTurnCounter = 0;
+let _traceCurrentTurnId = null;
+let _traceTurnActive = false;
+let _traceLlmFirstTokenMarked = false;
+let _traceTtsFirstAudioMarked = false;
 
 const RECONNECT_AT_MS = 28 * 60 * 1000; // 28 minutes
 const MAX_RECONNECT_ATTEMPTS = 3;
 const AUTO_BARGE_IN_COOLDOWN_MS = 700;
+const AUTO_BARGE_IN_MIC_LEVEL_THRESHOLD = 0.08;
 const AUTO_BARGE_IN_FADE_MS = 220;
 // Noise-control default: disable user-side live ASR transcript output/persistence.
 // Assistant response text remains enabled.
@@ -242,6 +258,10 @@ const ENABLE_USER_TRANSCRIPT = false;
 let _reconnectAttempts = 0;
 let _pendingResponseCreateTimer = null;
 let _awaitingAutoResponse = false;
+// When WebRTC returns 404 and we fall back to WebSocket, remember that so
+// reconnects skip the WebRTC SDP exchange and go straight to WebSocket.
+let _webrtcUnavailableForProvider = false;
+let _lastTokenData = null; // cached tokenData for reconnect short-circuiting
 const SpeechRecognition = typeof globalThis !== "undefined"
   ? (globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition)
   : null;
@@ -253,6 +273,98 @@ function _normalizeCallContext(options = {}) {
   const model = String(options?.model || "").trim() || null;
   const voiceAgentId = String(options?.voiceAgentId || "").trim() || null;
   return { sessionId, executor, mode, model, voiceAgentId };
+}
+
+function _isIgnorableNoActiveResponseError(event) {
+  const message = String(event?.error?.message || event?.message || "").trim().toLowerCase();
+  if (!message) return false;
+  return message.includes("no active response found")
+    || message.includes("cancellation failed: no active response found");
+}
+
+function _currentTraceSessionId() {
+  return String(_callContext?.sessionId || voiceSessionId.value || "").trim();
+}
+
+function _recordVoiceTraceEvent(eventType, extra = {}) {
+  const sessionId = _currentTraceSessionId();
+  const normalizedEventType = String(eventType || "").trim();
+  if (!sessionId || !normalizedEventType) return;
+  const payload = {
+    sessionId,
+    turnId: String(extra?.turnId || _traceCurrentTurnId || "").trim() || null,
+    eventType: normalizedEventType,
+    source: "voice-client",
+    provider: String(extra?.provider || "").trim() || undefined,
+    transport: String(extra?.transport || _transport || "").trim() || undefined,
+    reason: String(extra?.reason || "").trim() || undefined,
+    role: String(extra?.role || "").trim() || undefined,
+    timestamp: new Date().toISOString(),
+    meta: extra?.meta && typeof extra.meta === "object" ? extra.meta : undefined,
+  };
+  fetch("/api/voice/trace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch((err) => {
+    console.warn("[voice-client] trace persistence failed:", err?.message || err);
+  });
+}
+
+function _traceBeginTurn(eventType, extra = {}) {
+  if (_traceTurnActive && _traceCurrentTurnId) return;
+  _traceTurnCounter += 1;
+  _traceCurrentTurnId = `${_currentTraceSessionId() || "voice"}-turn-${Date.now()}-${_traceTurnCounter}`;
+  _traceTurnActive = true;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
+  _recordVoiceTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _traceMarkLlmFirstToken(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId || _traceLlmFirstTokenMarked) return;
+  _traceLlmFirstTokenMarked = true;
+  _recordVoiceTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _traceMarkTtsFirstAudio(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId || _traceTtsFirstAudioMarked) return;
+  _traceTtsFirstAudioMarked = true;
+  _recordVoiceTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+}
+
+function _traceEndTurn(eventType, extra = {}) {
+  if (!_traceTurnActive || !_traceCurrentTurnId) return;
+  _recordVoiceTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+  _traceTurnActive = false;
+  _traceCurrentTurnId = null;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
+}
+
+function _traceInterrupt(eventType, extra = {}) {
+  _recordVoiceTraceEvent(eventType, {
+    ...extra,
+    turnId: _traceCurrentTurnId,
+  });
+  if (_traceTurnActive) {
+    _traceEndTurn("turn_end", {
+      reason: "interrupted",
+      ...extra,
+    });
+  }
 }
 
 function _isResponsesAudioTransport(tokenData) {
@@ -330,6 +442,11 @@ async function _processResponsesAudioTurn(text) {
     throw new Error("Audio responses transport not initialized");
   }
 
+  _traceBeginTurn("turn_start", {
+    reason: "responses-audio.user_input",
+    provider: String(_responsesTokenData?.provider || "").trim() || undefined,
+  });
+
   voiceState.value = "thinking";
   if (ENABLE_USER_TRANSCRIPT) {
     voiceTranscript.value = inputText;
@@ -366,6 +483,9 @@ async function _processResponsesAudioTurn(text) {
   const data = await res.json();
   const responseText = String(data?.text || "").trim();
   if (responseText) {
+    _traceMarkLlmFirstToken("llm_first_token", {
+      reason: "responses-audio.text_received",
+    });
     voiceResponse.value = responseText;
     emit("response-complete", { text: responseText });
     _recordVoiceTranscriptIfNew("assistant", responseText, "responses-audio.assistant_output");
@@ -373,10 +493,16 @@ async function _processResponsesAudioTurn(text) {
 
   const audioBase64 = String(data?.audioBase64 || "").trim();
   if (audioBase64) {
+    _traceMarkTtsFirstAudio("tts_first_audio", {
+      reason: "responses-audio.audio_received",
+    });
     voiceState.value = "speaking";
     await _playResponsesAudio(audioBase64, data?.audioMimeType || "audio/mpeg");
   }
 
+  _traceEndTurn("turn_end", {
+    reason: "responses-audio.turn_completed",
+  });
   voiceResponse.value = "";
   voiceState.value = "listening";
 }
@@ -935,6 +1061,11 @@ export async function startVoiceSession(options = {}) {
   _assistantRespondedAfterTool = false;
   _clearToolCompletionAckTimer();
   _reconnectAttempts = 0;
+  _traceTurnCounter = 0;
+  _traceCurrentTurnId = null;
+  _traceTurnActive = false;
+  _traceLlmFirstTokenMarked = false;
+  _traceTtsFirstAudioMarked = false;
 
   try {
     // 1. Fetch ephemeral token
@@ -955,6 +1086,7 @@ export async function startVoiceSession(options = {}) {
       throw new Error(err.error || `Token fetch failed (${tokenRes.status})`);
     }
     const tokenData = await tokenRes.json();
+    _lastTokenData = tokenData;
     if (_isResponsesAudioTransport(tokenData)) {
       await _startResponsesAudioSession(tokenData);
       emit("session-started", {
@@ -964,6 +1096,46 @@ export async function startVoiceSession(options = {}) {
       });
       return;
     }
+
+    // If WebRTC was previously unavailable (404) and we have a WebSocket URL,
+    // skip the WebRTC SDP exchange entirely and go straight to WebSocket.
+    // This avoids redundant 404 errors on every reconnect.
+    if (_webrtcUnavailableForProvider && tokenData.wsUrl) {
+      console.info("[voice-client] Skipping WebRTC (previously unavailable) — using WebSocket directly");
+      // Still need mic
+      const mediaDevices = navigator?.mediaDevices;
+      if (!mediaDevices?.getUserMedia) {
+        throw new Error("Microphone API unavailable in this browser/runtime.");
+      }
+      _mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: selectedAudioInput.value ? { exact: selectedAudioInput.value } : undefined,
+          echoCancellation: audioSettings.value.echoCancellation,
+          noiseSuppression: audioSettings.value.noiseSuppression,
+          autoGainControl: audioSettings.value.autoGainControl,
+          sampleRate: audioSettings.value.sampleRate,
+        },
+      });
+      registerMicStream(_mediaStream);
+      if (_explicitStop) {
+        for (const track of _mediaStream.getTracks()) {
+          try { track.stop(); } catch { /* ignore */ }
+        }
+        _mediaStream = null;
+        throw new Error("voice session was stopped during microphone acquisition");
+      }
+      await enumerateAudioDevices();
+      _startMicLevelMonitor(_mediaStream);
+      await _startWebSocketTransport(tokenData, _mediaStream);
+      startReconnectTimer();
+      emit("session-started", {
+        sessionId: voiceSessionId.value,
+        callContext: { ..._callContext },
+        transport: "websocket",
+      });
+      return;
+    }
+
     _transport = "webrtc";
 
     // 2. Get microphone
@@ -1113,6 +1285,7 @@ export async function startVoiceSession(options = {}) {
         if (sdpResponse.status === 404 && tokenData.wsUrl) {
           console.warn("[voice-client] WebRTC SDP 404 — falling back to Azure WebSocket transport");
           webrtcFailed = true;
+          _webrtcUnavailableForProvider = true;
         } else {
           throw new Error(`WebRTC SDP exchange failed (${sdpResponse.status})${detail}`);
         }
@@ -1175,6 +1348,8 @@ export function stopVoiceSession() {
   voiceSessionId.value = null;
   voiceBoundSessionId.value = null;
   voiceDuration.value = 0;
+  _webrtcUnavailableForProvider = false;
+  _lastTokenData = null;
   _callContext = {
     sessionId: null,
     executor: null,
@@ -1197,6 +1372,7 @@ function handleServerEvent(event) {
       break;
 
     case "input_audio_buffer.speech_started":
+      _traceBeginTurn("turn_start", { reason: type });
       triggerAutoBargeIn("speech-started");
       voiceState.value = "listening";
       emit("speech-started", {});
@@ -1258,18 +1434,21 @@ function handleServerEvent(event) {
     }
 
     case "response.audio_transcript.delta":
+      _traceMarkLlmFirstToken("llm_first_token", { reason: type });
       _markAssistantToolResponseObserved();
       voiceResponse.value += event.delta || "";
       emit("response-delta", { delta: event.delta });
       break;
 
     case "response.text.delta":
+      _traceMarkLlmFirstToken("llm_first_token", { reason: type });
       _markAssistantToolResponseObserved();
       voiceResponse.value += event.delta || "";
       emit("response-delta", { delta: event.delta });
       break;
 
     case "response.output_text.delta":
+      _traceMarkLlmFirstToken("llm_first_token", { reason: type });
       _markAssistantToolResponseObserved();
       voiceResponse.value += event.delta || "";
       emit("response-delta", { delta: event.delta });
@@ -1283,6 +1462,7 @@ function handleServerEvent(event) {
         voiceResponse.value,
         "response.audio_transcript.done",
       );
+      _traceEndTurn("turn_end", { reason: type });
       voiceResponse.value = "";
       break;
 
@@ -1294,6 +1474,7 @@ function handleServerEvent(event) {
         voiceResponse.value,
         "response.text.done",
       );
+      _traceEndTurn("turn_end", { reason: type });
       voiceResponse.value = "";
       break;
 
@@ -1305,6 +1486,7 @@ function handleServerEvent(event) {
         voiceResponse.value,
         "response.output_text.done",
       );
+      _traceEndTurn("turn_end", { reason: type });
       voiceResponse.value = "";
       break;
 
@@ -1312,6 +1494,7 @@ function handleServerEvent(event) {
       // WebRTC: audio is handled via media tracks, not data channel.
       // WebSocket: audio deltas are handled in the ws.onmessage handler
       // before reaching handleServerEvent, so this case is a no-op.
+      _traceMarkTtsFirstAudio("tts_first_audio", { reason: type });
       break;
 
     case "conversation.item.input_audio_transcription.failed":
@@ -1361,10 +1544,14 @@ function handleServerEvent(event) {
       if (voiceState.value !== "listening") {
         voiceState.value = "connected";
       }
+      _traceEndTurn("turn_end", { reason: type });
       break;
 
     case "error":
       clearPendingResponseCreate();
+      if (_isIgnorableNoActiveResponseError(event)) {
+        break;
+      }
       console.error("[voice-client] Server error:", event.error);
       voiceError.value = event.error?.message || "Server error";
       emit("error", event.error);
@@ -1546,24 +1733,30 @@ export function interruptResponse() {
       } catch { /* ignore */ }
     }
     voiceState.value = "listening";
+    _traceInterrupt("interrupt", { reason: "responses-audio" });
     emit("interrupt", {});
     return;
   }
   // WebSocket transport: cancel response and clear playback queue
   if (_transport === "websocket") {
+    // Always send response.cancel when WebSocket is open — even if no turn
+    // is tracked, the server may still be streaming audio.
     _sendWsEvent({ type: "response.cancel" });
     _wsPlaybackQueue = [];
     _wsPlaybackPlaying = false;
     voiceState.value = "listening";
+    _traceInterrupt("interrupt", { reason: "websocket" });
     emit("interrupt", {});
     return;
   }
   if (_dc && _dc.readyState === "open") {
+    // Always send response.cancel for WebRTC — don't gate on _traceTurnActive
     _dc.send(JSON.stringify({ type: "response.cancel" }));
     if (_audioElement) {
       try { _audioElement.volume = 1; } catch { /* ignore */ }
     }
     voiceState.value = "listening";
+    _traceInterrupt("interrupt", { reason: "webrtc" });
     emit("interrupt", {});
   }
 }

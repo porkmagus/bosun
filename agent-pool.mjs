@@ -50,6 +50,8 @@ import {
   streamRetryDelay,
   MAX_STREAM_RETRIES,
 } from "./stream-resilience.mjs";
+import { compressAllItems, estimateSavings, estimateContextUsagePct, recordShreddingEvent } from "./context-cache.mjs";
+import { resolveContextShreddingOptions } from "./context-shredding-config.mjs";
 
 // Lazy-load MCP registry to avoid circular dependencies.
 // Cached at module scope per AGENTS.md hard rules.
@@ -99,7 +101,9 @@ const DEFAULT_MAX_ITEMS_PER_TURN = 600;
 const DEFAULT_MAX_ITEM_CHARS = 12_000;
 const TOOL_OUTPUT_GUARDRAIL = String.raw`
 
-[Tool Output Guardrail] Keep tool outputs compact: prefer narrow searches, bounded command output (for example head/tail), and summaries for large results instead of dumping full payloads.`;
+[Tool Output Guardrail] Keep tool outputs compact: prefer narrow searches, bounded command output (for example head/tail), and summaries for large results instead of dumping full payloads.
+[Context Cache] Older tool outputs are automatically compressed and cached to disk. If you see "[…compressed — full output: bosun --tool-log <ID>]" and need the full output, run that command to retrieve it.
+[Message Compression] Older agent reasoning and past user prompts are progressively compressed. Instruction-bearing content (AGENTS.md rules, system directives) is pinned and never compressed.`;
 
 function parseBoundedNumber(value, fallback, min, max) {
   const num = Number(value);
@@ -166,6 +170,81 @@ function truncateItemForStorage(item, maxChars) {
   }
 
   return next;
+}
+
+const SHORT_LIVED_SHREDDING_SESSION_TYPES = new Set([
+  "ephemeral",
+  "voice-delegate",
+  "voice-ask",
+  "voice-mcp",
+  "voice-workflow-generate",
+]);
+
+function normalizeSessionType(value, fallback = "task") {
+  const text = String(value || "").trim().toLowerCase();
+  return text || fallback;
+}
+
+function normalizeSdkForShredding(sdk) {
+  const raw = String(sdk || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw.endsWith("-sdk")) return raw;
+  if (raw === "codex") return "codex-sdk";
+  if (raw === "copilot") return "copilot-sdk";
+  if (raw === "claude") return "claude-sdk";
+  return raw;
+}
+
+function isShortLivedShreddingSession(sessionType) {
+  return SHORT_LIVED_SHREDDING_SESSION_TYPES.has(
+    normalizeSessionType(sessionType, "task"),
+  );
+}
+
+async function maybeCompressResultItems(
+  items,
+  {
+    sdk = "",
+    sessionType = "task",
+    allowCompression = true,
+    forceCompression = false,
+    skipCompression = false,
+  } = {},
+) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return items;
+  }
+  if (skipCompression) return items;
+  if (!allowCompression && !forceCompression) return items;
+  if (isShortLivedShreddingSession(sessionType) && !forceCompression) {
+    return items;
+  }
+
+  const resolvedSessionType = normalizeSessionType(sessionType, "task");
+  const agentType = normalizeSdkForShredding(sdk);
+  const shreddingOpts = resolveContextShreddingOptions(
+    resolvedSessionType,
+    agentType,
+  );
+  if (shreddingOpts?._skip === true) return items;
+
+  const usagePct = estimateContextUsagePct(items);
+  const threshold = Number.isFinite(shreddingOpts?.contextUsageThreshold)
+    ? Number(shreddingOpts.contextUsageThreshold)
+    : 0.5;
+  if (usagePct < threshold) return items;
+
+  shreddingOpts.contextUsagePct = usagePct;
+  const compressedItems = await compressAllItems(items, shreddingOpts);
+  try {
+    const savings = estimateSavings(items, compressedItems);
+    if (savings.savedChars > 0) {
+      recordShreddingEvent({ ...savings, agentType: agentType || sdk });
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return compressedItems;
 }
 
 function resolveCodexStreamSafety(totalTimeoutMs) {
@@ -2325,6 +2404,12 @@ export async function launchEphemeralThread(
  * @param {string}             [options.cwd]             Working directory override.
  * @param {string}             [options.sdk]             Force a specific SDK.
  * @param {string}             [options.model]           Force model for SDKs that support it.
+ * @param {string}             [options.sessionType]     Interaction type (task/chat/voice-delegate/etc) for shredding policy selection.
+ * @param {boolean}            [options.forceContextShredding] Force compression even for short-lived session types.
+ * @param {boolean}            [options.skipContextShredding]  Skip compression regardless of policy.
+ * @param {boolean}            [options.compressEphemeralItems]
+ *   Whether to apply context shredding/compression to ephemeral pooled runs.
+ *   Defaults to false for maximum fidelity in short-lived delegate calls.
  * @returns {Promise<{ finalResponse: string, items: Array, usage: object|null }>}
  */
 export async function execPooledPrompt(userMessage, options = {}) {
@@ -2335,6 +2420,10 @@ export async function execPooledPrompt(userMessage, options = {}) {
     cwd = REPO_ROOT,
     sdk,
     model,
+    sessionType = "ephemeral",
+    forceContextShredding = false,
+    skipContextShredding = false,
+    compressEphemeralItems = envFlagEnabled(process.env.AGENT_POOL_COMPRESS_EPHEMERAL_ITEMS),
     // statusData and sendRawEvents are accepted but not used — keeps the
     // call-site compatible with execPrimaryPrompt without modification.
   } = options;
@@ -2358,9 +2447,24 @@ export async function execPooledPrompt(userMessage, options = {}) {
     };
   }
 
+  let finalItems = result.items;
+  if (compressEphemeralItems || forceContextShredding) {
+    try {
+      finalItems = await maybeCompressResultItems(result.items, {
+        sdk: sdk || result.sdk,
+        sessionType,
+        allowCompression: true,
+        forceCompression: forceContextShredding,
+        skipCompression: skipContextShredding,
+      });
+    } catch (error_) {
+      console.warn(`${TAG} context compression failed (non-fatal): ${error_.message}`);
+    }
+  }
+
   return {
     finalResponse: result.output,
-    items: result.items,
+    items: finalItems,
     usage: null, // ephemeral threads don't aggregate usage today
   };
 }
@@ -2853,6 +2957,9 @@ async function resumeGenericThread(
  * @param {string}  [extra.taskKey]    Key for thread registry (task ID, PR number, etc.)
  * @param {string}  [extra.sdk]        Force a specific SDK.
  * @param {string}  [extra.model]      Force model for SDKs that support it.
+ * @param {string}  [extra.sessionType] Interaction type used for context-shredding policy lookup.
+ * @param {boolean} [extra.forceContextShredding] Force compression regardless of session type defaults.
+ * @param {boolean} [extra.skipContextShredding]  Skip compression regardless of policy.
  * @param {Function} [extra.onEvent]   Event callback.
  * @param {AbortController} [extra.abortController]
  * @returns {Promise<{ success: boolean, output: string, items: Array, error: string|null, sdk: string, threadId: string|null, resumed: boolean }>}
@@ -3144,6 +3251,23 @@ export async function launchOrResumeThread(
   threadRegistry.set(taskKey, record);
   saveThreadRegistry().catch(() => {});
 
+  // Apply tiered context compression for persistent threads
+  // Estimate context usage so shredding only kicks in above 50% fill.
+  if (result.success && Array.isArray(result.items) && result.items.length > 0) {
+    try {
+      const compressedItems = await maybeCompressResultItems(result.items, {
+        sdk: resultSdk,
+        sessionType: restExtra.sessionType || "task",
+        allowCompression: true,
+        forceCompression: restExtra.forceContextShredding === true,
+        skipCompression: restExtra.skipContextShredding === true,
+      });
+      return { ...result, items: compressedItems, threadId: finalThreadId, resumed: false };
+    } catch (compErr) {
+      console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
+    }
+  }
+
   return { ...result, threadId: finalThreadId, resumed: false };
 }
 
@@ -3193,6 +3317,7 @@ export async function execWithRetry(prompt, options = {}) {
     buildContinuePrompt,
     sdk,
     model,
+    sessionType = "task",
     onEvent,
     onAbortControllerReplaced,
   } = options;
@@ -3279,6 +3404,7 @@ export async function execWithRetry(prompt, options = {}) {
       taskKey,
       sdk,
       model,
+      sessionType,
       onEvent,
       abortController,
       ignoreSdkCooldown: attempt > 1,

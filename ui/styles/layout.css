@@ -695,6 +695,7 @@
     gap: var(--shell-gap);
     padding: var(--shell-gap);
     height: var(--viewport-stable-height);
+    overflow: hidden;
   }
 
   .app-shell[data-has-rail="false"] {
@@ -703,12 +704,12 @@
   }
 
   .app-shell[data-has-inspector="true"] {
-    grid-template-columns: var(--sidebar-width) var(--rail-width) minmax(0, 1fr) var(--inspector-width);
+    grid-template-columns: var(--sidebar-width) var(--rail-width) minmax(0, 1fr) max(200px, var(--inspector-width));
     grid-template-areas: "sidebar rail main inspector";
   }
 
   .app-shell[data-has-rail="false"][data-has-inspector="true"] {
-    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) max(200px, var(--inspector-width));
     grid-template-areas: "sidebar main inspector";
   }
 
@@ -756,6 +757,7 @@
     padding: 12px;
     gap: 12px;
     min-height: 0;
+    min-width: 200px;
     box-shadow: var(--shadow-sm);
     overflow-y: auto;
     overflow-x: hidden;
@@ -1011,7 +1013,8 @@
     border-radius: 12px;
     background: transparent;
     border: none;
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    opacity: 0.9;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -1031,6 +1034,7 @@
   .sidebar-nav-item span {
     font-size: 12px;
     letter-spacing: 0.01em;
+    color: inherit;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1041,6 +1045,7 @@
 .sidebar-nav-item:hover {
   background: var(--accent-subtle);
   color: var(--text-bright);
+  opacity: 1;
 }
 
 .sidebar-nav-item:focus-visible {
@@ -1051,6 +1056,7 @@
 .sidebar-nav-item.active {
   background: var(--bg-card-hover);
   color: var(--accent);
+  opacity: 1;
   box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.22);
 }
 
@@ -1214,7 +1220,10 @@
     max-width: none;
   }
 
-  /* Desktop: nav is hidden so no bottom reserve needed for chat */
+}
+
+@media (min-width: 1200px) {
+  /* Desktop: bottom nav is hidden, so remove reserved chat bottom padding. */
   .app-shell[data-tab="chat"] .main-content {
     padding-bottom: 0;
     /* flex:1 flows height down to the session-split so the input can stick */
@@ -1250,6 +1259,13 @@
 
 .app-shell[data-tab="chat"] .main-content > * {
   min-height: 0;
+}
+
+/* Prevent chat-input-area from collapsing on mobile — it must stay visible
+   above the bottom-nav, even when vertical space is tight. */
+.app-shell[data-tab="chat"] .main-content .chat-input-area {
+  flex: 0 0 auto;
+  min-height: auto;
 }
 
 @media (max-width: 768px) {
@@ -1402,6 +1418,50 @@ body.is-resizing * {
     max-height: 260px;
     overflow-y: auto;
   }
+}
+
+/* ── MUI nav icon sizing ─────────────────────────────────────────────────
+   The ICONS map returns bare <svg viewBox="0 0 24 24"> with no width/height.
+   Primary fix is in the MUI theme (mui.js styleOverrides); these rules are
+   fallback for any edge cases where theme styles aren't injected yet.
+ ──────────────────────────────────────────────────────────────────────── */
+
+/* Vertical sidebar Tabs — fallback */
+.sidebar .MuiTab-root {
+  flex-direction: row !important;
+  gap: 8px !important;
+  color: var(--text-primary) !important;
+  opacity: 0.95 !important;
+}
+
+.sidebar .MuiTab-root.Mui-selected {
+  color: var(--accent) !important;
+  opacity: 1 !important;
+}
+
+.sidebar .MuiTab-root:hover {
+  opacity: 1 !important;
+}
+.MuiTab-iconWrapper {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-shrink: 0 !important;
+  width: 20px !important;
+  height: 20px !important;
+  margin-bottom: 0 !important;
+  margin-right: 0 !important;
+}
+.MuiTab-iconWrapper svg {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Bottom Navigation — fallback */
+.MuiBottomNavigationAction-root svg {
+  width: 24px !important;
+  height: 24px !important;
+  flex-shrink: 0 !important;
 }
 
 /* ═══════════════════════════════════════════════════════

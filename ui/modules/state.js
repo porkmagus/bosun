@@ -127,6 +127,9 @@ export const telemetryErrors = signal([]);
 export const telemetryExecutors = signal({});
 export const telemetryAlerts = signal([]);
 
+// ── Context Shredding Telemetry
+export const shreddingTelemetry = signal(null);
+
 // ── Usage Analytics
 export const usageAnalytics = signal(null);
 
@@ -689,6 +692,12 @@ export async function loadTelemetryAlerts() {
   telemetryAlerts.value = res?.data ?? res ?? [];
   _cacheSet(url, telemetryAlerts.value);
   _markFresh("telemetry");
+}
+
+export async function loadShreddingTelemetry(days = 30) {
+  const url = `/api/telemetry/shredding?days=${days}`;
+  const res = await apiFetch(url, { _silent: true }).catch(() => ({ ok: false }));
+  shreddingTelemetry.value = res?.data ?? null;
 }
 
 /**

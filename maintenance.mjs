@@ -1338,6 +1338,15 @@ export async function runMaintenanceSweep(opts = {}) {
     /* best-effort */
   }
 
+  // Prune expired context cache entries (tool-log cache, 24h TTL)
+  let toolLogsPruned = 0;
+  try {
+    const { pruneToolLogCache } = await import("./context-cache.mjs");
+    toolLogsPruned = await pruneToolLogCache();
+  } catch (cacheErr) {
+    console.warn(`[maintenance] tool-log cache prune failed: ${cacheErr.message}`);
+  }
+
   const result = {
     staleKilled,
     pushesReaped,
@@ -1345,10 +1354,11 @@ export async function runMaintenanceSweep(opts = {}) {
     branchesSynced,
     tasksArchived,
     branchesDeleted,
+    toolLogsPruned,
   };
 
   console.log(
-    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted`,
+    `[maintenance] sweep complete: ${staleKilled} stale orchestrators, ${pushesReaped} stuck pushes, ${worktreesPruned} worktrees pruned, ${branchesSynced} branches synced, ${branchesDeleted} stale branches deleted, ${toolLogsPruned} tool-log cache entries pruned`,
   );
 
   // Emit workflow event so event-driven workflows can react to sweep results

@@ -106,6 +106,11 @@ import {
   TASK_BATCH_PR_TEMPLATE,
 } from "./workflow-templates/task-batch.mjs";
 
+// Research (iterative verification loops)
+import {
+  RESEARCH_AGENT_TEMPLATE,
+} from "./workflow-templates/research.mjs";
+
 // ── Re-export individual templates for direct import ────────────────────────
 
 export {
@@ -147,6 +152,7 @@ export {
   VE_ORCHESTRATOR_LITE_TEMPLATE,
   TASK_BATCH_PROCESSOR_TEMPLATE,
   TASK_BATCH_PR_TEMPLATE,
+  RESEARCH_AGENT_TEMPLATE,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -162,7 +168,8 @@ export const TEMPLATE_CATEGORIES = Object.freeze({
   reliability: { label: "Reliability",  icon: ":shield:", order: 5 },
   security:    { label: "Security",     icon: ":lock:", order: 6 },
   lifecycle:   { label: "Lifecycle",    icon: ":rocket:", order: 7 },
-  custom:      { label: "Custom",       icon: ":settings:", order: 8 },
+  research:    { label: "Research",     icon: ":microscope:", order: 8 },
+  custom:      { label: "Custom",       icon: ":settings:", order: 9 },
 });
 
 export const WORKFLOW_TEMPLATES = Object.freeze([
@@ -212,6 +219,8 @@ export const WORKFLOW_TEMPLATES = Object.freeze([
   // ── Task Batch (parallel dispatch) ──
   TASK_BATCH_PROCESSOR_TEMPLATE,
   TASK_BATCH_PR_TEMPLATE,
+  // ── Research (iterative verification loops) ──
+  RESEARCH_AGENT_TEMPLATE,
 ]);
 
 const _TEMPLATE_BY_ID = new Map(
@@ -644,6 +653,53 @@ export function expandTemplateGroups(templateIds) {
  * List all available templates with metadata.
  * @returns {Array<{id, name, description, category, tags, replaces?}>}
  */
+function inferVariableInputAndOptions(key, defaultValue) {
+  const normalized = String(key || "").trim().toLowerCase();
+  if (typeof defaultValue === "boolean") return { input: "toggle", options: [] };
+  if (typeof defaultValue === "number") return { input: "number", options: [] };
+  if (Array.isArray(defaultValue) || (defaultValue && typeof defaultValue === "object")) {
+    return { input: "json", options: [] };
+  }
+
+  const optionValues = [];
+  if (normalized.includes("executor") || normalized.includes("sdk")) {
+    optionValues.push("auto", "codex", "claude", "copilot");
+  } else if (normalized.includes("bumptype") || normalized.includes("bump_type")) {
+    optionValues.push("patch", "minor", "major");
+  }
+
+  if (typeof defaultValue === "string" && defaultValue.trim()) {
+    optionValues.unshift(defaultValue.trim());
+  }
+
+  const deduped = [];
+  for (const value of optionValues) {
+    if (!value) continue;
+    if (!deduped.includes(value)) deduped.push(value);
+  }
+  if (deduped.length > 0) {
+    return {
+      input: "select",
+      options: deduped.map((value) => ({ value, label: value })),
+    };
+  }
+
+  return { input: "text", options: [] };
+}
+
+function inferVariableDescription(key, defaultValue) {
+  const normalized = String(key || "").trim().toLowerCase();
+  if (normalized.includes("taskid") || normalized.includes("task_id")) return "Task identifier (for example TASK-123).";
+  if (normalized.includes("prompt") || normalized.includes("problem") || normalized.includes("description")) return "Free-form instruction text.";
+  if (normalized.includes("branch")) return "Git branch name.";
+  if (normalized.includes("timeout") || normalized.includes("delay") || normalized.includes("cooldown")) return "Duration in milliseconds.";
+  if (normalized.includes("executor") || normalized.includes("sdk")) return "Executor profile used by agent nodes.";
+  if (normalized.includes("model")) return "Model id used by agent nodes.";
+  if (typeof defaultValue === "boolean") return "Toggle this setting on or off.";
+  if (typeof defaultValue === "number") return "Numeric workflow setting.";
+  return "";
+}
+
 export function listTemplates() {
   return WORKFLOW_TEMPLATES.map((t) => {
     const cat = TEMPLATE_CATEGORIES[t.category] || TEMPLATE_CATEGORIES.custom;
@@ -664,6 +720,24 @@ export function listTemplates() {
       replaces: t.metadata?.replaces || null,
       recommended: t.recommended === true,
       enabled: t.enabled !== false,
+      trigger: t.trigger || null,
+      variables: t.variables && typeof t.variables === "object"
+        ? Object.entries(t.variables).map(([key, defaultValue]) => {
+            const required = defaultValue === "" || defaultValue == null;
+            const inferred = inferVariableInputAndOptions(key, defaultValue);
+            return {
+              key,
+              defaultValue,
+              required,
+              type: typeof defaultValue === "number"  ? "number"
+                  : typeof defaultValue === "boolean" ? "toggle"
+                  : "text",
+              input: inferred.input,
+              options: inferred.options,
+              description: inferVariableDescription(key, defaultValue),
+            };
+          })
+        : [],
     };
   });
 }

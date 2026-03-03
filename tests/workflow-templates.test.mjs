@@ -411,6 +411,35 @@ describe("template API functions", () => {
     }
   });
 
+  it("listTemplates exposes variables array with key/defaultValue/type", () => {
+    const list = listTemplates();
+    // At least some templates should have variables
+    const withVars = list.filter((t) => t.variables && t.variables.length > 0);
+    expect(withVars.length).toBeGreaterThan(0);
+
+    for (const item of withVars) {
+      for (const v of item.variables) {
+        expect(typeof v.key).toBe("string");
+        expect(v).toHaveProperty("defaultValue");
+        expect(["text", "number", "toggle"]).toContain(v.type);
+        expect(typeof v.required).toBe("boolean");
+        expect(["text", "number", "toggle", "json", "select"]).toContain(v.input);
+        expect(Array.isArray(v.options)).toBe(true);
+      }
+    }
+  });
+
+  it("listTemplates exposes trigger field from template definition", () => {
+    const list = listTemplates();
+    for (const item of list) {
+      // trigger should be present (either string/object or null)
+      expect(item).toHaveProperty("trigger");
+    }
+    // Find a template that has a trigger defined  
+    const withTrigger = list.filter((t) => t.trigger != null);
+    expect(withTrigger.length).toBeGreaterThan(0);
+  });
+
   it("recommended templates are marked correctly", () => {
     const list = listTemplates();
     const recommended = list.filter((t) => t.recommended);

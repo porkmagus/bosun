@@ -1,7 +1,7 @@
 {
   "name": "bosun",
-  "version": "0.37.2",
-  "description": "AI-powered orchestrator supervisor — manages AI agent executors with failover, auto-restarts on failure, analyzes crashes with Codex SDK, creates PRs via Vibe-Kanban API, and sends Telegram notifications. Supports N executors with weighted distribution, multi-repo projects, and auto-setup.",
+  "version": "0.38.0",
+  "description": "Bosun Autonomous Engineering — manages AI agent executors with failover, extremely powerful workflow builder, and a massive amount of included defaulte workflow templates for autonomous engineering, creates PRs via Vibe-Kanban API, and sends Telegram notifications. Supports N executors with weighted distribution, multi-repo projects, and auto-setup.",
   "type": "module",
   "license": "Apache 2.0",
   "author": "VirtEngine Maintainers <hello@virtengine.com>",
@@ -71,7 +71,8 @@
     "./task-cli": "./task-cli.mjs",
     "./github-auth-manager": "./github-auth-manager.mjs",
     "./git-commit-helpers": "./git-commit-helpers.mjs",
-    "./opencode-shell": "./opencode-shell.mjs"
+    "./opencode-shell": "./opencode-shell.mjs",
+    "./context-indexer": "./context-indexer.mjs"
   },
   "bin": {
     "bosun": "cli.mjs",
@@ -121,12 +122,16 @@
     "publish:minor:dry": "node publish.mjs --bump minor --dry-run",
     "publish:major:dry": "node publish.mjs --bump major --dry-run",
     "vendorsync": "node vendor-sync.mjs",
-    "vendor:sync": "node vendor-sync.mjs"
+    "vendor:sync": "node vendor-sync.mjs",
+    "bench:swebench:import": "node bench/swebench/bosun-swebench.mjs import",
+    "bench:swebench:export": "node bench/swebench/bosun-swebench.mjs export",
+    "bench:swebench:eval": "node bench/swebench/bosun-swebench.mjs eval"
   },
   "files": [
     ".env.example",
     "LICENSE",
     "README.md",
+    "agent-custom-tools.mjs",
     "agent-endpoint.mjs",
     "agent-event-bus.mjs",
     "agent-pool.mjs",
@@ -149,6 +154,9 @@
     "config.mjs",
     "config-doctor.mjs",
     "conflict-resolver.mjs",
+    "context-cache.mjs",
+    "context-indexer.mjs",
+    "context-shredding-config.mjs",
     "copilot-shell.mjs",
     "gemini-shell.mjs",
     "diff-stats.mjs",
@@ -246,6 +254,7 @@
     "agent-work-analyzer.mjs",
     "startup-service.mjs",
     "telegram-sentinel.mjs",
+    "telegram-poll-owner.mjs",
     "whatsapp-channel.mjs",
     "container-runner.mjs",
     "daemon-restart-policy.mjs",
@@ -261,9 +270,11 @@
     "workflow-templates/github.mjs",
     "workflow-templates/planning.mjs",
     "workflow-templates/reliability.mjs",
+    "workflow-templates/research.mjs",
     "workflow-templates/security.mjs",
     "workflow-templates/task-batch.mjs",
     "workflow-templates/task-lifecycle.mjs",
+    "tools/",
     "ui/vendor/"
   ],
   "dependencies": {
@@ -288,6 +299,13 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^5.18.0",
+    "@playwright/test": "^1.58.2",
+    "playwright": "^1.58.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "vitest": "^4.0.18"
   },
   "engines": {
