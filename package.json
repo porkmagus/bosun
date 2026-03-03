@@ -122,6 +122,10 @@
     "publish:major:dry": "node publish.mjs --bump major --dry-run",
     "vendorsync": "node vendor-sync.mjs",
     "vendor:sync": "node vendor-sync.mjs"
+    ,
+    "bench:swebench:import": "node bench/swebench/bosun-swebench.mjs import",
+    "bench:swebench:export": "node bench/swebench/bosun-swebench.mjs export",
+    "bench:swebench:eval": "node bench/swebench/bosun-swebench.mjs eval"
   },
   "files": [
     ".env.example",
@@ -150,6 +154,7 @@
     "config-doctor.mjs",
     "conflict-resolver.mjs",
     "context-cache.mjs",
+    "context-shredding-config.mjs",
     "copilot-shell.mjs",
     "gemini-shell.mjs",
     "diff-stats.mjs",
