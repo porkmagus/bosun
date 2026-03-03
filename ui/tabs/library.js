@@ -252,6 +252,7 @@ function injectStyles() {
  * ═══════════════════════════════════════════════════════════════ */
 
 const entries = signal([]);
+const allEntries = signal([]);
 const scopes = signal([]);
 const isLoading = signal(false);
 const initialized = signal(false);
@@ -460,7 +461,7 @@ const AUDIO_AGENT_TEMPLATES = Object.freeze({
  * ═══════════════════════════════════════════════════════════════ */
 
 function LibraryStats() {
-  const all = entries.value;
+  const all = allEntries.value;
   const counts = { prompt: 0, agent: 0, skill: 0, mcp: 0 };
   for (const e of all) { if (counts[e.type] !== undefined) counts[e.type]++; }
   return html`
@@ -1514,9 +1515,13 @@ export function LibraryTab() {
   const loadEntries = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchEntries(filterType.value);
-      entries.value = data;
-      initialized.value = data.length > 0;
+      const [filteredEntries, globalEntries] = await Promise.all([
+        fetchEntries(filterType.value),
+        apiFetch("/api/library").then((res) => res?.data || []),
+      ]);
+      entries.value = filteredEntries;
+      allEntries.value = globalEntries;
+      initialized.value = globalEntries.length > 0;
     } catch (err) {
       showToast("Failed to load library: " + err.message, "error");
     }

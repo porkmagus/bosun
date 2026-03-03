@@ -422,6 +422,9 @@ describe("template API functions", () => {
         expect(typeof v.key).toBe("string");
         expect(v).toHaveProperty("defaultValue");
         expect(["text", "number", "toggle"]).toContain(v.type);
+        expect(typeof v.required).toBe("boolean");
+        expect(["text", "number", "toggle", "json", "select"]).toContain(v.input);
+        expect(Array.isArray(v.options)).toBe(true);
       }
     }
   });

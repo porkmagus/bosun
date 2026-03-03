@@ -657,6 +657,139 @@ function inferHelpText(key, defaultValue) {
   return defaultValue ? `Default: ${defaultValue}` : "";
 }
 
+function isMissingValue(raw, inputKind) {
+  if (inputKind === "toggle") return false;
+  if (raw == null) return true;
+  if (typeof raw === "string") return raw.trim() === "";
+  if (Array.isArray(raw)) return raw.length === 0;
+  return false;
+}
+
+function isQuickKey(key) {
+  const k = String(key || "").toLowerCase();
+  return (
+    k.includes("task") ||
+    k.includes("prompt") ||
+    k.includes("problem") ||
+    k.includes("goal") ||
+    k.includes("message") ||
+    k.includes("query") ||
+    k.includes("executor") ||
+    k.includes("sdk") ||
+    k.includes("model") ||
+    k.includes("branch") ||
+    k.includes("title")
+  );
+}
+
+function isLongTextKey(key, defaultValue) {
+  const k = String(key || "").toLowerCase();
+  return (
+    k.includes("problem") ||
+    k.includes("prompt") ||
+    k.includes("description") ||
+    k.includes("instructions") ||
+    k.includes("message") ||
+    k.includes("body") ||
+    (typeof defaultValue === "string" && defaultValue.length > 80)
+  );
+}
+
+function normalizeOptions(options) {
+  if (!Array.isArray(options) || options.length === 0) return [];
+  const normalized = [];
+  for (const opt of options) {
+    if (opt && typeof opt === "object" && "value" in opt) {
+      normalized.push({ value: opt.value, label: String(opt.label ?? opt.value) });
+      continue;
+    }
+    normalized.push({ value: opt, label: String(opt) });
+  }
+  const deduped = [];
+  const seen = new Set();
+  for (const opt of normalized) {
+    const key = String(opt.value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(opt);
+  }
+  return deduped;
+}
+
+function inferOptionsFromKey(key, defaultValue) {
+  const k = String(key || "").toLowerCase();
+  const values = [];
+  if (k.includes("executor") || k.includes("sdk")) {
+    values.push("auto", "codex", "claude", "copilot");
+  } else if (k.includes("bumptype") || k.includes("bump_type")) {
+    values.push("patch", "minor", "major");
+  }
+  if (typeof defaultValue === "string" && defaultValue.trim()) {
+    values.unshift(defaultValue.trim());
+  }
+  return normalizeOptions(values);
+}
+
+function formatValuePreview(value) {
+  if (value == null) return "empty";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "empty";
+    return trimmed.length > 44 ? `${trimmed.slice(0, 44)}…` : trimmed;
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  try {
+    const json = JSON.stringify(value);
+    return json.length > 44 ? `${json.slice(0, 44)}…` : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function buildVariableDescriptor(variable) {
+  const key = String(variable?.key || "");
+  const defaultValue = variable?.defaultValue;
+  const type = variable?.type || (
+    typeof defaultValue === "number"
+      ? "number"
+      : typeof defaultValue === "boolean"
+      ? "toggle"
+      : "text"
+  );
+  const required = variable?.required === true || defaultValue === "" || defaultValue == null;
+  const backendOptions = normalizeOptions(variable?.options);
+  const inferredOptions = inferOptionsFromKey(key, defaultValue);
+  const options = backendOptions.length > 0 ? backendOptions : inferredOptions;
+  let inputKind = variable?.input;
+  if (!inputKind) {
+    if (type === "toggle") inputKind = "toggle";
+    else if (type === "number") inputKind = "number";
+    else if (Array.isArray(defaultValue) || (defaultValue && typeof defaultValue === "object")) inputKind = "json";
+    else if (options.length > 0) inputKind = "select";
+    else if (isLongTextKey(key, defaultValue)) inputKind = "textarea";
+    else inputKind = "text";
+  }
+
+  const defaultFieldValue =
+    inputKind === "json" && defaultValue != null
+      ? JSON.stringify(defaultValue, null, 2)
+      : (defaultValue ?? "");
+
+  return {
+    ...variable,
+    key,
+    label: humanizeKey(key),
+    required,
+    type,
+    inputKind,
+    options,
+    helpText: variable?.description || inferHelpText(key, defaultValue),
+    defaultFieldValue,
+    isQuick: required || isQuickKey(key),
+  };
+}
+
 /**
  * Workflow template card for the launcher grid.
  */
@@ -739,42 +872,115 @@ function WfTemplateCard({ template, onClick }) {
  * Workflow launch form — auto-renders fields from template variables.
  */
 function WfLaunchForm({ template, onBack }) {
+  const vars = template.variables || [];
+  const descriptors = useMemo(() => vars.map(buildVariableDescriptor), [vars]);
+
   const [formValues, setFormValues] = useState(() => {
     const defaults = {};
-    for (const v of template.variables || []) {
-      defaults[v.key] = v.defaultValue !== undefined ? v.defaultValue : "";
+    for (const desc of descriptors) {
+      defaults[desc.key] = desc.defaultFieldValue;
     }
     return defaults;
   });
-  const [expanded, setExpanded] = useState(() => {
-    // Auto-expand if there are 5 or fewer params, or if any param lacks a default
-    const vars = template.variables || [];
-    return vars.length <= 5 || vars.some((v) => v.defaultValue === "" || v.defaultValue == null);
+  const [launchMode, setLaunchMode] = useState(() => {
+    const requiredCount = descriptors.filter((v) => v.required).length;
+    return requiredCount > 0 ? "quick" : "advanced";
   });
+  const [expanded, setExpanded] = useState(() => descriptors.length <= 5);
 
   const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
+
+  const requiredVars = useMemo(
+    () => descriptors.filter((v) => v.required),
+    [descriptors],
+  );
+  const optionalVars = useMemo(
+    () => descriptors.filter((v) => !v.required),
+    [descriptors],
+  );
+  const quickOptionalVars = useMemo(
+    () => optionalVars.filter((v) => v.isQuick).slice(0, 4),
+    [optionalVars],
+  );
+  const quickVars = useMemo(
+    () => [...requiredVars, ...quickOptionalVars.filter((v) => !requiredVars.some((r) => r.key === v.key))],
+    [requiredVars, quickOptionalVars],
+  );
 
   const handleChange = useCallback((key, value) => {
     setFormValues((prev) => ({ ...prev, [key]: value }));
   }, []);
 
+  const validation = useMemo(() => {
+    const missing = [];
+    const invalid = [];
+
+    for (const desc of descriptors) {
+      const current = formValues[desc.key];
+      if (desc.required && isMissingValue(current, desc.inputKind)) {
+        missing.push(desc.label);
+      }
+      if (desc.inputKind === "json" && !isMissingValue(current, desc.inputKind)) {
+        try {
+          JSON.parse(String(current));
+        } catch {
+          invalid.push(desc.label);
+        }
+      }
+    }
+    return { missing, invalid };
+  }, [descriptors, formValues]);
+
+  const canLaunch = !wfLaunching.value && validation.missing.length === 0 && validation.invalid.length === 0;
+
+  const effectiveOptional = useMemo(() => {
+    return optionalVars.map((desc) => ({
+      key: desc.key,
+      label: desc.label,
+      value: formValues[desc.key],
+    }));
+  }, [optionalVars, formValues]);
+
+  const buildLaunchPayload = useCallback(() => {
+    const payload = {};
+    for (const desc of descriptors) {
+      const current = formValues[desc.key];
+      if (desc.inputKind === "json") {
+        if (isMissingValue(current, desc.inputKind)) {
+          payload[desc.key] = "";
+        } else {
+          payload[desc.key] = JSON.parse(String(current));
+        }
+        continue;
+      }
+      if (desc.inputKind === "number") {
+        payload[desc.key] = current === "" || current == null ? "" : Number(current);
+        continue;
+      }
+      if (desc.inputKind === "toggle") {
+        payload[desc.key] = !!current;
+        continue;
+      }
+      payload[desc.key] = current;
+    }
+    return payload;
+  }, [descriptors, formValues]);
+
   const handleLaunch = useCallback(async () => {
+    if (!canLaunch) return;
     haptic();
-    await launchWorkflowTemplate(template.id, formValues);
-  }, [template.id, formValues]);
+    const payload = buildLaunchPayload();
+    await launchWorkflowTemplate(template.id, payload);
+  }, [buildLaunchPayload, canLaunch, template.id]);
 
   const handleReset = useCallback(() => {
     const defaults = {};
-    for (const v of template.variables || []) {
-      defaults[v.key] = v.defaultValue !== undefined ? v.defaultValue : "";
+    for (const desc of descriptors) {
+      defaults[desc.key] = desc.defaultFieldValue;
     }
     setFormValues(defaults);
-  }, [template.variables]);
-
-  const vars = template.variables || [];
-  // Separate required-feeling params (empty defaults) from optional
-  const requiredVars = vars.filter((v) => v.defaultValue === "" || v.defaultValue == null);
-  const optionalVars = vars.filter((v) => v.defaultValue !== "" && v.defaultValue != null);
+    setLaunchMode(requiredVars.length > 0 ? "quick" : "advanced");
+  }, [descriptors, requiredVars.length]);
 
   return html`
     <div>
@@ -826,7 +1032,7 @@ function WfLaunchForm({ template, onBack }) {
         <${Stack} direction="row" alignItems="center" justifyContent="space-between" sx=${{ mb: 2 }}>
           <${Typography} variant="subtitle2" fontWeight=${600}>
             ${vars.length > 0
-              ? "Parameters"
+              ? "Launch Configuration"
               : "No Configurable Parameters"}
           </${Typography}>
           ${vars.length > 0 && html`
@@ -845,42 +1051,115 @@ function WfLaunchForm({ template, onBack }) {
           </${Alert}>
         `}
 
-        <!-- Required params (always visible) -->
-        ${requiredVars.map((v) => html`
-          <${WfParamField}
-            key=${v.key}
-            variable=${v}
-            value=${formValues[v.key]}
-            onChange=${handleChange}
-            required=${true}
-          />
-        `)}
-
-        <!-- Optional params (collapsible if many) -->
-        ${optionalVars.length > 0 && requiredVars.length > 0 && html`
-          <${Divider} sx=${{ my: 2 }}>
-            <${Chip} label=${`${optionalVars.length} optional parameter${optionalVars.length !== 1 ? "s" : ""}`}
-              size="small" variant="outlined" sx=${{ fontSize: "10px" }}
-              onClick=${() => setExpanded(!expanded)} />
-          </${Divider}>
+        ${vars.length > 0 && html`
+          <${Tabs}
+            value=${launchMode}
+            onChange=${(_e, next) => setLaunchMode(next)}
+            variant="fullWidth"
+            sx=${{ mb: 2, minHeight: 38, "& .MuiTab-root": { minHeight: 38, textTransform: "none", fontSize: "0.8rem" } }}
+          >
+            <${Tab} value="quick" label=${`Quick (${quickVars.length})`} />
+            <${Tab} value="advanced" label=${`Advanced (${descriptors.length})`} />
+          </${Tabs}>
         `}
 
-        ${(expanded || requiredVars.length === 0) && optionalVars.map((v) => html`
-          <${WfParamField}
-            key=${v.key}
-            variable=${v}
-            value=${formValues[v.key]}
-            onChange=${handleChange}
-            required=${false}
-          />
-        `)}
+        ${validation.missing.length > 0 && html`
+          <${Alert} severity="warning" sx=${{ mb: 2 }}>
+            Missing required fields: ${validation.missing.join(", ")}
+          </${Alert}>
+        `}
+        ${validation.invalid.length > 0 && html`
+          <${Alert} severity="error" sx=${{ mb: 2 }}>
+            Invalid JSON in: ${validation.invalid.join(", ")}
+          </${Alert}>
+        `}
 
-        ${!expanded && optionalVars.length > 0 && requiredVars.length > 0 && html`
-          <${Button} fullWidth size="small" variant="text"
-            onClick=${() => setExpanded(true)}
-            sx=${{ textTransform: "none", mt: 1, color: "text.secondary" }}>
-            Show ${optionalVars.length} optional parameters...
-          </${Button}>
+        ${launchMode === "quick" && html`
+          ${quickVars.map((v) => html`
+            <${WfParamField}
+              key=${v.key}
+              descriptor=${v}
+              value=${formValues[v.key]}
+              onChange=${handleChange}
+            />
+          `)}
+
+          ${optionalVars.length > 0 && html`
+            <${Divider} sx=${{ my: 2 }}>
+              <${Chip} size="small" variant="outlined" label=${`${optionalVars.length} optional default${optionalVars.length !== 1 ? "s" : ""}`} sx=${{ fontSize: "10px" }} />
+            </${Divider}>
+            <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+              Advanced mode lets you override these values.
+            </${Typography}>
+            <${Box} sx=${{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
+              ${effectiveOptional.map((entry) => html`
+                <${Chip}
+                  key=${entry.key}
+                  size="small"
+                  variant="outlined"
+                  label=${`${entry.label}: ${formatValuePreview(entry.value)}`}
+                  sx=${{ fontSize: "10px", maxWidth: "100%" }}
+                />
+              `)}
+            </${Box}>
+            <${Button}
+              size="small"
+              variant="text"
+              onClick=${() => setLaunchMode("advanced")}
+              sx=${{ textTransform: "none", mt: 1.5 }}
+            >
+              Switch to Advanced
+            </${Button}>
+          `}
+        `}
+
+        ${launchMode === "advanced" && html`
+          ${requiredVars.length > 0 && html`
+            <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+              Required
+            </${Typography}>
+            ${requiredVars.map((v) => html`
+              <${WfParamField}
+                key=${v.key}
+                descriptor=${v}
+                value=${formValues[v.key]}
+                onChange=${handleChange}
+              />
+            `)}
+          `}
+
+          ${optionalVars.length > 0 && requiredVars.length > 0 && html`
+            <${Divider} sx=${{ my: 2 }}>
+              <${Chip}
+                label=${`${optionalVars.length} optional parameter${optionalVars.length !== 1 ? "s" : ""}`}
+                size="small"
+                variant="outlined"
+                sx=${{ fontSize: "10px", cursor: "pointer" }}
+                onClick=${() => setExpanded(!expanded)}
+              />
+            </${Divider}>
+          `}
+
+          ${(expanded || requiredVars.length === 0) && optionalVars.map((v) => html`
+            <${WfParamField}
+              key=${v.key}
+              descriptor=${v}
+              value=${formValues[v.key]}
+              onChange=${handleChange}
+            />
+          `)}
+
+          ${!expanded && optionalVars.length > 0 && requiredVars.length > 0 && html`
+            <${Button}
+              fullWidth
+              size="small"
+              variant="text"
+              onClick=${() => setExpanded(true)}
+              sx=${{ textTransform: "none", mt: 1, color: "text.secondary" }}
+            >
+              Show ${optionalVars.length} optional parameters...
+            </${Button}>
+          `}
         `}
 
         <${Divider} sx=${{ my: 2.5 }} />
@@ -895,7 +1174,7 @@ function WfLaunchForm({ template, onBack }) {
           <${Button}
             variant="contained"
             onClick=${handleLaunch}
-            disabled=${wfLaunching.value}
+            disabled=${!canLaunch}
             startIcon=${wfLaunching.value
               ? html`<${CircularProgress} size=${16} color="inherit" />`
               : html`<span class="icon-inline">${resolveIcon("play")}</span>`}
@@ -963,13 +1242,23 @@ function WfLaunchForm({ template, onBack }) {
 /**
  * Auto-generated parameter field from workflow template variable definition.
  */
-function WfParamField({ variable, value, onChange, required }) {
-  const { key, defaultValue, type } = variable;
-  const label = humanizeKey(key);
-  const help = inferHelpText(key, defaultValue);
-  const currentValue = value !== undefined ? value : (defaultValue ?? "");
+function WfParamField({ descriptor, value, onChange }) {
+  const {
+    key,
+    label,
+    required,
+    defaultValue,
+    inputKind,
+    options,
+    helpText,
+  } = descriptor;
+  const currentValue = value !== undefined ? value : descriptor.defaultFieldValue;
+  const [forceText, setForceText] = useState(() => {
+    if (inputKind !== "select") return false;
+    return !options.some((opt) => String(opt.value) === String(currentValue ?? ""));
+  });
 
-  if (type === "toggle") {
+  if (inputKind === "toggle") {
     return html`
       <${Box} sx=${{ mb: 2 }}>
         <${FormControlLabel}
@@ -980,28 +1269,70 @@ function WfParamField({ variable, value, onChange, required }) {
           />`}
           label=${html`<span>${label}${required ? html` <span style="color: #ef4444">*</span>` : ""}</span>`}
         />
-        ${help && html`<${Typography} variant="caption" display="block" color="text.secondary" sx=${{ ml: 4.5, mt: -0.5 }}>${help}</${Typography}>`}
+        ${helpText && html`<${Typography} variant="caption" display="block" color="text.secondary" sx=${{ ml: 4.5, mt: -0.5 }}>${helpText}</${Typography}>`}
       </${Box}>
     `;
   }
 
-  if (type === "number") {
+  if (inputKind === "number") {
     return html`
       <${TextField}
         fullWidth size="small" type="number"
         label=${label + (required ? " *" : "")}
         value=${currentValue}
-        onChange=${(e) => onChange(key, Number(e.target.value))}
-        helperText=${help}
+        onChange=${(e) => onChange(key, e.target.value === "" ? "" : Number(e.target.value))}
+        helperText=${helpText}
         sx=${{ mb: 2 }}
       />
     `;
   }
 
-  // Default: text field (with multiline for long defaults or keys like "problem", "prompt", etc.)
-  const isLongText = key.toLowerCase().includes("problem") || key.toLowerCase().includes("prompt")
-    || key.toLowerCase().includes("description") || key.toLowerCase().includes("instructions")
-    || (typeof defaultValue === "string" && defaultValue.length > 80);
+  if (inputKind === "json") {
+    return html`
+      <${TextField}
+        fullWidth size="small" multiline rows=${4}
+        label=${label + (required ? " *" : "")}
+        value=${currentValue}
+        onChange=${(e) => onChange(key, e.target.value)}
+        helperText=${helpText || "JSON object or array"}
+        placeholder=${defaultValue != null ? JSON.stringify(defaultValue, null, 2) : ""}
+        sx=${{ mb: 2, "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.82rem" } }}
+      />
+    `;
+  }
+
+  if (inputKind === "select" && !forceText) {
+    const selectedValue = currentValue ?? "";
+    return html`
+      <${FormControl} fullWidth size="small" sx=${{ mb: 2 }}>
+        <${InputLabel}>${label + (required ? " *" : "")}</${InputLabel}>
+        <${Select}
+          label=${label + (required ? " *" : "")}
+          value=${selectedValue}
+          onChange=${(e) => onChange(key, e.target.value)}
+        >
+          ${options.map((opt) => html`
+            <${MenuItem} key=${String(opt.value)} value=${opt.value}>${opt.label}</${MenuItem}>
+          `)}
+        </${Select}>
+        ${(helpText || true) && html`
+          <${Typography} variant="caption" color="text.secondary" sx=${{ mt: 0.5, ml: 1.5 }}>
+            ${helpText || "Pick a preset value"} ·
+            <button
+              type="button"
+              onClick=${() => setForceText(true)}
+              style="margin-left:6px;background:none;border:none;color:#60a5fa;cursor:pointer;padding:0;font:inherit;"
+            >
+              enter custom value
+            </button>
+          </${Typography}>
+        `}
+      </${FormControl}>
+    `;
+  }
+
+  // Default text/textarea input.
+  const isLongText = inputKind === "textarea" || isLongTextKey(key, defaultValue);
 
   return html`
     <${TextField}
@@ -1009,7 +1340,7 @@ function WfParamField({ variable, value, onChange, required }) {
       label=${label + (required ? " *" : "")}
       value=${currentValue}
       onChange=${(e) => onChange(key, e.target.value)}
-      helperText=${help}
+      helperText=${helpText}
       multiline=${isLongText}
       rows=${isLongText ? 3 : undefined}
       placeholder=${defaultValue ? String(defaultValue) : ""}

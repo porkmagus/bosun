@@ -653,6 +653,53 @@ export function expandTemplateGroups(templateIds) {
  * List all available templates with metadata.
  * @returns {Array<{id, name, description, category, tags, replaces?}>}
  */
+function inferVariableInputAndOptions(key, defaultValue) {
+  const normalized = String(key || "").trim().toLowerCase();
+  if (typeof defaultValue === "boolean") return { input: "toggle", options: [] };
+  if (typeof defaultValue === "number") return { input: "number", options: [] };
+  if (Array.isArray(defaultValue) || (defaultValue && typeof defaultValue === "object")) {
+    return { input: "json", options: [] };
+  }
+
+  const optionValues = [];
+  if (normalized.includes("executor") || normalized.includes("sdk")) {
+    optionValues.push("auto", "codex", "claude", "copilot");
+  } else if (normalized.includes("bumptype") || normalized.includes("bump_type")) {
+    optionValues.push("patch", "minor", "major");
+  }
+
+  if (typeof defaultValue === "string" && defaultValue.trim()) {
+    optionValues.unshift(defaultValue.trim());
+  }
+
+  const deduped = [];
+  for (const value of optionValues) {
+    if (!value) continue;
+    if (!deduped.includes(value)) deduped.push(value);
+  }
+  if (deduped.length > 0) {
+    return {
+      input: "select",
+      options: deduped.map((value) => ({ value, label: value })),
+    };
+  }
+
+  return { input: "text", options: [] };
+}
+
+function inferVariableDescription(key, defaultValue) {
+  const normalized = String(key || "").trim().toLowerCase();
+  if (normalized.includes("taskid") || normalized.includes("task_id")) return "Task identifier (for example TASK-123).";
+  if (normalized.includes("prompt") || normalized.includes("problem") || normalized.includes("description")) return "Free-form instruction text.";
+  if (normalized.includes("branch")) return "Git branch name.";
+  if (normalized.includes("timeout") || normalized.includes("delay") || normalized.includes("cooldown")) return "Duration in milliseconds.";
+  if (normalized.includes("executor") || normalized.includes("sdk")) return "Executor profile used by agent nodes.";
+  if (normalized.includes("model")) return "Model id used by agent nodes.";
+  if (typeof defaultValue === "boolean") return "Toggle this setting on or off.";
+  if (typeof defaultValue === "number") return "Numeric workflow setting.";
+  return "";
+}
+
 export function listTemplates() {
   return WORKFLOW_TEMPLATES.map((t) => {
     const cat = TEMPLATE_CATEGORIES[t.category] || TEMPLATE_CATEGORIES.custom;
@@ -675,13 +722,21 @@ export function listTemplates() {
       enabled: t.enabled !== false,
       trigger: t.trigger || null,
       variables: t.variables && typeof t.variables === "object"
-        ? Object.entries(t.variables).map(([key, defaultValue]) => ({
-            key,
-            defaultValue,
-            type: typeof defaultValue === "number"  ? "number"
-                : typeof defaultValue === "boolean" ? "toggle"
-                : "text",
-          }))
+        ? Object.entries(t.variables).map(([key, defaultValue]) => {
+            const required = defaultValue === "" || defaultValue == null;
+            const inferred = inferVariableInputAndOptions(key, defaultValue);
+            return {
+              key,
+              defaultValue,
+              required,
+              type: typeof defaultValue === "number"  ? "number"
+                  : typeof defaultValue === "boolean" ? "toggle"
+                  : "text",
+              input: inferred.input,
+              options: inferred.options,
+              description: inferVariableDescription(key, defaultValue),
+            };
+          })
         : [],
     };
   });
