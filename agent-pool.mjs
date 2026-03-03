@@ -2329,6 +2329,9 @@ export async function launchEphemeralThread(
  * @param {string}             [options.cwd]             Working directory override.
  * @param {string}             [options.sdk]             Force a specific SDK.
  * @param {string}             [options.model]           Force model for SDKs that support it.
+ * @param {boolean}            [options.compressEphemeralItems]
+ *   Whether to apply context shredding/compression to ephemeral pooled runs.
+ *   Defaults to false for maximum fidelity in short-lived delegate calls.
  * @returns {Promise<{ finalResponse: string, items: Array, usage: object|null }>}
  */
 export async function execPooledPrompt(userMessage, options = {}) {
@@ -2339,6 +2342,7 @@ export async function execPooledPrompt(userMessage, options = {}) {
     cwd = REPO_ROOT,
     sdk,
     model,
+    compressEphemeralItems = envFlagEnabled(process.env.AGENT_POOL_COMPRESS_EPHEMERAL_ITEMS),
     // statusData and sendRawEvents are accepted but not used — keeps the
     // call-site compatible with execPrimaryPrompt without modification.
   } = options;
@@ -2362,28 +2366,32 @@ export async function execPooledPrompt(userMessage, options = {}) {
     };
   }
 
-  // Apply unified context compression — tool outputs, agent messages,
-  // and user prompts.  Pinned instructions are never touched.
-  // Estimate context usage so shredding only kicks in above 50% fill.
-  const shreddingOpts1 = resolveContextShreddingOptions(undefined, sdk);
-  const usagePct1 = estimateContextUsagePct(result.items);
-  shreddingOpts1.contextUsagePct = usagePct1;
-  let compressedItems = result.items;
-  try {
-    compressedItems = await compressAllItems(result.items, shreddingOpts1);
-  } catch (compErr) {
-    console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
-  }
+  let finalItems = result.items;
+  if (compressEphemeralItems) {
+    // Apply unified context compression — tool outputs, agent messages,
+    // and user prompts. Pinned instructions are never touched.
+    // Estimate context usage so shredding only kicks in above 50% fill.
+    const shreddingOpts1 = resolveContextShreddingOptions(undefined, sdk);
+    const usagePct1 = estimateContextUsagePct(result.items);
+    shreddingOpts1.contextUsagePct = usagePct1;
+    let compressedItems = result.items;
+    try {
+      compressedItems = await compressAllItems(result.items, shreddingOpts1);
+    } catch (error_) {
+      console.warn(`${TAG} context compression failed (non-fatal): ${error_.message}`);
+    }
 
-  // Record shredding telemetry (non-fatal)
-  try {
-    const savings = estimateSavings(result.items, compressedItems);
-    recordShreddingEvent({ ...savings, agentType: sdk });
-  } catch { /* non-fatal */ }
+    // Record shredding telemetry (non-fatal)
+    try {
+      const savings = estimateSavings(result.items, compressedItems);
+      recordShreddingEvent({ ...savings, agentType: sdk });
+    } catch { /* non-fatal */ }
+    finalItems = compressedItems;
+  }
 
   return {
     finalResponse: result.output,
-    items: compressedItems,
+    items: finalItems,
     usage: null, // ephemeral threads don't aggregate usage today
   };
 }

@@ -3674,6 +3674,70 @@
         };
       }
 
+      if (route === '/api/voice/trace' && method === 'POST') {
+        const inputEvents = Array.isArray(body?.events)
+          ? body.events
+          : [body || {}];
+        const normalized = inputEvents
+          .filter((event) => event && typeof event === 'object')
+          .map((event) => ({
+            ts: Date.now(),
+            sessionId: String(event?.sessionId || body?.sessionId || '').trim(),
+            source: String(event?.source || body?.source || 'voice-client').trim() || 'voice-client',
+            provider: String(event?.provider || body?.provider || '').trim() || null,
+            transport: String(event?.transport || body?.transport || '').trim() || null,
+            type: String(event?.type || '').trim() || null,
+            detail: event?.detail ?? null,
+          }));
+
+        if (normalized.length === 0) {
+          return { ok: false, error: 'No valid trace events supplied' };
+        }
+
+        STATE.voiceTraceEvents = Array.isArray(STATE.voiceTraceEvents) ? STATE.voiceTraceEvents : [];
+        for (const entry of normalized) STATE.voiceTraceEvents.push(entry);
+        if (STATE.voiceTraceEvents.length > 500) {
+          STATE.voiceTraceEvents = STATE.voiceTraceEvents.slice(-500);
+        }
+
+        return {
+          ok: true,
+          stored: normalized.length,
+          latest: normalized[normalized.length - 1] || null,
+        };
+      }
+
+      if (route === '/api/voice/trace' && method === 'GET') {
+        const params = new URLSearchParams(path.split('?')[1] || '');
+        const sessionId = String(params.get('sessionId') || '').trim();
+        const latestOnly = ['1', 'true', 'yes'].includes(String(params.get('latest') || '').trim().toLowerCase());
+        const requestedLimit = Number(params.get('limit'));
+        const fallbackLimit = latestOnly ? 1 : 50;
+        const limit = Number.isFinite(requestedLimit)
+          ? Math.max(1, Math.min(500, Math.trunc(requestedLimit)))
+          : fallbackLimit;
+
+        const allEvents = Array.isArray(STATE.voiceTraceEvents) ? STATE.voiceTraceEvents : [];
+        const filtered = sessionId
+          ? allEvents.filter((entry) => String(entry?.sessionId || '').trim() === sessionId)
+          : allEvents;
+        const events = filtered.slice(-limit);
+
+        if (latestOnly) {
+          return {
+            ok: true,
+            latest: events[events.length - 1] || null,
+            total: filtered.length,
+          };
+        }
+
+        return {
+          ok: true,
+          events,
+          total: filtered.length,
+        };
+      }
+
       if (route === '/api/voice/audio/respond' && method === 'POST') {
         const inputText = String(body?.inputText || body?.text || '').trim();
         if (!inputText) {
