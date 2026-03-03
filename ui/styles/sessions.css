@@ -11,7 +11,6 @@
   height: 100%;
   flex: 1;
   overflow: hidden;
-  /* Added to contain any growing children */
 }
 
 .session-pane {
@@ -20,6 +19,8 @@
   gap: var(--space-md);
   min-width: 0;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .session-detail {
@@ -35,6 +36,7 @@
   position: relative;
   min-height: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .session-drawer-backdrop {
@@ -2590,21 +2592,22 @@ ul.md-list li::before {
   box-shadow: 0 6px 20px rgba(239, 68, 68, 0.5);
 }
 
-/* ─── Desktop: hide duplicate inner session-pane when rail is present ─── */
-@media (min-width: 1200px) {
-  .app-shell[data-has-rail="true"][data-tab="chat"] .session-pane,
-  .app-shell[data-has-rail="true"][data-tab="agents"] .session-pane {
-    display: none !important;
-  }
+/* ─── Hide duplicate inner session-pane when rail is present ───
+   data-has-rail is already gated by JS (only set on desktop ≥ 1400px),
+   so no media-query is needed — prevents the session list from rendering
+   twice (once in the rail, once inline inside ChatTab). */
+.app-shell[data-has-rail="true"][data-tab="chat"] .session-pane,
+.app-shell[data-has-rail="true"][data-tab="agents"] .session-pane {
+  display: none !important;
+}
 
-  /* Switch from 2-column grid to single-column flex so session-detail fills
-     the full width and height once session-pane is hidden. */
-  .app-shell[data-has-rail="true"][data-tab="chat"] .session-split,
-  .app-shell[data-has-rail="true"][data-tab="agents"] .session-split {
-    display: flex !important;
-    flex-direction: column;
-    min-height: 0;
-  }
+/* Switch from 2-column grid to single-column flex so session-detail fills
+   the full width and height once session-pane is hidden. */
+.app-shell[data-has-rail="true"][data-tab="chat"] .session-split,
+.app-shell[data-has-rail="true"][data-tab="agents"] .session-split {
+  display: flex !important;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* ─── Desktop: flat padding on input, no nav-height offset needed ─── */
@@ -2633,9 +2636,19 @@ ul.md-list li::before {
   }
 }
 
-/* ─── Blend chat input seamlessly with bottom navbar ─── */
+/* ─── Chat tab: main-content becomes a fixed flex container ─── 
+   Scroll is handled internally by .chat-messages, not by .main-content.
+   This prevents double-scroll and ensures the input stays pinned. */
 .app-shell[data-tab="chat"] .main-content {
   background: var(--glass-bg);
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell[data-tab="chat"] .main-content > * {
+  flex: 1;
+  min-height: 0;
 }
 
 .app-shell[data-tab="chat"] .chat-input-area {
