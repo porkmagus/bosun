@@ -268,6 +268,7 @@
     "workflow-templates/github.mjs",
     "workflow-templates/planning.mjs",
     "workflow-templates/reliability.mjs",
+    "workflow-templates/research.mjs",
     "workflow-templates/security.mjs",
     "workflow-templates/task-batch.mjs",
     "workflow-templates/task-lifecycle.mjs",
