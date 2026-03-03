@@ -1081,16 +1081,6 @@ async function handleVendor(req, res, url) {
     return;
   }
 
-  // MUI/Emotion vendor bundles in ui/vendor can drift into CJS runtime variants
-  // ("Dynamic require of react"). Route these names through the esm proxy path,
-  // which enforces ESM-safe payloads and URL-rewritten nested imports.
-  if (Object.prototype.hasOwnProperty.call(ESM_CDN_FILES, name)) {
-    const esmUrl = new URL(url.toString());
-    esmUrl.pathname = `/esm/${name}`;
-    await handleEsmProxy(req, res, esmUrl);
-    return;
-  }
-
   const headers = {
     "Content-Type": "application/javascript; charset=utf-8",
     "Cache-Control": "no-store",
