@@ -309,6 +309,7 @@ import { TelemetryTab } from "./tabs/telemetry.js";
 import { SettingsTab } from "./tabs/settings.js";
 import { WorkflowsTab } from "./tabs/workflows.js";
 import { LibraryTab } from "./tabs/library.js";
+import { ManualFlowsTab } from "./tabs/manual-flows.js";
 
 /* ── Placeholder signals for connection quality (may be provided by api.js) ── */
 let wsLatency = signal(null);
@@ -607,6 +608,7 @@ const TAB_COMPONENTS = {
   logs: LogsTab,
   telemetry: TelemetryTab,
   workflows: WorkflowsTab,
+  "manual-flows": ManualFlowsTab,
   library: LibraryTab,
   settings: SettingsTab,
 };
@@ -1071,7 +1073,7 @@ function InspectorPanel({ onResizeStart, onResizeReset, showResizer }) {
  *  Bottom Navigation
  * ═══════════════════════════════════════════════ */
 const PRIMARY_NAV_TABS = ["dashboard", "chat", "tasks", "agents"];
-const MORE_NAV_TABS = ["control", "infra", "logs", "telemetry", "library", "workflows", "settings"];
+const MORE_NAV_TABS = ["control", "infra", "logs", "telemetry", "library", "workflows", "manual-flows", "settings"];
 
 function getTabsById(ids) {
   return ids

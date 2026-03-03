@@ -9127,6 +9127,90 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  /* ═══════════════════════════════════════════════════════════
+   *  Manual Flows API endpoints
+   * ═══════════════════════════════════════════════════════════ */
+
+  if (path === "/api/manual-flows/templates") {
+    try {
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const templates = mf.listFlowTemplates(ctx.workspaceDir);
+      jsonResponse(res, 200, { ok: true, templates });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/templates/save" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const saved = mf.saveFlowTemplate(body, ctx.workspaceDir);
+      jsonResponse(res, 200, { ok: true, template: saved });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/execute" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const { templateId, formValues } = body || {};
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const run = await mf.executeFlow(templateId, formValues || {}, ctx.workspaceDir, {});
+      jsonResponse(res, 200, { ok: true, run });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path === "/api/manual-flows/runs") {
+    try {
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const templateId = url.searchParams.get("templateId") || undefined;
+      const status = url.searchParams.get("status") || undefined;
+      const rawLimit = Number(url.searchParams.get("limit"));
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const runs = mf.listRuns(ctx.workspaceDir, { templateId, status, limit });
+      jsonResponse(res, 200, { ok: true, runs });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path.startsWith("/api/manual-flows/runs/") && !path.endsWith("/runs/")) {
+    try {
+      const runId = decodeURIComponent(path.replace("/api/manual-flows/runs/", "").split("/")[0] || "");
+      if (!runId) {
+        jsonResponse(res, 400, { ok: false, error: "runId is required" });
+        return;
+      }
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const run = mf.getRun(runId, ctx.workspaceDir);
+      if (!run) {
+        jsonResponse(res, 404, { ok: false, error: "Run not found" });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, run });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/health") {
     jsonResponse(res, 200, {
       ok: true,
