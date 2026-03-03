@@ -68,7 +68,7 @@ import {
   MenuItem, Button, IconButton, Tabs, Tab, Tooltip, Divider,
   Paper, CircularProgress, Skeleton, Alert, Switch, FormControlLabel,
   Menu as MuiMenu, Fab, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, TableSortLabel, ToggleButton, ToggleButtonGroup,
+  TableHead, TableRow, TableSortLabel, ToggleButton, ToggleButtonGroup, Badge,
 } from "@mui/material";
 
 /* ─── View mode toggle ─── */
