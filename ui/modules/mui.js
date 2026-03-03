@@ -407,6 +407,16 @@ export const veTheme = createMuiTheme({
           minHeight: 40,
           padding: "8px 14px",
         },
+        // Constrain raw SVG icons (ICONS map returns unwrapped <svg> nodes)
+        iconWrapper: {
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          width: 20,
+          height: 20,
+          "& svg": { width: "100%", height: "100%" },
+        },
       },
     },
     MuiTabs: {
@@ -415,6 +425,14 @@ export const veTheme = createMuiTheme({
         indicator: {
           backgroundColor: "#da7756",
           height: 2,
+        },
+      },
+    },
+    MuiBottomNavigationAction: {
+      styleOverrides: {
+        root: {
+          // Constrain raw SVG icons (ICONS map returns unwrapped <svg> nodes)
+          "& svg": { width: 24, height: 24, flexShrink: 0 },
         },
       },
     },
