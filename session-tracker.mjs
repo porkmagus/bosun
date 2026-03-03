@@ -26,8 +26,11 @@ const DEFAULT_MAX_MESSAGES = 10;
 /** Default: keep a larger history for manual/primary chat sessions. */
 const DEFAULT_CHAT_MAX_MESSAGES = 2000;
 
-/** Maximum characters per message entry to prevent memory bloat. */
-const MAX_MESSAGE_CHARS = 2000;
+/** Maximum characters per message entry to prevent pathological memory bloat.
+ *  100 000 chars (~25 000 words) is generous enough for any real agent response
+ *  while still guarding against a runaway stream filling memory.
+ */
+const MAX_MESSAGE_CHARS = 100_000;
 
 /** Maximum total sessions to keep in memory. */
 const MAX_SESSIONS = 100;
@@ -51,7 +54,7 @@ function resolveSessionMaxMessages(type, metadata, explicitMax, fallbackMax) {
 /**
  * @typedef {Object} SessionMessage
  * @property {string} type        - "agent_message"|"tool_call"|"tool_result"|"error"|"system"
- * @property {string} content     - Truncated content
+ * @property {string} content     - Message content (capped at MAX_MESSAGE_CHARS)
  * @property {string} timestamp   - ISO timestamp
  * @property {Object} [meta]      - Optional metadata (tool name, etc.)
  */
