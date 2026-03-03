@@ -52,6 +52,7 @@ describe("ui-server mini app", () => {
     "FLEET_ENABLED",
     "FLEET_SYNC_INTERVAL_MS",
     "OPENAI_API_KEY",
+    "BOSUN_ENV_NO_OVERRIDE",
   ];
   let envSnapshot = {};
 
@@ -59,6 +60,9 @@ describe("ui-server mini app", () => {
     envSnapshot = Object.fromEntries(
       ENV_KEYS.map((key) => [key, process.env[key]]),
     );
+    // Prevent loadConfig() → loadDotEnv() from overriding test-controlled env
+    // vars with values from the user's on-disk .env file.
+    process.env.BOSUN_ENV_NO_OVERRIDE = "1";
     process.env.TELEGRAM_UI_TLS_DISABLE = "true";
     process.env.TELEGRAM_UI_ALLOW_UNSAFE = "true";
     process.env.GITHUB_PROJECT_WEBHOOK_PATH = "/api/webhooks/github/project-sync";
