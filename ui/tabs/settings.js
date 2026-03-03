@@ -1428,6 +1428,9 @@ function ServerConfigMode() {
         <!-- GitHub Device Flow login card -->
         ${activeCategory === "github" && html`<${GitHubDeviceFlowCard} config=${serverData} />`}
 
+        <!-- Context Shredding overview panel -->
+        ${activeCategory === "context-shredding" && html`<${ContextShreddingPanel} getValue=${getValue} />`}
+
         <!-- Voice Endpoints card-based editor (synced with /setup) -->
         ${activeCategory === "voice" && html`<${VoiceEndpointsEditor} />`}
 
@@ -3205,6 +3208,110 @@ function GitHubDeviceFlowCard({ config }) {
         <//>
       </div>
     <//>
+  `;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  ContextShreddingPanel — Overview card for the context-shredding category
+ *  Shows tier ladder, active status badges, and profiles editor.
+ * ═══════════════════════════════════════════════════════════════ */
+function ContextShreddingPanel({ getValue }) {
+  const DEFAULTS = {
+    CONTEXT_SHREDDING_ENABLED: "true",
+    CONTEXT_SHREDDING_FULL_CONTEXT_TURNS: "3",
+    CONTEXT_SHREDDING_TIER1_MAX_AGE: "5",
+    CONTEXT_SHREDDING_TIER2_MAX_AGE: "9",
+    CONTEXT_SHREDDING_COMPRESS_TOOL_OUTPUTS: "true",
+    CONTEXT_SHREDDING_COMPRESS_MESSAGES: "true",
+    CONTEXT_SHREDDING_COMPRESS_AGENT_MESSAGES: "true",
+    CONTEXT_SHREDDING_COMPRESS_USER_MESSAGES: "true",
+  };
+
+  const get = (key) => {
+    const val = getValue ? getValue(key) : "";
+    return val !== "" && val != null ? val : DEFAULTS[key] ?? "";
+  };
+
+  const enabled = get("CONTEXT_SHREDDING_ENABLED") !== "false";
+  const compressTools = get("CONTEXT_SHREDDING_COMPRESS_TOOL_OUTPUTS") !== "false";
+  const compressMsgs = get("CONTEXT_SHREDDING_COMPRESS_MESSAGES") !== "false";
+  const tier0 = Number(get("CONTEXT_SHREDDING_FULL_CONTEXT_TURNS")) || 3;
+  const tier1 = Number(get("CONTEXT_SHREDDING_TIER1_MAX_AGE")) || 5;
+  const tier2 = Number(get("CONTEXT_SHREDDING_TIER2_MAX_AGE")) || 9;
+
+  const StatusBadge = ({ label, on }) => html`
+    <${Chip}
+      label=${label}
+      size="small"
+      color=${on ? "success" : "default"}
+      variant=${on ? "filled" : "outlined"}
+      style="font-size:11px;height:22px"
+    />
+  `;
+
+  const tierRows = [
+    { label: "Tier 0 — Full Context", range: `turns 0–${tier0}`, color: "#4caf50", desc: "Completely uncompressed" },
+    { label: "Tier 1 — Light Compression", range: `turns ${tier0 + 1}–${tier1}`, color: "#ff9800", desc: "Head + tail truncation" },
+    { label: "Tier 2 — Moderate", range: `turns ${tier1 + 1}–${tier2}`, color: "#f44336", desc: "Heavy truncation" },
+    { label: "Tier 3 — Skeleton", range: `turns ${tier2 + 1}+`, color: "#9e9e9e", desc: "Tool name + args only" },
+  ];
+
+  return html`
+    <div style="margin-bottom:12px">
+      <!-- Status overview -->
+      <${Paper} variant="outlined" style="padding:14px 16px;margin-bottom:12px;border-radius:10px;background:var(--bg-card,#1e1e1e)">
+        <${Typography} variant="subtitle2" style="margin-bottom:10px;font-weight:600;display:flex;align-items:center;gap:8px">
+          Context Shredding Status
+          <${StatusBadge} label=${enabled ? "ENABLED" : "DISABLED"} on=${enabled} />
+        <//>
+        ${!enabled && html`
+          <${Alert} severity="warning" style="margin-bottom:10px;font-size:12px">
+            Context Shredding is disabled. Agents will receive their full message history every turn,
+            which increases API costs and risks context overflow on long sessions.
+          <//>
+        `}
+        <${Stack} direction="row" spacing=${1} flexWrap="wrap" useFlexGap style="gap:6px">
+          <${StatusBadge} label="Tool Outputs" on=${enabled && compressTools} />
+          <${StatusBadge} label="Agent Messages" on=${enabled && compressMsgs} />
+          <${StatusBadge} label="User Prompts" on=${enabled && compressMsgs} />
+        <//>
+      <//>
+
+      <!-- Tier ladder visualization -->
+      ${enabled && compressTools && html`
+        <${Paper} variant="outlined" style="padding:14px 16px;margin-bottom:12px;border-radius:10px;background:var(--bg-card,#1e1e1e)">
+          <${Typography} variant="subtitle2" style="margin-bottom:10px;font-weight:600">
+            Tool Output Tier Ladder
+          <//>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${tierRows.map((row) => html`
+              <div key=${row.label} style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;border-left:3px solid ${row.color};background:color-mix(in srgb,${row.color} 8%,transparent)">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12px;font-weight:600;color:${row.color}">${row.label}</div>
+                  <div style="font-size:11px;color:var(--text-secondary)">${row.desc}</div>
+                </div>
+                <${Chip} label=${row.range} size="small" style="font-size:11px;height:20px;background:color-mix(in srgb,${row.color} 18%,transparent);color:${row.color};border:1px solid ${row.color}" />
+              </div>
+            `)}
+          </div>
+          <${Typography} variant="caption" style="display:block;margin-top:8px;color:var(--text-secondary)">
+            High-value items (score ≥ ${get("CONTEXT_SHREDDING_SCORE_HIGH") || 70}) are shifted to a lower tier;
+            low-value items (score &lt; ${get("CONTEXT_SHREDDING_SCORE_LOW") || 30}) are compressed sooner.
+            Full outputs are always cached to disk for on-demand retrieval.
+          <//>
+        <//>
+      `}
+
+      <!-- Per-type profiles hint -->
+      <${Paper} variant="outlined" style="padding:12px 16px;border-radius:10px;background:var(--bg-card,#1e1e1e)">
+        <${Typography} variant="caption" style="color:var(--text-secondary);line-height:1.6;display:block">
+          <strong>Per-Type Profiles:</strong> Use the "Per-Type Profiles (JSON)" setting below (under Advanced)
+          to override any of these values for specific interaction types (<code>task</code>, <code>chat</code>, <code>voice</code>, <code>flow</code>)
+          or agent types (<code>codex-sdk</code>, <code>claude-sdk</code>, etc.).
+          Example: <code>{"{"}"perType": {"{"}"voice": {"{"}"fullContextTurns": 6{"}"}{"}"}{"}"}</code>
+        <//>
+      <//>
+    </div>
   `;
 }
 

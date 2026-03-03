@@ -65,6 +65,41 @@ const TIER_2_HEAD_CHARS = 600;
 const TIER_2_TAIL_CHARS = 300;
 
 // ---------------------------------------------------------------------------
+// Options Resolver — converts caller-supplied options into a full opts object
+// with all fields defaulting to the module-scope constants above.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve caller-supplied compression options into a complete object.
+ * All fields default to the module-scope constants.
+ *
+ * @param {object} [options]
+ * @returns {object}  Fully populated internal options
+ */
+function resolveOpts(options = {}) {
+  return {
+    fullContextTurns:     options.fullContextTurns     ?? 3,
+    tier1MaxAge:          options.tier1MaxAge          ?? TIER_1_MAX_AGE,
+    tier2MaxAge:          options.tier2MaxAge          ?? TIER_2_MAX_AGE,
+    tier0MaxAge:          TIER_0_MAX_AGE, // not currently overridable, kept for symmetry
+    tier1HeadChars:       options.tier1HeadChars       ?? TIER_1_HEAD_CHARS,
+    tier1TailChars:       options.tier1TailChars       ?? TIER_1_TAIL_CHARS,
+    tier2HeadChars:       options.tier2HeadChars       ?? TIER_2_HEAD_CHARS,
+    tier2TailChars:       options.tier2TailChars       ?? TIER_2_TAIL_CHARS,
+    scoreHighThreshold:   options.scoreHighThreshold   ?? SCORE_HIGH_DEFAULT,
+    scoreLowThreshold:    options.scoreLowThreshold    ?? SCORE_LOW_DEFAULT,
+    compressToolOutputs:  options.compressToolOutputs  ?? true,
+    compressMessages:     options.compressMessages     ?? true,
+    compressAgentMessages: options.compressAgentMessages ?? true,
+    compressUserMessages:  options.compressUserMessages  ?? true,
+    msgTier0MaxAge:       options.msgTier0MaxAge       ?? MSG_TIER_0_MAX_AGE,
+    msgTier1MaxAge:       options.msgTier1MaxAge       ?? MSG_TIER_1_MAX_AGE,
+    msgMinCompressChars:  options.msgMinCompressChars  ?? MSG_MIN_COMPRESS_CHARS,
+    userMsgFullTurns:     options.userMsgFullTurns     ?? USER_MSG_FULL_TURNS,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Filesystem helpers (lazy-loaded to avoid top-level async)
 // ---------------------------------------------------------------------------
 
@@ -337,13 +372,15 @@ function extractArgsPreview(item) {
  * Light compression (Tier 1): keep head + tail of output.
  * ~20% reduction for typical outputs.
  */
-function compressTier1(text, logId) {
-  if (typeof text !== "string" || text.length <= TIER_1_HEAD_CHARS + TIER_1_TAIL_CHARS + 200) {
+function compressTier1(text, logId, opts) {
+  const headChars = opts?.tier1HeadChars ?? TIER_1_HEAD_CHARS;
+  const tailChars = opts?.tier1TailChars ?? TIER_1_TAIL_CHARS;
+  if (typeof text !== "string" || text.length <= headChars + tailChars + 200) {
     return text; // small enough already
   }
-  const head = text.slice(0, TIER_1_HEAD_CHARS);
-  const tail = text.slice(-TIER_1_TAIL_CHARS);
-  const omitted = text.length - TIER_1_HEAD_CHARS - TIER_1_TAIL_CHARS;
+  const head = text.slice(0, headChars);
+  const tail = tailChars > 0 ? text.slice(-tailChars) : "";
+  const omitted = text.length - headChars - (tailChars > 0 ? tailChars : 0);
   return (
     head +
     `\n\n[…${omitted} chars compressed — full output: bosun --tool-log ${logId}]\n\n` +
@@ -355,13 +392,15 @@ function compressTier1(text, logId) {
  * Moderate compression (Tier 2): smaller head + tail.
  * ~60% reduction for typical outputs.
  */
-function compressTier2(text, logId) {
-  if (typeof text !== "string" || text.length <= TIER_2_HEAD_CHARS + TIER_2_TAIL_CHARS + 200) {
+function compressTier2(text, logId, opts) {
+  const headChars = opts?.tier2HeadChars ?? TIER_2_HEAD_CHARS;
+  const tailChars = opts?.tier2TailChars ?? TIER_2_TAIL_CHARS;
+  if (typeof text !== "string" || text.length <= headChars + tailChars + 200) {
     return text;
   }
-  const head = text.slice(0, TIER_2_HEAD_CHARS);
-  const tail = text.slice(-TIER_2_TAIL_CHARS);
-  const omitted = text.length - TIER_2_HEAD_CHARS - TIER_2_TAIL_CHARS;
+  const head = text.slice(0, headChars);
+  const tail = tailChars > 0 ? text.slice(-tailChars) : "";
+  const omitted = text.length - headChars - (tailChars > 0 ? tailChars : 0);
   return (
     head +
     `\n\n[…${omitted} chars compressed — full output: bosun --tool-log ${logId}]\n\n` +
@@ -389,7 +428,7 @@ function compressTier3(item, logId) {
  * @param {number} tier      Compression tier (1, 2, or 3)
  * @returns {object}         New item with compressed text
  */
-function applyCompression(item, logId, tier) {
+function applyCompression(item, logId, tier, opts) {
   if (!item || typeof item !== "object") return item;
 
   if (tier === 3) {
@@ -401,7 +440,9 @@ function applyCompression(item, logId, tier) {
     };
   }
 
-  const compressor = tier === 1 ? compressTier1 : compressTier2;
+  const compressor = tier === 1
+    ? (text, id) => compressTier1(text, id, opts)
+    : (text, id) => compressTier2(text, id, opts);
   const next = { ...item };
   next._cachedLogId = logId;
 
@@ -476,9 +517,11 @@ function assignTurns(items) {
  * @param {number} age  currentTurn - itemTurn
  * @returns {1|2|3}
  */
-function resolveTier(age) {
-  if (age <= TIER_1_MAX_AGE) return 1;
-  if (age <= TIER_2_MAX_AGE) return 2;
+function resolveTier(age, opts) {
+  const t1 = opts?.tier1MaxAge ?? TIER_1_MAX_AGE;
+  const t2 = opts?.tier2MaxAge ?? TIER_2_MAX_AGE;
+  if (age <= t1) return 1;
+  if (age <= t2) return 2;
   return 3;
 }
 
@@ -516,8 +559,13 @@ function isCompressCandidate(item) {
 // ---------------------------------------------------------------------------
 
 // ── Score thresholds ──────────────────────────────────────────────────────
-const SCORE_HIGH = 70;   // protect from compression
-const SCORE_LOW = 30;    // accelerate compression
+// These module-scope constants are the defaults; opts can override them.
+const SCORE_HIGH_DEFAULT = 70;   // protect from compression
+const SCORE_LOW_DEFAULT = 30;    // accelerate compression
+/** @deprecated use SCORE_HIGH_DEFAULT; kept for backward-compat references */
+const SCORE_HIGH = SCORE_HIGH_DEFAULT;
+/** @deprecated use SCORE_LOW_DEFAULT; kept for backward-compat references */
+const SCORE_LOW = SCORE_LOW_DEFAULT;
 const TIER_SHIFT_PROTECT = -2;
 const TIER_SHIFT_ACCELERATE = 1;
 
@@ -884,12 +932,14 @@ function buildRetrospectiveRelevanceMap(turnItems) {
  * @param {number} score     The content-aware score (0-100)
  * @returns {number}         Adjusted tier (0, 1, 2, or 3)
  */
-function adjustTierByScore(baseTier, score) {
-  if (score >= SCORE_HIGH) {
+function adjustTierByScore(baseTier, score, opts) {
+  const high = opts?.scoreHighThreshold ?? SCORE_HIGH_DEFAULT;
+  const low  = opts?.scoreLowThreshold  ?? SCORE_LOW_DEFAULT;
+  if (score >= high) {
     // Protect: shift tier down (less compression)
     return Math.max(0, baseTier + TIER_SHIFT_PROTECT);
   }
-  if (score < SCORE_LOW) {
+  if (score < low) {
     // Accelerate: shift tier up (more compression)
     return Math.min(3, baseTier + TIER_SHIFT_ACCELERATE);
   }
@@ -977,12 +1027,21 @@ function smartCompressSearchResult(text, actionPaths, logId) {
 export async function cacheAndCompressItems(items, options = {}) {
   if (!Array.isArray(items) || items.length === 0) return items;
 
-  const fullContextTurns = options.fullContextTurns ?? 3;
+  // If shredding is explicitly disabled, pass through unchanged
+  if (options._skip === true) return items;
+
+  const opts = resolveOpts(options);
+
+  // Skip tool output compression if disabled
+  if (!opts.compressToolOutputs) {
+    return items;
+  }
+
   const turnItems = assignTurns(items);
   const maxTurn = turnItems.reduce((m, t) => Math.max(m, t.turn), 0);
 
   // Nothing to compress if we don't have enough turns yet
-  if (maxTurn < fullContextTurns) return items;
+  if (maxTurn < opts.fullContextTurns) return items;
 
   // ── Content-aware scoring pass ──────────────────────────────────────────
   // Phase 1: Score every item's inherent value density
@@ -1012,7 +1071,7 @@ export async function cacheAndCompressItems(items, options = {}) {
   for (const { item, turn } of turnItems) {
     const age = maxTurn - turn;
     processCompressItem(
-      item, age, scores, actionPaths, result, cachePromises,
+      item, age, scores, actionPaths, result, cachePromises, opts,
     );
   }
 
@@ -1034,24 +1093,25 @@ export async function cacheAndCompressItems(items, options = {}) {
  * @param {Array} result     Mutated — items are pushed here
  * @param {Array} cachePromises  Mutated — cache promises pushed here
  */
-function processCompressItem(item, age, scores, actionPaths, result, cachePromises) {
+function processCompressItem(item, age, scores, actionPaths, result, cachePromises, opts) {
   // Tier 0: keep full
-  if (age <= TIER_0_MAX_AGE) { result.push(item); return; }
+  const tier0Limit = opts?.tier0MaxAge ?? TIER_0_MAX_AGE;
+  if (age <= tier0Limit) { result.push(item); return; }
 
   // Skip items that have no meaningful text to compress
   if (!isCompressCandidate(item)) { result.push(item); return; }
 
   // Content-aware tier resolution
   const itemScore = scores.get(item) ?? 50;
-  const baseTier = resolveTier(age);
-  const tier = adjustTierByScore(baseTier, itemScore);
+  const baseTier = resolveTier(age, opts);
+  const tier = adjustTierByScore(baseTier, itemScore, opts);
 
   // Tier 0 after score adjustment: item is valuable enough to protect
   if (tier === 0) { result.push(item); return; }
 
   // Already compressed? Re-apply at potentially more aggressive tier
   if (item._cachedLogId) {
-    result.push(applyCompression(item, item._cachedLogId, tier));
+    result.push(applyCompression(item, item._cachedLogId, tier, opts));
     return;
   }
 
@@ -1063,8 +1123,8 @@ function processCompressItem(item, age, scores, actionPaths, result, cachePromis
 
   cachePromises.push(
     writeToCache(item, toolName, argsPreview).then((logId) => {
-      const smartResult = trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId);
-      result[cacheIdx] = smartResult || applyCompression(item, logId, tier);
+      const smartResult = trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId, opts);
+      result[cacheIdx] = smartResult || applyCompression(item, logId, tier, opts);
     }),
   );
 }
@@ -1073,8 +1133,9 @@ function processCompressItem(item, age, scores, actionPaths, result, cachePromis
  * Attempt smart search result compression for low-score search outputs.
  * Returns null if smart compression is not applicable.
  */
-function trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId) {
-  if (itemScore >= SCORE_LOW || actionPaths.size === 0) return null;
+function trySmartSearchCompress(item, toolName, itemScore, actionPaths, logId, opts) {
+  const scoreLow = opts?.scoreLowThreshold ?? SCORE_LOW_DEFAULT;
+  if (itemScore >= scoreLow || actionPaths.size === 0) return null;
   const lower = (toolName || "").toLowerCase();
   const isSearch =
     lower.includes("search") || lower.includes("grep") || lower.includes("find");
@@ -1341,10 +1402,18 @@ function classifyItem(item) {
 export async function compressAllItems(items, options = {}) {
   if (!Array.isArray(items) || items.length === 0) return items;
 
+  // If shredding is explicitly disabled, pass through unchanged
+  if (options._skip === true) return items;
+
+  const opts = resolveOpts(options);
+
   // Step 1: Apply tool output compression (existing system)
-  let result = await cacheAndCompressItems(items, options);
+  let result = await cacheAndCompressItems(items, opts);
 
   // Step 2: Apply message compression to agent + user messages
+  // Skip entirely if message compression is turned off
+  if (!opts.compressMessages) return result;
+
   const turnItems = assignTurns(result);
   const maxTurn = turnItems.reduce((m, t) => Math.max(m, t.turn), 0);
 
@@ -1366,12 +1435,14 @@ export async function compressAllItems(items, options = {}) {
 
     // Agent messages: tiered compression based on age
     if (kind === "agent_msg") {
-      return compressAgentMessage(item, age);
+      if (!opts.compressAgentMessages) return item;
+      return compressAgentMessage(item, age, opts);
     }
 
     // User messages: compress after the current turn
     if (kind === "user_msg") {
-      return compressUserMessage(item, age);
+      if (!opts.compressUserMessages) return item;
+      return compressUserMessage(item, age, opts);
     }
 
     return item;
@@ -1387,15 +1458,19 @@ export async function compressAllItems(items, options = {}) {
  * @param {number} age   Turns since this message
  * @returns {object}     Possibly compressed item
  */
-function compressAgentMessage(item, age) {
+function compressAgentMessage(item, age, opts) {
+  const minChars = opts?.msgMinCompressChars ?? MSG_MIN_COMPRESS_CHARS;
+  const tier0Age  = opts?.msgTier0MaxAge     ?? MSG_TIER_0_MAX_AGE;
+  const tier1Age  = opts?.msgTier1MaxAge     ?? MSG_TIER_1_MAX_AGE;
+
   const text = getItemText(item);
-  if (!text || text.length < MSG_MIN_COMPRESS_CHARS) return item;
+  if (!text || text.length < minChars) return item;
 
   // Tier 0: full text (current + previous turn)
-  if (age <= MSG_TIER_0_MAX_AGE) return item;
+  if (age <= tier0Age) return item;
 
   // Tier 1: moderate — keep first 200 chars + summary
-  if (age <= MSG_TIER_1_MAX_AGE) {
+  if (age <= tier1Age) {
     const summary = summarizeAgentMessage(text);
     const preview = text.length > 200 ? text.slice(0, 200) + "…" : text;
     if (preview.length >= text.length - 20) return item; // not worth compressing
@@ -1424,12 +1499,15 @@ function compressAgentMessage(item, age) {
  * @param {number} age   Turns since this message
  * @returns {object}     Possibly compressed item
  */
-function compressUserMessage(item, age) {
+function compressUserMessage(item, age, opts) {
+  const minChars  = opts?.msgMinCompressChars ?? MSG_MIN_COMPRESS_CHARS;
+  const fullTurns = opts?.userMsgFullTurns    ?? USER_MSG_FULL_TURNS;
+
   const text = getItemText(item);
-  if (!text || text.length < MSG_MIN_COMPRESS_CHARS) return item;
+  if (!text || text.length < minChars) return item;
 
   // Current turn: keep full
-  if (age <= USER_MSG_FULL_TURNS) return item;
+  if (age <= fullTurns) return item;
 
   // Strip the TOOL_OUTPUT_GUARDRAIL and system prompt before summarizing
   // so the breadcrumb only captures the user's actual request
@@ -1469,4 +1547,14 @@ export function estimateSavings(original, compressed) {
  */
 export function getToolLogDir() {
   return TOOL_LOG_DIR;
+}
+
+/**
+ * Returns the default options object for `compressAllItems` / `cacheAndCompressItems`.
+ * Useful for tests and documentation — shows all configurable fields with defaults.
+ *
+ * @returns {object}
+ */
+export function getDefaultCompressOptions() {
+  return resolveOpts({});
 }

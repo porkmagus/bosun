@@ -51,6 +51,7 @@ import {
   MAX_STREAM_RETRIES,
 } from "./stream-resilience.mjs";
 import { compressAllItems } from "./context-cache.mjs";
+import { resolveContextShreddingOptions } from "./context-shredding-config.mjs";
 
 // Lazy-load MCP registry to avoid circular dependencies.
 // Cached at module scope per AGENTS.md hard rules.
@@ -2363,9 +2364,10 @@ export async function execPooledPrompt(userMessage, options = {}) {
 
   // Apply unified context compression — tool outputs, agent messages,
   // and user prompts.  Pinned instructions are never touched.
+  const shreddingOpts1 = resolveContextShreddingOptions(undefined, sdk);
   let compressedItems = result.items;
   try {
-    compressedItems = await compressAllItems(result.items);
+    compressedItems = await compressAllItems(result.items, shreddingOpts1);
   } catch (compErr) {
     console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
   }
@@ -3159,7 +3161,8 @@ export async function launchOrResumeThread(
   // Apply tiered context compression for persistent threads
   if (result.success && Array.isArray(result.items) && result.items.length > 0) {
     try {
-      const compressedItems = await compressAllItems(result.items);
+      const shreddingOpts2 = resolveContextShreddingOptions(undefined, resultSdk);
+      const compressedItems = await compressAllItems(result.items, shreddingOpts2);
       return { ...result, items: compressedItems, threadId: finalThreadId, resumed: false };
     } catch (compErr) {
       console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
