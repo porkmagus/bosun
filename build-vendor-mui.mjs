@@ -22,11 +22,15 @@ const EXTERNALS = ["react", "react-dom", "react/jsx-runtime", "react-dom/client"
 const sharedOpts = {
   bundle: true,
   format: "esm",
+  platform: "browser",
   target: "es2022",
   minify: true,
   sourcemap: false,
-  external: EXTERNALS,
-  // Suppress "Could not resolve …" warnings for optional/peer deps
+  mainFields: ["module", "browser", "main"],
+  conditions: ["browser", "module", "import", "default"],
+  define: {
+    "process.env.NODE_ENV": '"production"',
+  },
   logLevel: "warning",
 };
 
