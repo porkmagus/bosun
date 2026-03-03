@@ -445,8 +445,9 @@ async function buildSessionScopedInstructions(baseInstructions, callContext = {}
     "- You have access to multiple tools. Use direct JS tools first for instant operational answers (tasks, sessions, status, config, files, logs).",
     "- For visual questions about camera/screen, call query_live_view with the user's exact question.",
     "- For questions that require project/code understanding, call ask_agent_context in mode=instant first and speak the returned answer in this turn.",
-    "- Use delegate_to_agent only for clearly long-running operations that must run in the background.",
-    "  Delegation is non-blocking — you will get a confirmation immediately and results will appear in the chat session.",
+    "- CRITICAL: Do NOT use delegate_to_agent for simple questions, status checks, or informational queries. delegate_to_agent is ONLY for long-running code modifications, file writes, PR creation, or multi-step workflows that genuinely need an agent.",
+    "- If you can answer a question with ask_agent_context or any direct tool, you MUST use those instead of delegate_to_agent.",
+    "- Delegation is non-blocking — results appear in the chat session but NOT in this voice turn. Only delegate when the user explicitly asks to 'run', 'write', 'create', 'fix', or 'implement' something.",
     "- Do not wait on slow agents for normal Q&A. Prefer direct tools and ask_agent_context (instant mode).",
     "- If the user asks you to perform an action, you MUST execute at least one relevant tool call before claiming that action was done or started.",
     "- After a tool call finishes, always send a short completion confirmation (for example: 'Done.'), unless you are already giving a fuller immediate answer.",
@@ -454,6 +455,7 @@ async function buildSessionScopedInstructions(baseInstructions, callContext = {}
     "- Preserve user intent when delegating. Do not paraphrase away technical detail.",
     "- Keep spoken responses concise. The user can see detailed results in the chat sidebar.",
     "- You can read chat history context to avoid asking the user to repeat themselves.",
+    "- ALWAYS respond in English unless the user has explicitly requested a different language.",
   ].join("\n");
 
   return `${baseInstructions}${suffix}`;
@@ -948,7 +950,18 @@ export function getVoiceConfig(forceReload = false) {
   const instructions = voice.instructions || `You are Bosun, a helpful voice assistant for the VirtEngine development platform.
 You help developers manage tasks, steer coding agents, monitor builds, and navigate the workspace.
 Be concise and conversational. When users ask about code or tasks, use the available tools.
-For complex operations like writing code or creating PRs, delegate to the appropriate agent.`;
+For complex operations like writing code or creating PRs, delegate to the appropriate agent.
+
+LANGUAGE RULES:
+- Always respond in English unless the user explicitly requests another language.
+- If the user speaks in a non-English language, respond in English and confirm: "I'll respond in English. Let me know if you'd prefer another language."
+- Never switch languages based on the user's accent or speech patterns alone.
+
+TOOL USAGE PRIORITY:
+- For quick information, status checks, task queries, or simple questions: use direct tools (list_tasks, get_session_status, ask_agent_context, etc.) and answer immediately in this voice turn.
+- NEVER delegate to an agent for questions you can answer directly using available tools.
+- Only use delegate_to_agent for operations that genuinely require an agent to write code, modify files, or run complex multi-step workflows.
+- When in doubt, use ask_agent_context in instant mode first — it returns answers within this voice turn.`;
 
   _voiceConfig = Object.freeze({
     provider,

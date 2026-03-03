@@ -127,6 +127,9 @@ const TIER_2_TAIL_CHARS = 300;
  */
 function resolveOpts(options = {}) {
   return {
+    contextUsageThreshold: options.contextUsageThreshold ?? 0.50,
+    contextUsageTarget:    options.contextUsageTarget    ?? 0.40,
+    contextUsageCritical:  options.contextUsageCritical  ?? 0.70,
     fullContextTurns:     options.fullContextTurns     ?? 3,
     tier1MaxAge:          options.tier1MaxAge          ?? TIER_1_MAX_AGE,
     tier2MaxAge:          options.tier2MaxAge          ?? TIER_2_MAX_AGE,
@@ -1461,9 +1464,17 @@ function classifyItem(item) {
  * This wraps `cacheAndCompressItems` (tool output compression) and adds
  * agent + user message compression on top.
  *
+ * Context-usage-aware behaviour:
+ *   When `options.contextUsagePct` is provided (0.0–1.0), shredding only
+ *   activates if usage >= `contextUsageThreshold` (default 0.50).
+ *   Aggression scales linearly from the threshold to the critical level
+ *   (default 0.70).  Above the critical level, tier boundaries are halved
+ *   — meaning items are compressed much earlier.
+ *
  * @param {Array}  items       The full accumulated items array
  * @param {object} [options]   Optional overrides
  * @param {number} [options.fullContextTurns=3]  Turns to keep tool outputs full
+ * @param {number} [options.contextUsagePct]     Estimated context fill (0.0–1.0)
  * @returns {Promise<Array>}   Compressed items array
  */
 export async function compressAllItems(items, options = {}) {
@@ -1473,6 +1484,47 @@ export async function compressAllItems(items, options = {}) {
   if (options._skip === true) return items;
 
   const opts = resolveOpts(options);
+
+  // ── Context-usage-based gating ──────────────────────────────
+  const usagePct = typeof options.contextUsagePct === "number"
+    ? options.contextUsagePct
+    : null;
+  const threshold = opts.contextUsageThreshold ?? 0.50;
+  const target    = opts.contextUsageTarget    ?? 0.40;
+  const critical  = opts.contextUsageCritical  ?? 0.70;
+
+  // When context usage info is available and below threshold, skip shredding
+  if (usagePct !== null && usagePct < threshold) {
+    return items;
+  }
+
+  // ── Progressive aggression ──────────────────────────────────
+  // When usage info is available, tighten tier boundaries proportionally.
+  // aggression ranges from 0.0 (at threshold) to 1.0 (at critical).
+  // At 1.0+, all tier boundaries are halved — items age out 2× faster.
+  if (usagePct !== null && usagePct >= threshold) {
+    const range = Math.max(critical - threshold, 0.01);
+    const aggression = Math.min((usagePct - threshold) / range, 1.5);
+    // Scale tier boundaries down — more aggression means earlier compression
+    // At aggression 0.0: original values (1× multiplier)
+    // At aggression 1.0: halved (0.5× multiplier)
+    // At aggression 1.5: quartered (0.25× multiplier) — emergency mode
+    const scaleFactor = Math.max(1 - aggression * 0.5, 0.25);
+    opts.fullContextTurns = Math.max(1, Math.round(opts.fullContextTurns * scaleFactor));
+    opts.tier1MaxAge      = Math.max(2, Math.round(opts.tier1MaxAge * scaleFactor));
+    opts.tier2MaxAge      = Math.max(3, Math.round(opts.tier2MaxAge * scaleFactor));
+    opts.msgTier0MaxAge   = Math.max(0, Math.round(opts.msgTier0MaxAge * scaleFactor));
+    opts.msgTier1MaxAge   = Math.max(1, Math.round(opts.msgTier1MaxAge * scaleFactor));
+
+    // Also shrink the char limits for heavy compression at high aggression
+    if (aggression >= 0.8) {
+      const charScale = Math.max(1 - (aggression - 0.8) * 1.5, 0.3);
+      opts.tier1HeadChars = Math.round(opts.tier1HeadChars * charScale);
+      opts.tier1TailChars = Math.round(opts.tier1TailChars * charScale);
+      opts.tier2HeadChars = Math.round(opts.tier2HeadChars * charScale);
+      opts.tier2TailChars = Math.round(opts.tier2TailChars * charScale);
+    }
+  }
 
   // Step 1: Apply tool output compression (existing system)
   let result = await cacheAndCompressItems(items, opts);
@@ -1607,6 +1659,27 @@ export function estimateSavings(original, compressed) {
   const savedChars = originalChars - compressedChars;
   const savedPct = originalChars > 0 ? Math.round((savedChars / originalChars) * 100) : 0;
   return { originalChars, compressedChars, savedChars, savedPct };
+}
+
+/**
+ * Estimate the context usage percentage for an items array.
+ *
+ * Uses a chars-to-tokens heuristic (1 token ≈ 4 chars) and the model's
+ * context window size.  Falls back to 128K tokens as the default window.
+ *
+ * @param {Array}  items               The items array to estimate
+ * @param {number} [contextWindowTokens=128000]  Model context window in tokens
+ * @returns {number}  Estimated fill ratio (0.0–1.0)
+ */
+export function estimateContextUsagePct(items, contextWindowTokens = 128_000) {
+  if (!Array.isArray(items) || items.length === 0) return 0;
+  const CHARS_PER_TOKEN = 4;
+  const totalChars = items.reduce(
+    (sum, item) => sum + (getItemText(item)?.length || 0),
+    0,
+  );
+  const estimatedTokens = totalChars / CHARS_PER_TOKEN;
+  return Math.min(estimatedTokens / contextWindowTokens, 1.0);
 }
 
 /**

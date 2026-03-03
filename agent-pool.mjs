@@ -50,7 +50,7 @@ import {
   streamRetryDelay,
   MAX_STREAM_RETRIES,
 } from "./stream-resilience.mjs";
-import { compressAllItems, estimateSavings, recordShreddingEvent } from "./context-cache.mjs";
+import { compressAllItems, estimateSavings, estimateContextUsagePct, recordShreddingEvent } from "./context-cache.mjs";
 import { resolveContextShreddingOptions } from "./context-shredding-config.mjs";
 
 // Lazy-load MCP registry to avoid circular dependencies.
@@ -2364,7 +2364,10 @@ export async function execPooledPrompt(userMessage, options = {}) {
 
   // Apply unified context compression — tool outputs, agent messages,
   // and user prompts.  Pinned instructions are never touched.
+  // Estimate context usage so shredding only kicks in above 50% fill.
   const shreddingOpts1 = resolveContextShreddingOptions(undefined, sdk);
+  const usagePct1 = estimateContextUsagePct(result.items);
+  shreddingOpts1.contextUsagePct = usagePct1;
   let compressedItems = result.items;
   try {
     compressedItems = await compressAllItems(result.items, shreddingOpts1);
@@ -3165,9 +3168,12 @@ export async function launchOrResumeThread(
   saveThreadRegistry().catch(() => {});
 
   // Apply tiered context compression for persistent threads
+  // Estimate context usage so shredding only kicks in above 50% fill.
   if (result.success && Array.isArray(result.items) && result.items.length > 0) {
     try {
       const shreddingOpts2 = resolveContextShreddingOptions(undefined, resultSdk);
+      const usagePct2 = estimateContextUsagePct(result.items);
+      shreddingOpts2.contextUsagePct = usagePct2;
       const compressedItems = await compressAllItems(result.items, shreddingOpts2);
       // Record shredding telemetry (non-fatal)
       try {

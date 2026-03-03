@@ -95,6 +95,13 @@ export const CONTENT_TYPES = Object.freeze([
 export const DEFAULT_SHREDDING_CONFIG = Object.freeze({
   enabled: true,
 
+  // ── Context-usage-based trigger ──────────────────────────────
+  // Shredding only activates once estimated context fill exceeds the
+  // threshold.  Below this percentage, items pass through uncompressed.
+  contextUsageThreshold: 0.50,  // start shredding at 50% context fill
+  contextUsageTarget:    0.40,  // target: compress down toward 40%
+  contextUsageCritical:  0.70,  // above 70%: maximum aggression
+
   // ── Tool output tier boundaries ──────────────────────────────
   fullContextTurns: 3,    // last N turns: full output (Tier 0)
   tier1MaxAge: 5,          // turns 3–5: light compression
@@ -169,6 +176,24 @@ function parseEnvInt(val, min, max) {
 }
 
 /**
+ * Parse a float environment variable value.
+ * Returns undefined if value is not set or NaN.
+ *
+ * @param {string|undefined} val
+ * @param {number} [min]
+ * @param {number} [max]
+ * @returns {number|undefined}
+ */
+function parseEnvFloat(val, min, max) {
+  if (val == null || val === "") return undefined;
+  const n = Number.parseFloat(val);
+  if (Number.isNaN(n)) return undefined;
+  if (min != null && n < min) return min;
+  if (max != null && n > max) return max;
+  return n;
+}
+
+/**
  * Load Context Shredding configuration from environment variables.
  *
  * Environment variables:
@@ -201,6 +226,16 @@ export function loadContextShreddingConfig() {
   // ── Master switch ─────────────────────────────────────────────
   const enabled = parseEnvBool(env[`${ENV_PREFIX}ENABLED`]);
   if (enabled != null) cfg.enabled = enabled;
+
+  // ── Context-usage thresholds ──────────────────────────────────
+  const usageThreshold = parseEnvFloat(env[`${ENV_PREFIX}USAGE_THRESHOLD`], 0.1, 1.0);
+  if (usageThreshold != null) cfg.contextUsageThreshold = usageThreshold;
+
+  const usageTarget = parseEnvFloat(env[`${ENV_PREFIX}USAGE_TARGET`], 0.1, 0.9);
+  if (usageTarget != null) cfg.contextUsageTarget = usageTarget;
+
+  const usageCritical = parseEnvFloat(env[`${ENV_PREFIX}USAGE_CRITICAL`], 0.3, 1.0);
+  if (usageCritical != null) cfg.contextUsageCritical = usageCritical;
 
   // ── Tier boundaries ───────────────────────────────────────────
   const fullTurns = parseEnvInt(env[`${ENV_PREFIX}FULL_CONTEXT_TURNS`], 1, 20);
@@ -378,6 +413,11 @@ export function resolveContextShreddingOptions(sessionType, agentType) {
  */
 function configToOptions(cfg) {
   return {
+    // Context-usage-based trigger
+    contextUsageThreshold: cfg.contextUsageThreshold,
+    contextUsageTarget: cfg.contextUsageTarget,
+    contextUsageCritical: cfg.contextUsageCritical,
+
     // Tier boundaries
     fullContextTurns: cfg.fullContextTurns,
     tier1MaxAge: cfg.tier1MaxAge,
@@ -432,6 +472,33 @@ export const CONTEXT_SHREDDING_ENV_DEFS = [
     type: "boolean",
     default: true,
     description: "Master switch for context compression. When off, agents receive their full history every turn (increases cost and risk of context overflow).",
+  },
+  {
+    key: "CONTEXT_SHREDDING_USAGE_THRESHOLD",
+    label: "Usage Threshold",
+    type: "number",
+    default: 0.50,
+    min: 0.1,
+    max: 1.0,
+    description: "Context fill percentage (0.0–1.0) at which shredding activates. Below this level, items pass through uncompressed. Default: 0.50 (50%).",
+  },
+  {
+    key: "CONTEXT_SHREDDING_USAGE_TARGET",
+    label: "Usage Target",
+    type: "number",
+    default: 0.40,
+    min: 0.1,
+    max: 0.9,
+    description: "Target context fill percentage. Shredding aims to compress items down toward this level. Default: 0.40 (40%).",
+  },
+  {
+    key: "CONTEXT_SHREDDING_USAGE_CRITICAL",
+    label: "Usage Critical",
+    type: "number",
+    default: 0.70,
+    min: 0.3,
+    max: 1.0,
+    description: "Context fill percentage above which maximum shredding aggression applies — all tier boundaries are halved and oldest items are aggressively compressed. Default: 0.70 (70%).",
   },
   {
     key: "CONTEXT_SHREDDING_FULL_CONTEXT_TURNS",

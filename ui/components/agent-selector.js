@@ -27,6 +27,7 @@ import {
   ToggleButtonGroup,
   Menu,
   MenuItem,
+  Select,
   Switch,
   FormControlLabel,
   Chip,
@@ -499,6 +500,23 @@ const muiDarkPaper = {
 
 export function AgentModeSelector() {
   const currentMode = agentMode.value;
+  const [isCompact, setIsCompact] = useState(() => {
+    try {
+      return globalThis.matchMedia?.("(max-width: 640px)")?.matches ?? false;
+    } catch { return false; }
+  });
+
+  useEffect(() => {
+    const mq = globalThis.matchMedia?.("(max-width: 640px)");
+    if (!mq) return;
+    const handler = (e) => setIsCompact(e.matches);
+    if (mq.addEventListener) mq.addEventListener("change", handler);
+    else mq.addListener(handler);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", handler);
+      else mq.removeListener(handler);
+    };
+  }, []);
 
   const handleChange = useCallback((_e, newMode) => {
     if (!newMode) return; // enforce at-least-one selection
@@ -506,6 +524,73 @@ export function AgentModeSelector() {
     setAgentMode(newMode);
   }, []);
 
+  const handleSelectChange = useCallback((e) => {
+    const newMode = e.target.value;
+    if (!newMode) return;
+    haptic("light");
+    setAgentMode(newMode);
+  }, []);
+
+  // Compact: dropdown Select for small screens
+  if (isCompact) {
+    const currentModeInfo = MODES.find(m => m.id === currentMode) || MODES[0];
+    return html`
+      <${Select}
+        value=${currentMode}
+        onChange=${handleSelectChange}
+        size="small"
+        variant="outlined"
+        displayEmpty
+        renderValue=${() => html`
+          <${Box} sx=${{ display: "flex", alignItems: "center", gap: 0.5 }}>
+            <span class="mode-icon">${resolveIcon(currentModeInfo.icon)}</span>
+            <${Typography} variant="body2" sx=${{ fontSize: 12, fontWeight: 500 }}>${currentModeInfo.label}<//>
+          <//>
+        `}
+        sx=${{
+          flexShrink: 0,
+          minWidth: 90,
+          "& .MuiSelect-select": {
+            py: 0.5,
+            pl: 1,
+            pr: "24px !important",
+            fontSize: 12,
+            fontWeight: 500,
+            display: "flex",
+            alignItems: "center",
+          },
+          "& .MuiOutlinedInput-notchedOutline": {
+            borderColor: "rgba(255,255,255,0.08)",
+          },
+          "&:hover .MuiOutlinedInput-notchedOutline": {
+            borderColor: "rgba(255,255,255,0.2)",
+          },
+          "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+            borderColor: "var(--tg-theme-button-color, #3b82f6)",
+          },
+          color: "var(--tg-theme-text-color, #fff)",
+          "& .MuiSvgIcon-root": { color: "var(--tg-theme-hint-color, #999)", fontSize: 18 },
+        }}
+        MenuProps=${{ PaperProps: { sx: muiDarkPaper } }}
+      >
+        ${MODES.map((m) => html`
+          <${MenuItem} key=${m.id} value=${m.id} sx=${{ fontSize: 13 }}>
+            <${ListItemIcon} sx=${{ minWidth: "28px !important" }}>
+              <span class="mode-icon" style="font-size:14px">${resolveIcon(m.icon)}</span>
+            <//>
+            <${ListItemText}
+              primary=${m.label}
+              secondary=${m.description}
+              primaryTypographyProps=${{ fontSize: 13, fontWeight: 500 }}
+              secondaryTypographyProps=${{ fontSize: 11 }}
+            />
+          <//>
+        `)}
+      <//>
+    `;
+  }
+
+  // Default: ToggleButtonGroup for wider screens
   return html`
     <${ToggleButtonGroup}
       value=${currentMode}

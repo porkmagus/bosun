@@ -815,10 +815,12 @@
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain;
-  scroll-padding-bottom: 80px;
+  scroll-padding-bottom: 120px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
-  padding: 24px 24px 48px;
+  /* Extra bottom padding ensures the last message is never hidden behind
+     the chat input area + its gradient overlay (approx 140px total). */
+  padding: 24px 24px 140px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2082,7 +2084,7 @@ ul.md-list li::before {
 }
 
 .app-shell[data-tab="chat"] .chat-view-embedded .chat-messages {
-  padding: 16px 20px 24px;
+  padding: 16px 20px 140px;
 }
 
 .app-shell[data-tab="chat"] .chat-input-area {
@@ -2537,7 +2539,7 @@ ul.md-list li::before {
   }
 
   .chat-messages {
-    padding: 12px 10px calc(var(--nav-height, 60px) + var(--safe-bottom, 0px) + 112px + var(--chat-keyboard-offset, 0px));
+    padding: 12px 10px calc(var(--nav-height, 60px) + var(--safe-bottom, 0px) + 160px + var(--chat-keyboard-offset, 0px));
     gap: 8px;
   }
 }
@@ -2545,7 +2547,7 @@ ul.md-list li::before {
 /* ═══ Desktop Chat Refinements ═══ */
 @media (min-width: 1200px) {
   .chat-messages {
-    padding: 24px 20px 48px;
+    padding: 24px 20px 140px;
     gap: 10px;
   }
 
@@ -2621,7 +2623,7 @@ ul.md-list li::before {
   }
 
   .app-shell[data-tab="chat"] .chat-view-embedded .chat-messages {
-    padding: 20px 24px 32px;
+    padding: 20px 24px 140px;
   }
 
   /* Ensure session-split fully fills the flex parent so input stays pinned */
@@ -2663,8 +2665,8 @@ ul.md-list li::before {
   position: absolute;
   left: 0;
   right: 0;
-  top: -24px;
-  height: 24px;
+  top: -40px;
+  height: 40px;
   background: linear-gradient(180deg, rgba(0, 0, 0, 0), var(--glass-bg));
   pointer-events: none;
 }

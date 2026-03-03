@@ -2022,14 +2022,23 @@ function App() {
           navigateTo("chat", { replace: true, skipGuard: true });
         }
       }
-      // Wait for UI components to mount before dispatching the voice launch
-      // event.  60 ms was too aggressive for cold-start Electron windows where
-      // JS bundles are still being parsed; 200 ms is reliably sufficient.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      if (cancelled) return;
-      globalThis.dispatchEvent?.(
-        new CustomEvent("ve:open-voice-mode", { detail: launch.detail }),
-      );
+      // Wait for UI components and the voice-mode event listener to mount.
+      // Cold-start Electron windows need more time — JS bundles are still
+      // being parsed.  We retry the dispatch up to 5 times with increasing
+      // delays to ensure the listener is registered before we give up.
+      const delays = [400, 600, 1000, 1500, 2000];
+      for (const delay of delays) {
+        if (cancelled) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (cancelled) return;
+        // Check if voice overlay is already open (a previous dispatch succeeded)
+        if (voiceOverlayOpen) return;
+        globalThis.dispatchEvent?.(
+          new CustomEvent("ve:open-voice-mode", { detail: launch.detail }),
+        );
+        // Brief wait to let the event handler run and update state
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     };
 
     start()

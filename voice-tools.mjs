@@ -547,7 +547,7 @@ const TOOL_DEFS = [
   {
     type: "function",
     name: "delegate_to_agent",
-    description: "Execute a task directly via a coding agent (codex, copilot, claude, gemini, or opencode). Creates a new live session and returns the result directly — no background handoff. Use for code changes, file creation, debugging, or any operation requiring workspace access.",
+    description: "Execute a CODE MODIFICATION task via a coding agent (codex, copilot, claude, gemini, or opencode). Creates a live session for writing code, modifying files, creating PRs, or running multi-step workflows. Do NOT use this for questions, status checks, or information retrieval — use ask_agent_context or direct tools instead. Only use when the user explicitly asks to write, fix, create, implement, refactor, or deploy code.",
     parameters: {
       type: "object",
       properties: {
