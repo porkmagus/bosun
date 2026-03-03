@@ -271,6 +271,7 @@
     "workflow-templates/security.mjs",
     "workflow-templates/task-batch.mjs",
     "workflow-templates/task-lifecycle.mjs",
+    "tools/",
     "ui/vendor/"
   ],
   "dependencies": {

@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  BUILTIN_TOOLS,
+  BUILTIN_TOOLS_DIR,
   TOOL_CATEGORIES,
   TOOL_DIR,
   buildToolsContext,
   deleteCustomTool,
+  getAffinityTools,
   getCustomTool,
   getToolsPromptBlock,
   invokeCustomTool,
+  listBuiltinTools,
   listCustomTools,
   promoteToGlobal,
   recordToolUsage,
@@ -193,7 +197,7 @@ describe("listCustomTools", () => {
   });
 
   it("filters by category", () => {
-    const tools = listCustomTools(tmpRoot, { category: "analysis", includeGlobal: false });
+    const tools = listCustomTools(tmpRoot, { category: "analysis", includeGlobal: false, includeBuiltins: false });
     expect(tools.map((t) => t.id)).toEqual(["t1"]);
   });
 
@@ -221,7 +225,7 @@ describe("listCustomTools", () => {
   });
 
   it("marks scope as 'workspace'", () => {
-    const tools = listCustomTools(tmpRoot, { includeGlobal: false });
+    const tools = listCustomTools(tmpRoot, { includeGlobal: false, includeBuiltins: false });
     expect(tools.every((t) => t.scope === "workspace")).toBe(true);
   });
 });
@@ -293,7 +297,7 @@ describe("promoteToGlobal", () => {
 // ---------------------------------------------------------------------------
 describe("getToolsPromptBlock", () => {
   it("returns '_(No custom tools registered yet.)_' when empty", () => {
-    const block = getToolsPromptBlock(tmpRoot);
+    const block = getToolsPromptBlock(tmpRoot, { includeBuiltins: false });
     expect(block).toContain("No custom tools registered yet");
   });
 
@@ -328,7 +332,7 @@ describe("getToolsPromptBlock", () => {
 // ---------------------------------------------------------------------------
 describe("buildToolsContext", () => {
   it("returns zero counts when no tools exist", () => {
-    const ctx = buildToolsContext(tmpRoot);
+    const ctx = buildToolsContext(tmpRoot, { includeBuiltins: false });
     expect(ctx.totalWorkspace).toBe(0);
     expect(ctx.totalGlobal).toBe(0);
     expect(ctx.tools).toHaveLength(0);
@@ -340,7 +344,7 @@ describe("buildToolsContext", () => {
     registerCustomTool(tmpRoot, makeTool({ id: "c2", category: "analysis", title: "A2", description: "d2" }));
     registerCustomTool(tmpRoot, makeTool({ id: "c3", category: "testing", title: "T1", description: "d3" }));
 
-    const ctx = buildToolsContext(tmpRoot);
+    const ctx = buildToolsContext(tmpRoot, { includeBuiltins: false });
     expect(ctx.totalWorkspace).toBe(3);
     expect(ctx.categories.analysis).toBe(2);
     expect(ctx.categories.testing).toBe(1);
@@ -403,5 +407,313 @@ describe("invokeCustomTool", () => {
 
     const after = getCustomTool(tmpRoot, "usage-track-tool");
     expect(after.entry.usageCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BUILTIN_TOOLS catalog
+// ---------------------------------------------------------------------------
+describe("BUILTIN_TOOLS", () => {
+  it("is frozen", () => {
+    expect(Object.isFrozen(BUILTIN_TOOLS)).toBe(true);
+  });
+
+  it("has at least 5 entries", () => {
+    expect(BUILTIN_TOOLS.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("every entry has required fields", () => {
+    for (const tool of BUILTIN_TOOLS) {
+      expect(typeof tool.id).toBe("string");
+      expect(tool.id.length).toBeGreaterThan(0);
+      expect(typeof tool.title).toBe("string");
+      expect(typeof tool.description).toBe("string");
+      expect(TOOL_CATEGORIES).toContain(tool.category);
+      expect(["mjs", "sh", "py"]).toContain(tool.lang);
+      expect(Array.isArray(tool.tags)).toBe(true);
+      expect(Array.isArray(tool.skills)).toBe(true);
+      expect(Array.isArray(tool.agents)).toBe(true);
+      expect(Array.isArray(tool.templates)).toBe(true);
+      expect(typeof tool.autoInject).toBe("boolean");
+      expect(typeof tool.version).toBe("string");
+    }
+  });
+
+  it("ids are unique within the catalog", () => {
+    const ids = BUILTIN_TOOLS.map((t) => t.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("includes expected well-known tool ids", () => {
+    const ids = BUILTIN_TOOLS.map((t) => t.id);
+    expect(ids).toContain("list-todos");
+    expect(ids).toContain("test-file-pairs");
+    expect(ids).toContain("git-hot-files");
+    expect(ids).toContain("imports-graph");
+    expect(ids).toContain("validate-no-floating-promises");
+  });
+
+  it("BUILTIN_TOOLS_DIR points to an existing directory", () => {
+    expect(existsSync(BUILTIN_TOOLS_DIR)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listBuiltinTools
+// ---------------------------------------------------------------------------
+describe("listBuiltinTools", () => {
+  it("returns an array matching BUILTIN_TOOLS length", () => {
+    const results = listBuiltinTools();
+    expect(results).toHaveLength(BUILTIN_TOOLS.length);
+  });
+
+  it("every entry has scope === 'builtin' and builtin === true", () => {
+    for (const t of listBuiltinTools()) {
+      expect(t.scope).toBe("builtin");
+      expect(t.builtin).toBe(true);
+    }
+  });
+
+  it("entries include skills/agents/templates arrays", () => {
+    for (const t of listBuiltinTools()) {
+      expect(Array.isArray(t.skills)).toBe(true);
+      expect(Array.isArray(t.agents)).toBe(true);
+      expect(Array.isArray(t.templates)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listCustomTools — includeBuiltins option
+// ---------------------------------------------------------------------------
+describe("listCustomTools with includeBuiltins", () => {
+  it("includes built-in tools when includeBuiltins=true (default)", () => {
+    const tools = listCustomTools(tmpRoot, { includeGlobal: false });
+    const builtinTools = tools.filter((t) => t.scope === "builtin");
+    expect(builtinTools.length).toBe(BUILTIN_TOOLS.length);
+  });
+
+  it("excludes built-in tools when includeBuiltins=false", () => {
+    const tools = listCustomTools(tmpRoot, { includeGlobal: false, includeBuiltins: false });
+    const builtinTools = tools.filter((t) => t.scope === "builtin");
+    expect(builtinTools).toHaveLength(0);
+  });
+
+  it("workspace tool overrides a builtin with the same id", () => {
+    const builtinId = BUILTIN_TOOLS[0].id;
+    // Register a workspace tool with the same id overriding the builtin
+    registerCustomTool(tmpRoot, makeTool({
+      id: builtinId,
+      title: "Workspace override",
+      description: "Overrides the builtin",
+    }));
+    const tools = listCustomTools(tmpRoot, { includeGlobal: false });
+    const matches = tools.filter((t) => t.id === builtinId);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].scope).toBe("workspace");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCustomTool — builtin fallback
+// ---------------------------------------------------------------------------
+describe("getCustomTool builtin fallback", () => {
+  it("resolves a builtin tool when not in workspace/global", () => {
+    const result = getCustomTool(tmpRoot, "list-todos");
+    expect(result).not.toBeNull();
+    expect(result.entry.scope).toBe("builtin");
+    expect(result.entry.builtin).toBe(true);
+    expect(typeof result.script).toBe("string");
+    expect(result.script.length).toBeGreaterThan(0);
+  });
+
+  it("workspace tool shadows builtin with same id", () => {
+    registerCustomTool(tmpRoot, makeTool({ id: "list-todos", description: "workspace shadow" }));
+    const result = getCustomTool(tmpRoot, "list-todos");
+    expect(result.entry.scope).toBe("workspace");
+    expect(result.entry.description).toBe("workspace shadow");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerCustomTool — affinity fields (skills / agents / templates)
+// ---------------------------------------------------------------------------
+describe("registerCustomTool affinity fields", () => {
+  it("persists skills, agents, templates, autoInject, version", () => {
+    const entry = registerCustomTool(tmpRoot, makeTool({
+      id: "affinity-tool",
+      skills: ["tdd-pattern.md", "code-quality-anti-patterns.md"],
+      agents: ["review-agent"],
+      templates: ["task-lifecycle"],
+      autoInject: true,
+      version: "2.1.0",
+    }));
+    expect(entry.skills).toEqual(["tdd-pattern.md", "code-quality-anti-patterns.md"]);
+    expect(entry.agents).toEqual(["review-agent"]);
+    expect(entry.templates).toEqual(["task-lifecycle"]);
+    expect(entry.autoInject).toBe(true);
+    expect(entry.version).toBe("2.1.0");
+  });
+
+  it("omits empty affinity arrays from entry to keep index lean", () => {
+    const entry = registerCustomTool(tmpRoot, makeTool({ id: "lean-tool" }));
+    // When no skills/agents/templates provided, they are omitted (not empty arrays)
+    expect(entry.skills).toBeUndefined();
+    expect(entry.agents).toBeUndefined();
+    expect(entry.templates).toBeUndefined();
+    expect(entry.autoInject).toBeUndefined();
+  });
+
+  it("survives round-trip through getCustomTool", () => {
+    registerCustomTool(tmpRoot, makeTool({
+      id: "rt-tool",
+      skills: ["pr-workflow.md"],
+      agents: ["primary-agent"],
+    }));
+    const result = getCustomTool(tmpRoot, "rt-tool");
+    expect(result.entry.skills).toEqual(["pr-workflow.md"]);
+    expect(result.entry.agents).toEqual(["primary-agent"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getAffinityTools
+// ---------------------------------------------------------------------------
+describe("getAffinityTools", () => {
+  beforeEach(() => {
+    // Register tools with different affinity metadata
+    registerCustomTool(tmpRoot, makeTool({
+      id: "review-tdd-tool",
+      title: "Review TDD Helper",
+      description: "Code review + test helper",
+      category: "testing",
+      skills: ["tdd-pattern.md", "code-quality-anti-patterns.md"],
+      agents: ["review-agent"],
+    }));
+    registerCustomTool(tmpRoot, makeTool({
+      id: "git-helper",
+      title: "Git Workflow Helper",
+      description: "Git operations helper",
+      category: "git",
+      skills: ["pr-workflow.md"],
+      agents: ["primary-agent"],
+    }));
+    registerCustomTool(tmpRoot, makeTool({
+      id: "unrelated-tool",
+      title: "Unrelated",
+      description: "No affinity",
+      category: "utility",
+    }));
+    registerCustomTool(tmpRoot, makeTool({
+      id: "auto-inject-tool",
+      title: "Always Here",
+      description: "autoInject tool",
+      category: "utility",
+      autoInject: true,
+    }));
+  });
+
+  it("returns tools matching activeSkills", () => {
+    const tools = getAffinityTools(tmpRoot, {
+      activeSkills: ["tdd-pattern.md"],
+      includeBuiltins: false,
+    });
+    const ids = tools.map((t) => t.id);
+    expect(ids).toContain("review-tdd-tool");
+    expect(ids).not.toContain("git-helper");
+  });
+
+  it("returns tools matching agentType", () => {
+    const tools = getAffinityTools(tmpRoot, {
+      agentType: "primary-agent",
+      includeBuiltins: false,
+    });
+    const ids = tools.map((t) => t.id);
+    expect(ids).toContain("git-helper");
+    expect(ids).not.toContain("review-tdd-tool");
+  });
+
+  it("includes autoInject tools even without explicit criteria match", () => {
+    const tools = getAffinityTools(tmpRoot, {
+      agentType: "deploy-agent",  // no tool matches this
+      includeBuiltins: false,
+    });
+    const ids = tools.map((t) => t.id);
+    expect(ids).toContain("auto-inject-tool");
+  });
+
+  it("higher skill overlap = higher rank", () => {
+    // review-tdd-tool matches both skills, git-helper matches only one
+    const tools = getAffinityTools(tmpRoot, {
+      activeSkills: ["tdd-pattern.md", "code-quality-anti-patterns.md"],
+      includeBuiltins: false,
+    });
+    expect(tools[0].id).toBe("review-tdd-tool");
+  });
+
+  it("returns empty array when hasCriteria=true and no tools match", () => {
+    const tools = getAffinityTools(tmpRoot, {
+      agentType: "nonexistent-agent-type",
+      includeBuiltins: false,
+    });
+    // autoInject-tool should still appear
+    const ids = tools.map((t) => t.id);
+    expect(ids).toContain("auto-inject-tool");
+    expect(ids).not.toContain("unrelated-tool");
+  });
+
+  it("without any criteria, returns tools sorted by usageCount", () => {
+    const tools = getAffinityTools(tmpRoot, { includeBuiltins: false });
+    // All workspace tools should be returned (limit default 8)
+    expect(tools.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildToolsContext — totalBuiltin field
+// ---------------------------------------------------------------------------
+describe("buildToolsContext totalBuiltin", () => {
+  it("includes totalBuiltin count", () => {
+    const ctx = buildToolsContext(tmpRoot, { includeBuiltins: true });
+    expect(ctx.totalBuiltin).toBe(BUILTIN_TOOLS.length);
+  });
+
+  it("totalBuiltin is 0 when includeBuiltins=false", () => {
+    const ctx = buildToolsContext(tmpRoot, { includeBuiltins: false });
+    expect(ctx.totalBuiltin).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getToolsPromptBlock — affinity filtering
+// ---------------------------------------------------------------------------
+describe("getToolsPromptBlock affinity", () => {
+  beforeEach(() => {
+    registerCustomTool(tmpRoot, makeTool({
+      id: "tdd-focused",
+      title: "TDD Helper",
+      description: "Helps with TDD workflows",
+      category: "testing",
+      skills: ["tdd-pattern.md"],
+      agents: ["primary-agent"],
+    }));
+  });
+
+  it("surfaces skill-affiliated tools first", () => {
+    const block = getToolsPromptBlock(tmpRoot, {
+      activeSkills: ["tdd-pattern.md"],
+      includeBuiltins: false,
+    });
+    expect(block).toContain("tdd-focused.mjs");
+  });
+
+  it("includes builtin label for builtin tools", () => {
+    const block = getToolsPromptBlock(tmpRoot, { includeBuiltins: true, limit: 20 });
+    expect(block).toContain("*(builtin)*");
+  });
+
+  it("includes Skills: line for tools with skill affinity", () => {
+    const block = getToolsPromptBlock(tmpRoot, { includeBuiltins: false });
+    expect(block).toContain("Skills:");
   });
 });

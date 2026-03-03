@@ -1,11 +1,29 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
+import { execSync } from "node:child_process";
 import vm from "node:vm";
 
 function listTopLevelModules() {
-  return readdirSync(process.cwd())
-    .filter((name) => name.endsWith(".mjs"))
-    .sort((a, b) => a.localeCompare(b));
+  try {
+    // Use git ls-files so untracked WIP files with syntax errors don't block commits.
+    // --cached: include staged files (new files added with git add)
+    // --others --exclude-standard: also include untracked non-ignored files? No — just cached.
+    const output = execSync("git ls-files --cached", {
+      encoding: "utf8",
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return output
+      .split("\n")
+      .map((f) => f.trim())
+      .filter((f) => f.endsWith(".mjs") && !f.includes("/")) // top-level only
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    // Fallback if not in a git repo
+    return readdirSync(process.cwd())
+      .filter((name) => name.endsWith(".mjs"))
+      .sort((a, b) => a.localeCompare(b));
+  }
 }
 
 /**

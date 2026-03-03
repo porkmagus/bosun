@@ -50,8 +50,15 @@ import {
 import { copyFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+/** Absolute path to the committed built-in tool scripts directory */
+export const BUILTIN_TOOLS_DIR = resolve(__dirname, "tools");
 
 const execFileAsync = promisify(execFile);
 
@@ -80,6 +87,103 @@ export const TOOL_CATEGORIES = Object.freeze([
 const VALID_LANGS = Object.freeze(["mjs", "sh", "py"]);
 
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+
+// ── Built-in Tool Catalog ─────────────────────────────────────────────────────
+
+/**
+ * Bosun-managed built-in tools committed to the repository under bosun/tools/.
+ * These are always available as a baseline — workspace and global tools take
+ * priority when they share the same ID.
+ *
+ * Each entry:
+ *   id          — filename without extension (must match bosun/tools/<id>.<lang>)
+ *   skills      — skill filenames that make this tool especially relevant
+ *   agents      — agent-type strings that benefit from this tool automatically
+ *   templates   — workflow template names this tool supports
+ *   autoInject  — if true, always surface in agent context even without explicit request
+ *
+ * @type {Readonly<import('./agent-custom-tools.mjs').BuiltinToolDef[]>}
+ */
+export const BUILTIN_TOOLS = Object.freeze([
+  {
+    id: "list-todos",
+    title: "List TODO/FIXME/HACK Comments",
+    description: "Scans codebase for TODO/FIXME/HACK/XXX markers and prints them with file + line number",
+    category: "search",
+    lang: "mjs",
+    tags: ["todo", "fixme", "technical-debt", "comments", "review"],
+    skills: ["code-quality-anti-patterns.md"],
+    agents: ["review-agent", "primary-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+  {
+    id: "test-file-pairs",
+    title: "Test File Coverage Pairs",
+    description: "Finds source files that lack a corresponding test file (*.test.mjs / .spec.ts / __tests__)",
+    category: "testing",
+    lang: "mjs",
+    tags: ["test", "coverage", "missing", "tdd"],
+    skills: ["tdd-pattern.md"],
+    agents: ["primary-agent", "review-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+  {
+    id: "git-hot-files",
+    title: "Git Hot Files (Churn Rank)",
+    description: "Ranks files by commit frequency over a configurable window — high churn = higher conflict/review risk",
+    category: "git",
+    lang: "mjs",
+    tags: ["git", "churn", "risk", "hotspot", "review"],
+    skills: ["pr-workflow.md", "commit-conventions.md", "agent-coordination.md"],
+    agents: ["review-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+  {
+    id: "imports-graph",
+    title: "Imports Graph (Who Uses Module)",
+    description: "Shows all files that import a given module or path fragment — impact analysis before rename/delete",
+    category: "analysis",
+    lang: "mjs",
+    tags: ["imports", "dependency", "impact", "refactor", "graph"],
+    skills: ["code-quality-anti-patterns.md"],
+    agents: ["primary-agent", "review-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+  {
+    id: "validate-no-floating-promises",
+    title: "Validate No Floating Promises",
+    description: "Detects void asyncFn() calls and other bare async patterns that cause unhandled rejections",
+    category: "validation",
+    lang: "mjs",
+    tags: ["async", "promise", "void", "unhandled", "crash", "quality"],
+    skills: ["code-quality-anti-patterns.md"],
+    agents: ["review-agent", "primary-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+  {
+    id: "dead-exports-scan",
+    title: "Dead Exports Scanner",
+    description: "Finds exported symbols never imported elsewhere — candidates for removal or cleanup",
+    category: "analysis",
+    lang: "mjs",
+    tags: ["dead-code", "exports", "unused", "cleanup", "refactor"],
+    skills: ["code-quality-anti-patterns.md"],
+    agents: ["review-agent"],
+    templates: [],
+    autoInject: false,
+    version: "1.0.0",
+  },
+]);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -155,7 +259,28 @@ function scriptPath(storeDir, id, lang) {
  * @property {string}   updatedAt    - ISO timestamp
  * @property {number}   usageCount   - number of times invoked
  * @property {string}   [lastUsed]   - ISO timestamp of last invocation
- * @property {"workspace"|"global"} scope
+ * @property {"workspace"|"global"|"builtin"} scope
+ * @property {string[]} [skills]     - skill filenames this tool complements (affinity wiring)
+ * @property {string[]} [agents]     - agent types that benefit from this tool automatically
+ * @property {string[]} [templates]  - workflow template names this tool supports
+ * @property {boolean}  [autoInject] - surface in every agent context without explicit request
+ * @property {string}   [version]    - semver version of the tool script
+ * @property {boolean}  [builtin]    - true for tools shipped with bosun
+ */
+
+/**
+ * @typedef {Object} BuiltinToolDef
+ * @property {string}   id
+ * @property {string}   title
+ * @property {string}   description
+ * @property {string}   category
+ * @property {"mjs"|"sh"|"py"} lang
+ * @property {string[]} tags
+ * @property {string[]} skills
+ * @property {string[]} agents
+ * @property {string[]} templates
+ * @property {boolean}  autoInject
+ * @property {string}   version
  */
 
 // ── Core API ──────────────────────────────────────────────────────────────────
@@ -174,6 +299,7 @@ export function listCustomTools(rootDir, opts = {}) {
     scope = "all",
     search,
     includeGlobal = true,
+    includeBuiltins = true,
   } = opts;
 
   let entries = [];
@@ -198,6 +324,14 @@ export function listCustomTools(rootDir, opts = {}) {
     const wsIds = new Set(entries.map((e) => e.id));
     for (const ge of globalEntries) {
       if (!wsIds.has(ge.id)) entries.push(ge);
+    }
+  }
+
+  // Builtin tools (lowest priority — overridden by workspace/global with same id)
+  if (includeBuiltins && scope !== "workspace" && scope !== "global") {
+    const existingIds = new Set(entries.map((e) => e.id));
+    for (const be of listBuiltinTools()) {
+      if (!existingIds.has(be.id)) entries.push(be);
     }
   }
 
@@ -232,7 +366,7 @@ export function listCustomTools(rootDir, opts = {}) {
  * @returns {{ entry: CustomToolEntry, script: string }|null}
  */
 export function getCustomTool(rootDir, toolId) {
-  // Workspace-scoped takes precedence
+  // Workspace-scoped takes precedence, then global, then builtin
   for (const isGlobal of [false, true]) {
     const storeDir = getToolStore(rootDir, { global: isGlobal });
     const index = safeReadIndex(storeDir);
@@ -247,6 +381,27 @@ export function getCustomTool(rootDir, toolId) {
       script: readFileSync(sPath, "utf8"),
     };
   }
+
+  // Fall back to built-in tools shipped with bosun
+  const builtinDef = BUILTIN_TOOLS.find((b) => b.id === toolId);
+  if (builtinDef) {
+    const sPath = resolve(BUILTIN_TOOLS_DIR, `${builtinDef.id}.${builtinDef.lang}`);
+    if (existsSync(sPath)) {
+      return {
+        entry: {
+          ...builtinDef,
+          scope: "builtin",
+          builtin: true,
+          createdBy: "bosun",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+          usageCount: 0,
+        },
+        script: readFileSync(sPath, "utf8"),
+      };
+    }
+  }
+
   return null;
 }
 
@@ -269,6 +424,12 @@ export function registerCustomTool(rootDir, def) {
     createdBy = "agent",
     taskId,
     global: isGlobal = false,
+    // Affinity / wiring metadata
+    skills = [],
+    agents = [],
+    templates = [],
+    autoInject = false,
+    version,
   } = def;
 
   if (!title || typeof title !== "string") {
@@ -312,6 +473,12 @@ export function registerCustomTool(rootDir, def) {
       ? { lastUsed: index[existingIdx].lastUsed }
       : {}),
     scope: isGlobal ? "global" : "workspace",
+    // Affinity metadata (persisted for future skill/agent matching)
+    ...(skills.length > 0 ? { skills } : {}),
+    ...(agents.length > 0 ? { agents } : {}),
+    ...(templates.length > 0 ? { templates } : {}),
+    ...(autoInject ? { autoInject } : {}),
+    ...(version ? { version } : {}),
   };
 
   // Write script file
@@ -352,9 +519,14 @@ export async function invokeCustomTool(rootDir, toolId, args = [], opts = {}) {
   }
 
   const { entry } = result;
-  const isGlobal = entry.scope === "global";
-  const storeDir = getToolStore(rootDir, { global: isGlobal });
-  const sPath = scriptPath(storeDir, entry.id, entry.lang);
+  let sPath;
+  if (entry.scope === "builtin") {
+    sPath = resolve(BUILTIN_TOOLS_DIR, `${entry.id}.${entry.lang}`);
+  } else {
+    const isGlobal = entry.scope === "global";
+    const storeDir = getToolStore(rootDir, { global: isGlobal });
+    sPath = scriptPath(storeDir, entry.id, entry.lang);
+  }
 
   const timeout = opts.timeout ?? DEFAULT_TOOL_TIMEOUT_MS;
   const cwd = opts.cwd ?? rootDir;
@@ -505,18 +677,47 @@ export async function promoteToGlobal(rootDir, toolId) {
  * and reflect on whether to create new tools.
  *
  * @param {string} rootDir
- * @param {{ limit?: number, category?: string, tags?: string[], emitReflectHint?: boolean }} [opts]
+ * @param {{ limit?: number, category?: string, tags?: string[], emitReflectHint?: boolean, activeSkills?: string[], agentType?: string, template?: string, includeBuiltins?: boolean }} [opts]
  * @returns {string}
  */
 export function getToolsPromptBlock(rootDir, opts = {}) {
-  const { limit = 12, category, tags, emitReflectHint = true } = opts;
-  const tools = listCustomTools(rootDir, { category, tags }).slice(0, limit);
+  const {
+    limit = 16,
+    category,
+    tags,
+    emitReflectHint = true,
+    // Affinity context — when provided, relevant tools are surfaced first
+    activeSkills,
+    agentType,
+    template,
+    includeBuiltins = true,
+  } = opts;
+
+  let tools;
+  if (activeSkills?.length > 0 || agentType || template) {
+    // Affinity pass first: tools wired to the active skills/agent/template
+    const affinityTools = getAffinityTools(rootDir, {
+      activeSkills,
+      agentType,
+      template,
+      limit,
+      includeBuiltins,
+    });
+    const affinityIds = new Set(affinityTools.map((t) => t.id));
+    const remaining = listCustomTools(rootDir, { category, tags, includeBuiltins })
+      .filter((t) => !affinityIds.has(t.id))
+      .slice(0, Math.max(0, limit - affinityTools.length));
+    tools = [...affinityTools, ...remaining];
+  } else {
+    tools = listCustomTools(rootDir, { category, tags, includeBuiltins }).slice(0, limit);
+  }
 
   const lines = [
     "## Custom Tools Library",
     "",
-    "The following reusable helper scripts are available in `.bosun/tools/`.",
-    "Run them via `node <tool>.mjs`, `bash <tool>.sh`, or `python3 <tool>.py`.",
+    "The following reusable helper scripts are available. Run them via",
+    "`node <tool>.mjs`, `bash <tool>.sh`, or `python3 <tool>.py`.",
+    "Built-in tools live in `bosun/tools/`; workspace tools in `.bosun/tools/`.",
     "",
   ];
 
@@ -535,10 +736,15 @@ export function getToolsPromptBlock(rootDir, opts = {}) {
     for (const [cat, entries] of byCategory) {
       lines.push(`### ${cat}`);
       for (const e of entries) {
-        const scopeTag = e.scope === "global" ? " *(global)*" : "";
-        const usageTag =
-          e.usageCount > 0 ? ` — used ${e.usageCount}×` : "";
+        const scopeTag =
+          e.scope === "global" ? " *(global)*"
+          : e.scope === "builtin" ? " *(builtin)*"
+          : "";
+        const usageTag = e.usageCount > 0 ? ` — used ${e.usageCount}×` : "";
         lines.push(`- **${e.id}.${e.lang}** — ${e.description}${scopeTag}${usageTag}`);
+        if (e.skills?.length > 0) {
+          lines.push(`  Skills: ${e.skills.join(", ")}`);
+        }
         if (e.tags?.length > 0) {
           lines.push(`  Tags: \`${e.tags.join("`, `")}\``);
         }
@@ -573,18 +779,121 @@ export function getToolsPromptBlock(rootDir, opts = {}) {
  * @returns {{ tools: CustomToolEntry[], categories: Record<string, number>, totalGlobal: number, totalWorkspace: number }}
  */
 export function buildToolsContext(rootDir, opts = {}) {
-  const { limit = 50 } = opts;
-  const allTools = listCustomTools(rootDir, { includeGlobal: true });
+  const { limit = 50, includeBuiltins = true } = opts;
+  const allTools = listCustomTools(rootDir, { includeGlobal: true, includeBuiltins });
   const tools = allTools.slice(0, limit);
 
   const categories = {};
   let totalGlobal = 0;
   let totalWorkspace = 0;
+  let totalBuiltin = 0;
   for (const t of allTools) {
     categories[t.category] = (categories[t.category] ?? 0) + 1;
     if (t.scope === "global") totalGlobal++;
+    else if (t.scope === "builtin") totalBuiltin++;
     else totalWorkspace++;
   }
 
-  return { tools, categories, totalGlobal, totalWorkspace };
+  return { tools, categories, totalGlobal, totalWorkspace, totalBuiltin };
+}
+
+// ── Builtin & Affinity API ──────────────────────────────────────────────────
+
+/**
+ * Return all built-in tools as CustomToolEntry objects.
+ * These are the tools committed to bosun/tools/ and shipped with the package.
+ * They are always available at lowest priority (workspace/global override by id).
+ *
+ * @returns {CustomToolEntry[]}
+ */
+export function listBuiltinTools() {
+  return BUILTIN_TOOLS.map((b) => ({
+    id: b.id,
+    title: b.title,
+    description: b.description,
+    category: b.category,
+    lang: b.lang,
+    tags: b.tags ?? [],
+    skills: b.skills ?? [],
+    agents: b.agents ?? [],
+    templates: b.templates ?? [],
+    autoInject: b.autoInject ?? false,
+    version: b.version ?? "1.0.0",
+    builtin: true,
+    scope: "builtin",
+    createdBy: "bosun",
+    createdAt: "2024-01-01T00:00:00.000Z",
+    updatedAt: "2024-01-01T00:00:00.000Z",
+    usageCount: 0,
+  }));
+}
+
+/**
+ * Return tools most relevant to the current agent context.
+ *
+ * Tools are scored by how many affinity criteria they satisfy:
+ *   - Each matching skill  = +3 points
+ *   - Matching agentType   = +2 points
+ *   - Matching template    = +2 points
+ *   - autoInject flag set  = +1 point
+ *
+ * If no criteria are passed, returns the top tools by usage count.
+ *
+ * @param {string} rootDir
+ * @param {{
+ *   activeSkills?: string[],
+ *   agentType?: string,
+ *   template?: string,
+ *   limit?: number,
+ *   includeBuiltins?: boolean,
+ *   category?: string,
+ *   tags?: string[],
+ * }} [opts]
+ * @returns {CustomToolEntry[]}
+ */
+export function getAffinityTools(rootDir, opts = {}) {
+  const {
+    activeSkills = [],
+    agentType,
+    template,
+    limit = 8,
+    includeBuiltins = true,
+    category,
+    tags,
+  } = opts;
+
+  const all = listCustomTools(rootDir, { includeBuiltins, category, tags });
+
+  const hasCriteria = activeSkills.length > 0 || !!agentType || !!template;
+
+  const scored = all.map((tool) => {
+    let score = 0;
+
+    // Skills affinity (strongest signal — tool was explicitly designed for this skill)
+    if (activeSkills.length > 0 && tool.skills?.length > 0) {
+      const hits = activeSkills.filter((s) => tool.skills.includes(s)).length;
+      score += hits * 3;
+    }
+
+    // Agent type affinity
+    if (agentType && tool.agents?.includes(agentType)) {
+      score += 2;
+    }
+
+    // Template affinity
+    if (template && tool.templates?.includes(template)) {
+      score += 2;
+    }
+
+    // autoInject tools always appear in context
+    if (tool.autoInject) score += 1;
+
+    return { tool, score };
+  });
+
+  return scored
+    .filter((s) => !hasCriteria || s.score > 0)
+    .sort((a, b) => b.score - a.score || b.tool.usageCount - a.tool.usageCount)
+    .slice(0, limit)
+    .map((s) => s.tool);
 }
