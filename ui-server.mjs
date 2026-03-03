@@ -598,8 +598,12 @@ const VOICE_SIDE_EFFECT_TOOL_NAMES = new Set([
   "create_task",
   "update_task_status",
   "delete_task",
+  "comment_on_task",
   "create_workflow",
-  "update_workflow",
+  "update_workflow_definition",
+  "create_workflow_from_template",
+  "generate_workflow_with_agent",
+  "execute_workflow",
   "delete_workflow",
   "update_config",
   "switch_agent",
@@ -12234,8 +12238,15 @@ async function handleApi(req, res, url) {
   if (path === "/api/voice/prompt" && req.method === "GET") {
     try {
       const compact = url.searchParams?.get("compact") === "true";
+      const context = {
+        sessionId: String(url.searchParams?.get("sessionId") || "").trim() || undefined,
+        voiceAgentId: String(url.searchParams?.get("voiceAgentId") || "").trim() || undefined,
+        mode: String(url.searchParams?.get("mode") || "").trim() || undefined,
+        executor: String(url.searchParams?.get("executor") || "").trim() || undefined,
+        model: String(url.searchParams?.get("model") || "").trim() || undefined,
+      };
       const { buildVoiceAgentPrompt } = await import("./voice-relay.mjs");
-      const prompt = await buildVoiceAgentPrompt({ compact });
+      const prompt = await buildVoiceAgentPrompt({ compact, context });
       jsonResponse(res, 200, { ok: true, prompt });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });

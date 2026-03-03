@@ -53,6 +53,7 @@ const executeDialogWorkflow = signal(null);   // full workflow def
 const executeDialogVars = signal({});          // editable variable overrides
 const executeDialogLaunching = signal(false);
 const executeDialogResult = signal(null);      // { ok, error?, ... }
+const executeDialogMode = signal("quick");     // "quick" | "advanced"
 
 function returnToWorkflowList() {
   selectedNodeId.value = null;
@@ -160,6 +161,8 @@ async function openExecuteDialog(workflowId) {
     executeDialogVars.value = vars;
     executeDialogResult.value = null;
     executeDialogLaunching.value = false;
+    const requiredCount = Object.values(vars).filter((v) => v === "" || v == null).length;
+    executeDialogMode.value = requiredCount > 0 ? "quick" : "advanced";
     executeDialogOpen.value = true;
   } catch (err) {
     showToast("Failed to load workflow", "error");
@@ -172,6 +175,7 @@ function closeExecuteDialog() {
   executeDialogVars.value = {};
   executeDialogResult.value = null;
   executeDialogLaunching.value = false;
+  executeDialogMode.value = "quick";
 }
 
 async function launchFromDialog() {
@@ -180,7 +184,26 @@ async function launchFromDialog() {
   executeDialogLaunching.value = true;
   executeDialogResult.value = null;
   try {
-    const data = await executeWorkflow(wf.id, executeDialogVars.value);
+    const rawVars = executeDialogVars.value || {};
+    const payload = {};
+    for (const [key, val] of Object.entries(rawVars)) {
+      if (typeof val === "string") {
+        const trimmed = val.trim();
+        if (
+          (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && trimmed.endsWith("]"))
+        ) {
+          try {
+            payload[key] = JSON.parse(trimmed);
+            continue;
+          } catch {
+            // keep as string when parsing fails; dialog validation already blocks obvious JSON errors
+          }
+        }
+      }
+      payload[key] = val;
+    }
+    const data = await executeWorkflow(wf.id, payload);
     executeDialogResult.value = { ok: true, ...data };
     setTimeout(() => closeExecuteDialog(), 1200);
   } catch (err) {
@@ -213,11 +236,89 @@ function inferVarHelp(key, value) {
   return "";
 }
 
-/** Detect the field type from a variable's key + default value */
-function inferVarType(key, value) {
+function inferVarOptions(key, value) {
+  const k = String(key || "").toLowerCase();
+  const options = [];
+  if (k.includes("executor") || k.includes("sdk")) {
+    options.push("auto", "codex", "claude", "copilot");
+  } else if (k.includes("bumptype") || k.includes("bump_type")) {
+    options.push("patch", "minor", "major");
+  }
+  if (typeof value === "string" && value.trim()) {
+    options.unshift(value.trim());
+  }
+  const deduped = [];
+  const seen = new Set();
+  for (const opt of options) {
+    const keyText = String(opt);
+    if (seen.has(keyText)) continue;
+    seen.add(keyText);
+    deduped.push({ value: opt, label: String(opt) });
+  }
+  return deduped;
+}
+
+function inferVarInputKind(key, value) {
   if (typeof value === "boolean") return "toggle";
   if (typeof value === "number") return "number";
+  if (Array.isArray(value) || (value && typeof value === "object")) return "json";
+  if (inferVarOptions(key, value).length > 0) return "select";
   return "text";
+}
+
+function isLongTextVar(key, value) {
+  const k = String(key || "").toLowerCase();
+  return (
+    k.includes("prompt") ||
+    k.includes("problem") ||
+    k.includes("description") ||
+    k.includes("query") ||
+    k.includes("body") ||
+    k.includes("content") ||
+    k.includes("instructions") ||
+    (typeof value === "string" && value.length > 80)
+  );
+}
+
+function isQuickVarKey(key) {
+  const k = String(key || "").toLowerCase();
+  return (
+    k.includes("task") ||
+    k.includes("prompt") ||
+    k.includes("problem") ||
+    k.includes("message") ||
+    k.includes("query") ||
+    k.includes("executor") ||
+    k.includes("sdk") ||
+    k.includes("model") ||
+    k.includes("branch") ||
+    k.includes("title")
+  );
+}
+
+function formatVarPreview(value) {
+  if (value == null) return "empty";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "empty";
+    return trimmed.length > 42 ? `${trimmed.slice(0, 42)}…` : trimmed;
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  try {
+    const json = JSON.stringify(value);
+    return json.length > 42 ? `${json.slice(0, 42)}…` : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function isMissingVarValue(raw, inputKind) {
+  if (inputKind === "toggle") return false;
+  if (raw == null) return true;
+  if (typeof raw === "string") return raw.trim() === "";
+  if (Array.isArray(raw)) return raw.length === 0;
+  return false;
 }
 
 /**
@@ -230,54 +331,90 @@ function ExecuteWorkflowDialog() {
   const vars = executeDialogVars.value;
   const launching = executeDialogLaunching.value;
   const result = executeDialogResult.value;
+  const mode = executeDialogMode.value;
 
   if (!open || !wf) return null;
 
-  const entries = Object.entries(vars);
+  const entries = Object.entries(vars || {});
   const hasVars = entries.length > 0;
 
-  // Separate required (empty/null defaults) from optional (has defaults)
-  const required = entries.filter(([, v]) => v === "" || v == null);
-  const optional = entries.filter(([, v]) => v !== "" && v != null);
+  const descriptors = entries.map(([key, value]) => {
+    const inputKind = inferVarInputKind(key, value);
+    return {
+      key,
+      value,
+      label: humanizeVarKey(key),
+      help: inferVarHelp(key, value),
+      required: value === "" || value == null,
+      inputKind,
+      options: inferVarOptions(key, value),
+      quick: isQuickVarKey(key) || value === "" || value == null,
+    };
+  });
+
+  const required = descriptors.filter((d) => d.required);
+  const optional = descriptors.filter((d) => !d.required);
+  const quickOptional = optional.filter((d) => d.quick).slice(0, 4);
+  const quickKeys = new Set([...required, ...quickOptional].map((d) => d.key));
+  const quickFields = descriptors.filter((d) => quickKeys.has(d.key));
 
   const updateVar = (key, val) => {
     executeDialogVars.value = { ...executeDialogVars.value, [key]: val };
+    executeDialogResult.value = null;
   };
 
   const resetDefaults = () => {
     if (wf.variables) {
       executeDialogVars.value = { ...wf.variables };
     }
+    executeDialogMode.value = required.length > 0 ? "quick" : "advanced";
+    executeDialogResult.value = null;
   };
 
-  const renderField = ([key, value]) => {
-    const type = inferVarType(key, wf.variables?.[key] ?? value);
-    const help = inferVarHelp(key, value);
-    const label = humanizeVarKey(key);
+  const invalidJsonFields = [];
+  const missingRequiredFields = [];
+  for (const desc of descriptors) {
+    const current = vars?.[desc.key];
+    if (desc.required && isMissingVarValue(current, desc.inputKind)) {
+      missingRequiredFields.push(desc.label);
+    }
+    if (desc.inputKind === "json" && !isMissingVarValue(current, desc.inputKind)) {
+      try {
+        JSON.parse(String(current));
+      } catch {
+        invalidJsonFields.push(desc.label);
+      }
+    }
+  }
+  const canLaunch = !launching && missingRequiredFields.length === 0 && invalidJsonFields.length === 0;
 
-    if (type === "toggle") {
+  const renderField = (descriptor) => {
+    const { key, value, label, help, inputKind, options, required: isRequired } = descriptor;
+    const current = vars?.[key] ?? value;
+
+    if (inputKind === "toggle") {
       return html`
         <${FormControlLabel}
           key=${key}
           control=${html`<${Switch}
-            checked=${Boolean(value)}
+            checked=${Boolean(current)}
             onChange=${(e) => updateVar(key, e.target.checked)}
             size="small"
           />`}
-          label=${label}
+          label=${html`<span>${label}${isRequired ? html` <span style="color:#f59e0b">*</span>` : ""}</span>`}
           sx=${{ mb: 1 }}
         />
-        ${help && html`<${Typography} variant="caption" sx=${{ color: 'text.secondary', display: 'block', mt: -0.5, mb: 1, ml: 5.5 }}>${help}<//>`}
+        ${help && html`<${Typography} variant="caption" sx=${{ color: "text.secondary", display: "block", mt: -0.5, mb: 1, ml: 5.5 }}>${help}<//>`}
       `;
     }
 
-    if (type === "number") {
+    if (inputKind === "number") {
       return html`
         <${TextField}
           key=${key}
-          label=${label}
+          label=${label + (isRequired ? " *" : "")}
           type="number"
-          value=${value ?? ""}
+          value=${current ?? ""}
           onChange=${(e) => updateVar(key, e.target.value === "" ? "" : Number(e.target.value))}
           helperText=${help}
           size="small"
@@ -287,15 +424,48 @@ function ExecuteWorkflowDialog() {
       `;
     }
 
-    // Multiline for long-text keys
-    const k = key.toLowerCase();
-    const multiline = k.includes("prompt") || k.includes("problem") || k.includes("description") || k.includes("query") || k.includes("body") || k.includes("content");
+    if (inputKind === "json") {
+      return html`
+        <${TextField}
+          key=${key}
+          label=${label + (isRequired ? " *" : "")}
+          value=${current ?? ""}
+          onChange=${(e) => updateVar(key, e.target.value)}
+          helperText=${help || "JSON object or array"}
+          size="small"
+          fullWidth
+          multiline
+          minRows=${3}
+          maxRows=${8}
+          sx=${{ mb: 1.5, "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.82rem" } }}
+        />
+      `;
+    }
 
+    if (inputKind === "select" && options.length > 0) {
+      return html`
+        <${FormControl} key=${key} fullWidth size="small" sx=${{ mb: 1.5 }}>
+          <${InputLabel}>${label + (isRequired ? " *" : "")}</${InputLabel}>
+          <${Select}
+            value=${current ?? ""}
+            label=${label + (isRequired ? " *" : "")}
+            onChange=${(e) => updateVar(key, e.target.value)}
+          >
+            ${options.map((opt) => html`<${MenuItem} key=${String(opt.value)} value=${opt.value}>${opt.label}</${MenuItem}>`)}
+          </${Select}>
+          <${Typography} variant="caption" sx=${{ color: "text.secondary", mt: 0.5, ml: 1.5 }}>
+            ${help || "Preset options"}.
+          </${Typography}>
+        </${FormControl}>
+      `;
+    }
+
+    const multiline = isLongTextVar(key, current);
     return html`
       <${TextField}
         key=${key}
-        label=${label}
-        value=${value ?? ""}
+        label=${label + (isRequired ? " *" : "")}
+        value=${current ?? ""}
         onChange=${(e) => updateVar(key, e.target.value)}
         helperText=${help}
         size="small"
@@ -312,7 +482,7 @@ function ExecuteWorkflowDialog() {
     <${Dialog}
       open=${true}
       onClose=${closeExecuteDialog}
-      maxWidth="sm"
+      maxWidth="md"
       fullWidth
       PaperProps=${{ sx: { bgcolor: 'var(--color-bg-secondary, #1a1f2e)', color: 'var(--color-text, #e8eaf0)', borderRadius: '12px' } }}
     >
@@ -334,19 +504,73 @@ function ExecuteWorkflowDialog() {
           <//>
         `}
 
-        ${required.length > 0 && html`
-          <${Typography} variant="subtitle2" sx=${{ mb: 1, color: '#f59e0b', fontWeight: 600 }}>
-            Required Parameters
-          <//>
-          ${required.map(renderField)}
-          <${Divider} sx=${{ my: 1.5 }} />
+        ${hasVars && html`
+          <${Tabs}
+            value=${mode}
+            onChange=${(_e, next) => { executeDialogMode.value = next; }}
+            variant="fullWidth"
+            sx=${{ mb: 2, minHeight: 38, "& .MuiTab-root": { minHeight: 38, textTransform: "none", fontSize: "0.8rem" } }}
+          >
+            <${Tab} value="quick" label=${`Quick (${quickFields.length})`} />
+            <${Tab} value="advanced" label=${`Advanced (${descriptors.length})`} />
+          </${Tabs}>
         `}
 
-        ${optional.length > 0 && html`
-          <${Typography} variant="subtitle2" sx=${{ mb: 1, fontWeight: 600 }}>
-            Optional Parameters ${html`<${Chip} label=${String(optional.length)} size="small" sx=${{ ml: 1, height: 20, fontSize: '11px' }} />`}
-          <//>
-          ${optional.map(renderField)}
+        ${missingRequiredFields.length > 0 && html`
+          <${Alert} severity="warning" sx=${{ mb: 1.5 }}>
+            Missing required fields: ${missingRequiredFields.join(", ")}
+          </${Alert}>
+        `}
+        ${invalidJsonFields.length > 0 && html`
+          <${Alert} severity="error" sx=${{ mb: 1.5 }}>
+            Invalid JSON in: ${invalidJsonFields.join(", ")}
+          </${Alert}>
+        `}
+
+        ${mode === "quick" && hasVars && html`
+          ${quickFields.map(renderField)}
+          ${optional.length > 0 && html`
+            <${Divider} sx=${{ my: 1.5 }} />
+            <${Typography} variant="subtitle2" sx=${{ mb: 1, fontWeight: 600 }}>
+              Optional Defaults <${Chip} label=${String(optional.length)} size="small" sx=${{ ml: 1, height: 20, fontSize: "11px" }} />
+            </${Typography}>
+            <${Box} sx=${{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
+              ${optional.map((item) => html`
+                <${Chip}
+                  key=${item.key}
+                  size="small"
+                  variant="outlined"
+                  label=${`${item.label}: ${formatVarPreview(vars[item.key])}`}
+                  sx=${{ fontSize: "10px" }}
+                />
+              `)}
+            </${Box}>
+            <${Button}
+              size="small"
+              variant="text"
+              onClick=${() => { executeDialogMode.value = "advanced"; }}
+              sx=${{ mt: 1, textTransform: "none" }}
+            >
+              Open Advanced Overrides
+            </${Button}>
+          `}
+        `}
+
+        ${mode === "advanced" && hasVars && html`
+          ${required.length > 0 && html`
+            <${Typography} variant="subtitle2" sx=${{ mb: 1, color: "#f59e0b", fontWeight: 600 }}>
+              Required Parameters
+            <//>
+            ${required.map(renderField)}
+            <${Divider} sx=${{ my: 1.5 }} />
+          `}
+
+          ${optional.length > 0 && html`
+            <${Typography} variant="subtitle2" sx=${{ mb: 1, fontWeight: 600 }}>
+              Optional Parameters <${Chip} label=${String(optional.length)} size="small" sx=${{ ml: 1, height: 20, fontSize: "11px" }} />
+            </${Typography}>
+            ${optional.map(renderField)}
+          `}
         `}
 
         ${hasVars && html`
@@ -370,7 +594,7 @@ function ExecuteWorkflowDialog() {
         <${Button}
           variant="contained"
           onClick=${launchFromDialog}
-          disabled=${launching}
+          disabled=${!canLaunch}
           startIcon=${launching ? html`<${CircularProgress} size=${16} />` : null}
           sx=${{ textTransform: 'none' }}
         >

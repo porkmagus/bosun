@@ -157,6 +157,62 @@ vi.mock("../workflow-engine.mjs", () => ({
   })),
 }));
 
+vi.mock("../agent-prompts.mjs", () => ({
+  AGENT_PROMPT_DEFINITIONS: [
+    {
+      key: "orchestrator",
+      filename: "orchestrator.md",
+      description: "Primary task execution prompt for autonomous task agents.",
+    },
+    {
+      key: "voiceAgent",
+      filename: "voice-agent.md",
+      description: "Voice agent system prompt for real-time voice sessions with action dispatch.",
+    },
+  ],
+  getAgentPromptDefinitions: vi.fn(() => [
+    {
+      key: "orchestrator",
+      filename: "orchestrator.md",
+      description: "Primary task execution prompt for autonomous task agents.",
+    },
+    {
+      key: "voiceAgent",
+      filename: "voice-agent.md",
+      description: "Voice agent system prompt for real-time voice sessions with action dispatch.",
+    },
+  ]),
+  getPromptDefaultUpdateStatus: vi.fn(() => ({
+    workspaceDir: "/tmp/.bosun/agents",
+    summary: {
+      total: 2,
+      missing: 0,
+      upToDate: 1,
+      updateAvailable: 1,
+      needsReview: 0,
+    },
+    updates: [
+      {
+        key: "orchestrator",
+        updateAvailable: true,
+        needsReview: false,
+        reason: "default-updated",
+      },
+      {
+        key: "voiceAgent",
+        updateAvailable: false,
+        needsReview: false,
+        reason: "up-to-date",
+      },
+    ],
+  })),
+  applyPromptDefaultUpdates: vi.fn((_repoRoot, options = {}) => ({
+    workspaceDir: "/tmp/.bosun/agents",
+    updated: Array.isArray(options?.keys) && options.keys.length ? options.keys : ["orchestrator"],
+    skipped: [],
+  })),
+}));
+
 vi.mock("../vision-session-state.mjs", () => ({
   getVisionSessionState: vi.fn(() => ({
     lastFrameDataUrl: "data:image/jpeg;base64,ZmFrZQ==",
@@ -182,6 +238,7 @@ const {
 
 const { execPrimaryPrompt, setPrimaryAgent } = await import("../primary-agent.mjs");
 const { execPooledPrompt } = await import("../agent-pool.mjs");
+const promptDefaults = await import("../agent-prompts.mjs");
 const sessionTracker = await import("../session-tracker.mjs");
 const { analyzeVisionFrame } = await import("../voice-relay.mjs");
 
@@ -407,6 +464,81 @@ describe("voice-tools", () => {
       expect(result.error).toBeUndefined();
       // The new handler returns a help message pointing to run_workspace_command
       expect(result.result).toMatch(/unknown command|not recognized|supported|run_workspace_command/i);
+    });
+
+    it("unknown slash command returns help text and does not delegate", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      const result = await executeToolCall("bosun_slash_command", { command: "/unknowncmd test" });
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/unknown slash command|supported commands/i);
+      expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
+    });
+
+    it("invoke_mcp_tool failure path returns error without delegate fallback", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      vi.mocked(execPooledPrompt).mockRejectedValueOnce(new Error("mcp timeout"));
+      const result = await executeToolCall("invoke_mcp_tool", { tool: "create_issue" });
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/invocation failed|verify the tool\/server name/i);
+      expect(result.result).not.toMatch(/continuing in background/i);
+      expect(vi.mocked(execPooledPrompt)).toHaveBeenCalledTimes(1);
+    });
+
+    it("run_workspace_command blocks non-safe commands for non-owner sessions", async () => {
+      vi.mocked(execPooledPrompt).mockClear();
+      const result = await executeToolCall(
+        "run_workspace_command",
+        { command: "npm publish" },
+        { role: "user", isOwner: false },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.result).toMatch(/blocked non-read-only workspace command|owner\/admin/i);
+      expect(vi.mocked(execPooledPrompt)).not.toHaveBeenCalled();
+    });
+
+    it("list_prompts includes prompt sync summary and update candidates", async () => {
+      const result = await executeToolCall("list_prompts", {});
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result);
+      expect(parsed.count).toBeGreaterThan(0);
+      expect(parsed.sync).toMatchObject({
+        summary: {
+          total: 2,
+          updateAvailable: 1,
+        },
+      });
+      expect(Array.isArray(parsed.sync.updateCandidates)).toBe(true);
+      expect(parsed.sync.updateCandidates[0]).toMatchObject({
+        key: "orchestrator",
+        updateAvailable: true,
+        needsReview: false,
+      });
+    });
+
+    it("sync_prompt_defaults returns review summary when apply=false", async () => {
+      const result = await executeToolCall("sync_prompt_defaults", { apply: false });
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.summary).toMatchObject({ total: 2, updateAvailable: 1 });
+      expect(Array.isArray(parsed.updates)).toBe(true);
+      expect(parsed.updates[0]).toHaveProperty("key");
+      expect(parsed.updates[0]).toHaveProperty("reason");
+      expect(vi.mocked(promptDefaults.getPromptDefaultUpdateStatus)).toHaveBeenCalled();
+    });
+
+    it("slash /promptsync apply parses keys and applies selected updates", async () => {
+      const result = await executeToolCall("bosun_slash_command", {
+        command: "/promptsync apply orchestrator, voiceAgent",
+      });
+      expect(result.error).toBeUndefined();
+      const parsed = JSON.parse(result.result);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.updated).toEqual(["orchestrator", "voiceAgent"]);
+      expect(vi.mocked(promptDefaults.applyPromptDefaultUpdates)).toHaveBeenLastCalledWith(
+        expect.any(String),
+        { keys: ["orchestrator", "voiceAgent"] },
+      );
     });
 
     it("list_workflow_runs returns structured run history", async () => {
