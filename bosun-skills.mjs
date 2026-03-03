@@ -760,6 +760,128 @@ await engine.process(data);
 | \`git add .\` | Stages unrelated files | Stage files individually |
 `,
   },
+  {
+    filename: "custom-tool-creation.md",
+    title: "Custom Tool Creation & Reuse",
+    tags: ["tools", "custom-tool", "reflect", "reuse", "automation", "script"],
+    scope: "global",
+    content: `# Skill: Custom Tool Creation & Reuse
+
+## Purpose
+Bosun agents can author and persist **executable helper scripts** in
+\`.bosun/tools/\` that survive beyond a single session. This avoids repeating
+the same inline logic across tasks and lets the whole agent team benefit from
+tools discovered during previous runs.
+
+Inspired by the Live-SWE-agent architecture: agents that can create tools
+solve more complex tasks and accumulate institutional knowledge over time.
+
+## When to Create a Custom Tool
+
+Create a custom tool when you find yourself:
+- Writing the same ≥ 10-line utility more than once across tasks
+- Needing a project-specific helper that \`npm run *\` or built-in tools don't cover
+- Doing complex pattern matching / analysis that would be easier with a dedicated script
+- Building a test generator or codemod that future tasks will need
+
+**Do NOT** create a tool for single-use throwaway logic — keep it inline.
+
+## Tool Storage Layout
+
+\`\`\`
+<workspace>/
+  .bosun/tools/
+    index.json             ← manifest (id, title, description, tags, category, lang)
+    <tool-id>.mjs          ← Node.js ES module scripts
+    <tool-id>.sh           ← bash scripts
+    <tool-id>.py           ← Python 3 scripts
+
+~/.bosun/tools/            ← global scope (shared across all workspaces)
+\`\`\`
+
+## Registering a Tool (via Bosun SDK)
+
+Import \`registerCustomTool\` from \`./agent-custom-tools.mjs\`:
+
+\`\`\`js
+import { registerCustomTool } from "./agent-custom-tools.mjs";
+
+await registerCustomTool(rootDir, {
+  title:       "Find unused exports",
+  description: "Scans src/ for exports that are never imported elsewhere",
+  category:    "analysis",   // one of: analysis|testing|git|build|transform|search|validation|utility
+  lang:        "mjs",
+  tags:        ["unused", "exports", "dead-code"],
+  createdBy:   agentId,
+  taskId:      taskId,
+  script: \`#!/usr/bin/env node
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+// ... implementation ...
+\`,
+});
+\`\`\`
+
+## Discovering Available Tools
+
+At task start, the agent system prompt includes a **Custom Tools Library** block
+listing all tools by category. Always check it before writing repetitive code.
+
+You can also query directly:
+\`\`\`js
+import { listCustomTools, getCustomTool } from "./agent-custom-tools.mjs";
+
+const tools = listCustomTools(rootDir, { category: "analysis" });
+const { entry, script } = getCustomTool(rootDir, "find-unused-exports");
+\`\`\`
+
+## Invoking a Tool
+
+\`\`\`js
+import { invokeCustomTool } from "./agent-custom-tools.mjs";
+
+const { stdout, stderr, exitCode } = await invokeCustomTool(
+  rootDir,
+  "find-unused-exports",
+  ["--dir", "src"],
+  { timeout: 15000 }
+);
+\`\`\`
+
+## Promoting to Global Scope
+
+If a tool proves valuable across projects, promote it so all workspaces see it:
+
+\`\`\`js
+import { promoteToGlobal } from "./agent-custom-tools.mjs";
+await promoteToGlobal(rootDir, "find-unused-exports");
+\`\`\`
+
+## Reflect Checklist (run at end of each task)
+
+Before marking a task complete, reflect:
+
+1. Did I write any utility code I'd write again?
+   → Extract it into a custom tool.
+2. Did an existing tool help me? (usage stats are tracked automatically)
+3. Is there a workspace tool that deserves global promotion?
+4. Did I discover a pattern the current skill set doesn't cover?
+   → Write a new skill (Markdown knowledge) or tool (executable) as appropriate.
+
+## Tool Categories
+
+| Category    | Use for                                                     |
+|-------------|-------------------------------------------------------------|
+| analysis    | Codebase inspection, metrics, dependency graphs             |
+| testing     | Test generation, assertion helpers, coverage reporters       |
+| git         | Multi-step git operations, branch utilities                 |
+| build       | Compile, bundle, transpile helpers beyond npm scripts       |
+| transform   | Codemods, formatters, data reshaping                        |
+| search      | Grep/ripgrep wrappers, semantic search, ref-tracing         |
+| validation  | Linting, type-checking, schema validation                   |
+| utility     | Miscellaneous helpers not covered by any other category     |
+`,
+  },
 ];
 
 // ── Skills directory helpers ──────────────────────────────────────────────────

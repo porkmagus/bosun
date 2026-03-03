@@ -127,6 +127,18 @@ const PROMPT_DEFS = [
     description:
       "Compact voice agent prompt for bandwidth-constrained or low-latency sessions.",
   },
+  {
+    key: "customToolReflect",
+    filename: "custom-tool-reflect.md",
+    description:
+      "End-of-task reflection prompt: prompts agent to extract reusable logic into persistent custom tools.",
+  },
+  {
+    key: "customToolsContext",
+    filename: "custom-tools-context.md",
+    description:
+      "Task-start context block listing available custom tools and encouraging reuse before writing new code.",
+  },
 ];
 
 export const AGENT_PROMPT_DEFINITIONS = Object.freeze(
@@ -926,6 +938,38 @@ Key actions: task.list, task.create, task.stats, agent.delegate, agent.ask, agen
 system.status, workspace.readFile, workspace.search.
 
 Be concise. Lead with answers. Summarize long outputs.
+`,
+
+  customToolReflect: `## Reflect: Custom Tool Extraction
+
+Before closing this task, reflect on the work you just completed:
+
+1. **Did you write any utility code (≥ 10 lines) that you'd write again?**
+   If yes — extract it into a persistent custom tool in \`.bosun/tools/\`.
+
+2. **Did you encounter a repeated analysis pattern** (grep for a specific thing,
+   parse a log format, transform a file structure)?
+   If yes — package it as a custom tool so future agents skip the re-derivation.
+
+3. **Did an existing custom tool help you?**
+   Consider whether it should be promoted to global scope (\`promoteToGlobal\`).
+
+4. **What category does the extracted logic fall into?**
+   analysis | testing | git | build | transform | search | validation | utility
+
+To register a tool:
+\`\`\`js
+import { registerCustomTool } from "./agent-custom-tools.mjs";
+registerCustomTool(rootDir, {
+  title: "...", description: "...", category: "...", lang: "mjs",
+  tags: [...], createdBy: agentId, taskId, script: \`...\`,
+});
+\`\`\`
+
+Only extract if the tool has clear reuse value. Skip one-off logic.
+`,
+
+  customToolsContext: `{{CUSTOM_TOOLS_BLOCK}}
 `,
 };
 

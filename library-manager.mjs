@@ -27,9 +27,10 @@ export const PROMPT_DIR = ".bosun/agents";
 export const SKILL_DIR = ".bosun/skills";
 export const PROFILE_DIR = ".bosun/profiles";
 export const MCP_DIR = ".bosun/mcp-servers";
+export const TOOL_DIR = ".bosun/tools";
 
 /** Resource types managed by the library */
-export const RESOURCE_TYPES = Object.freeze(["prompt", "agent", "skill", "mcp"]);
+export const RESOURCE_TYPES = Object.freeze(["prompt", "agent", "skill", "mcp", "custom-tool"]);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -144,12 +145,15 @@ function dirForType(rootDir, type) {
     case "skill":  return resolve(root, SKILL_DIR);
     case "agent":  return resolve(root, PROFILE_DIR);
     case "mcp":    return resolve(root, MCP_DIR);
+    case "custom-tool": return resolve(root, TOOL_DIR);
     default: throw new Error(`Unknown library resource type: ${type}`);
   }
 }
 
 function extForType(type) {
-  return (type === "agent" || type === "mcp") ? ".json" : ".md";
+  if (type === "agent" || type === "mcp") return ".json";
+  if (type === "custom-tool") return ".json"; // tools/index.json is the authoritative source
+  return ".md";
 }
 
 /**
@@ -503,6 +507,10 @@ export function rebuildManifest(rootDir) {
   let removed = 0;
 
   for (const type of RESOURCE_TYPES) {
+    // custom-tool entries are self-managed by agent-custom-tools.mjs
+    // (see TOOL_DIR / tools/index.json) — skip here to avoid double-indexing
+    if (type === "custom-tool") continue;
+
     const dir = dirForType(rootDir, type);
     if (!existsSync(dir)) continue;
 

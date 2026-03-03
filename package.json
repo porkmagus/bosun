@@ -121,8 +121,7 @@
     "publish:minor:dry": "node publish.mjs --bump minor --dry-run",
     "publish:major:dry": "node publish.mjs --bump major --dry-run",
     "vendorsync": "node vendor-sync.mjs",
-    "vendor:sync": "node vendor-sync.mjs"
-    ,
+    "vendor:sync": "node vendor-sync.mjs",
     "bench:swebench:import": "node bench/swebench/bosun-swebench.mjs import",
     "bench:swebench:export": "node bench/swebench/bosun-swebench.mjs export",
     "bench:swebench:eval": "node bench/swebench/bosun-swebench.mjs eval"
@@ -131,6 +130,7 @@
     ".env.example",
     "LICENSE",
     "README.md",
+    "agent-custom-tools.mjs",
     "agent-endpoint.mjs",
     "agent-event-bus.mjs",
     "agent-pool.mjs",
