@@ -7,7 +7,7 @@
  * ────────────────────────────────────────────────────────────── */
 import { h } from "preact";
 import { memo } from "preact/compat";
-import { useState, useEffect, useRef, useCallback, useMemo } from "preact/hooks";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import htm from "htm";
 import { apiFetch } from "../modules/api.js";
 import { showToast } from "../modules/state.js";
@@ -220,6 +220,61 @@ const MessageContent = memo(function MessageContent({ text }) {
     return html`<div key=${i} class="md-rendered" dangerouslySetInnerHTML=${{ __html: cachedRenderMarkdown(part) }} />`;
   })}`;
 });
+
+/* ─── Expand / collapse long message bodies ─── */
+const MSG_COLLAPSE_HEIGHT = 320; // px — content taller than this gets a "Show more" toggle
+
+const ExpandableContent = function ExpandableContent({ children, id }) {
+  const [expanded, setExpanded] = useState(false);
+  const [needsExpander, setNeedsExpander] = useState(false);
+  const containerRef = useRef(null);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const overflows = el.scrollHeight > MSG_COLLAPSE_HEIGHT + 24;
+    setNeedsExpander(overflows);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  return html`
+    <${Box}>
+      <${Box}
+        ref=${containerRef}
+        sx=${{
+          maxHeight: expanded ? 'none' : MSG_COLLAPSE_HEIGHT,
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        ${children}
+        ${!expanded && needsExpander && html`
+          <${Box} sx=${{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: 72,
+            background: 'linear-gradient(to bottom, transparent, rgba(10,10,10,0.92))',
+            pointerEvents: 'none',
+          }} />
+        `}
+      </${Box}>
+      ${needsExpander && html`
+        <${Box} sx=${{ textAlign: 'center', mt: 0.25 }}>
+          <${Button}
+            size="small"
+            variant="text"
+            onClick=${() => setExpanded((p) => !p)}
+            sx=${{ fontSize: '0.7rem', color: 'text.secondary', textTransform: 'none', py: 0.25 }}
+          >
+            ${expanded ? '▲ Show less' : '▼ Show more'}
+          </${Button}>
+        </${Box}>
+      `}
+    </${Box}>
+  `;
+};
 
 /* ─── Stream helpers ─── */
 function categorizeMessage(msg) {
@@ -445,7 +500,9 @@ const ChatBubble = memo(function ChatBubble({
                     </${Box}>
                   `
                 : html`
-                    <${MessageContent} text=${contentText} />
+                    <${ExpandableContent} id=${msg.id || msg.messageId || msg.timestamp || contentText.slice(0, 60)}>
+                      <${MessageContent} text=${contentText} />
+                    </${ExpandableContent}>
                     <${AttachmentList} attachments=${msg.attachments} />
                   `}
             </${Box}>
