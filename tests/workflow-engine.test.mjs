@@ -2140,3 +2140,92 @@ describe("WorkflowEngine - timeout timer cleanup", () => {
     expect(String(result.errors[0]?.error || "")).toContain("timed out after 1000ms");
   });
 });
+
+// ── Concurrency & Scalability ──────────────────────────────────────────────
+
+describe("Concurrency limiter", () => {
+  beforeEach(() => {
+    engine = makeTmpEngine();
+    engine.load();
+  });
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("getConcurrencyStats returns defaults", () => {
+    const stats = engine.getConcurrencyStats();
+    expect(stats.activeRuns).toBe(0);
+    expect(stats.queuedRuns).toBe(0);
+    expect(stats.maxConcurrentRuns).toBeGreaterThanOrEqual(1);
+    expect(stats.maxConcurrentBranches).toBeGreaterThanOrEqual(1);
+  });
+
+  it("tracks activeRuns count during execution", async () => {
+    let capturedStats = null;
+    if (!getNodeType("test.capture_stats")) {
+      registerNodeType("test.capture_stats", {
+        describe: () => "Capture concurrency stats during execution",
+        schema: { type: "object", properties: {} },
+        async execute(_node, _ctx) {
+          capturedStats = engine.getConcurrencyStats();
+          return { captured: true };
+        },
+      });
+    }
+
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "stats", type: "test.capture_stats", label: "Stats", config: {} },
+      ],
+      [{ id: "e1", source: "trigger", target: "stats" }]
+    );
+
+    engine.save(wf);
+    await engine.execute(wf.id, {});
+    expect(capturedStats).toBeDefined();
+    expect(capturedStats.activeRuns).toBe(1);
+  });
+
+  it("concurrent runs track correctly", async () => {
+    let maxSeen = 0;
+    if (!getNodeType("test.concurrent_track")) {
+      registerNodeType("test.concurrent_track", {
+        describe: () => "Track concurrent runs",
+        schema: { type: "object", properties: {} },
+        async execute(_node, _ctx) {
+          const stats = engine.getConcurrencyStats();
+          if (stats.activeRuns > maxSeen) maxSeen = stats.activeRuns;
+          // Small delay to overlap with other runs
+          await new Promise((r) => setTimeout(r, 50));
+          return { ok: true };
+        },
+      });
+    }
+
+    const wfs = [];
+    for (let i = 0; i < 4; i++) {
+      const wf = makeSimpleWorkflow(
+        [
+          { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+          { id: "track", type: "test.concurrent_track", label: "Track", config: {} },
+        ],
+        [{ id: "e1", source: "trigger", target: "track" }],
+        { id: `concurrent-wf-${i}` }
+      );
+      engine.save(wf);
+      wfs.push(wf);
+    }
+
+    // Launch all 4 concurrently
+    const results = await Promise.all(wfs.map((wf) => engine.execute(wf.id, {})));
+    for (const r of results) {
+      expect(r.errors).toEqual([]);
+    }
+    // At some point, multiple runs should have been active simultaneously
+    expect(maxSeen).toBeGreaterThanOrEqual(2);
+    // After all complete, slots should be released
+    expect(engine.getConcurrencyStats().activeRuns).toBe(0);
+  });
+});

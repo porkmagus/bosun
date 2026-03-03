@@ -47,6 +47,13 @@ const WORKFLOW_RUN_PAGE_SIZE = 20;
 const WORKFLOW_RUN_MAX_FETCH = 200;
 const workflowRunsLimit = signal(WORKFLOW_RUN_PAGE_SIZE);
 
+// ── Execute Dialog state ──────────────────────────────────────────────────
+const executeDialogOpen = signal(false);
+const executeDialogWorkflow = signal(null);   // full workflow def
+const executeDialogVars = signal({});          // editable variable overrides
+const executeDialogLaunching = signal(false);
+const executeDialogResult = signal(null);      // { ok, error?, ... }
+
 function returnToWorkflowList() {
   selectedNodeId.value = null;
   selectedEdgeId.value = null;
@@ -122,12 +129,12 @@ async function deleteWorkflow(id) {
   }
 }
 
-async function executeWorkflow(id) {
+async function executeWorkflow(id, customVars = {}) {
   try {
     const data = await apiFetch(`/api/workflows/${id}/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dispatch: true }),
+      body: JSON.stringify({ dispatch: true, ...customVars }),
     });
     showToast("Workflow dispatched", "success");
     setTimeout(() => {
@@ -137,6 +144,241 @@ async function executeWorkflow(id) {
   } catch (err) {
     showToast("Failed to execute workflow", "error");
   }
+}
+
+/**
+ * Open the Execute Dialog for a workflow — fetches its full definition,
+ * reads its variables, and shows a form that lets users customize before launch.
+ */
+async function openExecuteDialog(workflowId) {
+  try {
+    const detail = await apiFetch(`/api/workflows/${workflowId}`);
+    const wf = detail?.workflow;
+    if (!wf) { showToast("Workflow not found", "error"); return; }
+    executeDialogWorkflow.value = wf;
+    const vars = wf.variables && typeof wf.variables === "object" ? { ...wf.variables } : {};
+    executeDialogVars.value = vars;
+    executeDialogResult.value = null;
+    executeDialogLaunching.value = false;
+    executeDialogOpen.value = true;
+  } catch (err) {
+    showToast("Failed to load workflow", "error");
+  }
+}
+
+function closeExecuteDialog() {
+  executeDialogOpen.value = false;
+  executeDialogWorkflow.value = null;
+  executeDialogVars.value = {};
+  executeDialogResult.value = null;
+  executeDialogLaunching.value = false;
+}
+
+async function launchFromDialog() {
+  const wf = executeDialogWorkflow.value;
+  if (!wf) return;
+  executeDialogLaunching.value = true;
+  executeDialogResult.value = null;
+  try {
+    const data = await executeWorkflow(wf.id, executeDialogVars.value);
+    executeDialogResult.value = { ok: true, ...data };
+    setTimeout(() => closeExecuteDialog(), 1200);
+  } catch (err) {
+    executeDialogResult.value = { ok: false, error: err.message };
+  } finally {
+    executeDialogLaunching.value = false;
+  }
+}
+
+/** Convert camelCase / snake_case key to "Human Label" */
+function humanizeVarKey(key) {
+  return key
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Infer a short helper text for a variable key */
+function inferVarHelp(key, value) {
+  const k = key.toLowerCase();
+  if (k.includes("timeout") || k.includes("delay") || k.includes("cooldown")) return "Duration in milliseconds";
+  if (k.includes("branch")) return "Git branch name";
+  if (k.includes("url") || k.includes("endpoint")) return "URL / endpoint";
+  if (k.includes("path") || k.includes("dir")) return "File system path";
+  if (k.includes("max") || k.includes("min") || k.includes("limit") || k.includes("count")) return "Numeric limit";
+  if (k.includes("enabled") || k.includes("skip") || k.includes("force") || k.includes("dry")) return "Toggle on/off";
+  if (k.includes("problem") || k.includes("prompt") || k.includes("query") || k.includes("description")) return "Free-form text";
+  if (typeof value === "boolean") return "Toggle on/off";
+  if (typeof value === "number") return "Numeric value";
+  return "";
+}
+
+/** Detect the field type from a variable's key + default value */
+function inferVarType(key, value) {
+  if (typeof value === "boolean") return "toggle";
+  if (typeof value === "number") return "number";
+  return "text";
+}
+
+/**
+ * ExecuteWorkflowDialog — MUI Dialog that lists all workflow variables
+ * with editable fields so users can customise before launch.
+ */
+function ExecuteWorkflowDialog() {
+  const open = executeDialogOpen.value;
+  const wf = executeDialogWorkflow.value;
+  const vars = executeDialogVars.value;
+  const launching = executeDialogLaunching.value;
+  const result = executeDialogResult.value;
+
+  if (!open || !wf) return null;
+
+  const entries = Object.entries(vars);
+  const hasVars = entries.length > 0;
+
+  // Separate required (empty/null defaults) from optional (has defaults)
+  const required = entries.filter(([, v]) => v === "" || v == null);
+  const optional = entries.filter(([, v]) => v !== "" && v != null);
+
+  const updateVar = (key, val) => {
+    executeDialogVars.value = { ...executeDialogVars.value, [key]: val };
+  };
+
+  const resetDefaults = () => {
+    if (wf.variables) {
+      executeDialogVars.value = { ...wf.variables };
+    }
+  };
+
+  const renderField = ([key, value]) => {
+    const type = inferVarType(key, wf.variables?.[key] ?? value);
+    const help = inferVarHelp(key, value);
+    const label = humanizeVarKey(key);
+
+    if (type === "toggle") {
+      return html`
+        <${FormControlLabel}
+          key=${key}
+          control=${html`<${Switch}
+            checked=${Boolean(value)}
+            onChange=${(e) => updateVar(key, e.target.checked)}
+            size="small"
+          />`}
+          label=${label}
+          sx=${{ mb: 1 }}
+        />
+        ${help && html`<${Typography} variant="caption" sx=${{ color: 'text.secondary', display: 'block', mt: -0.5, mb: 1, ml: 5.5 }}>${help}<//>`}
+      `;
+    }
+
+    if (type === "number") {
+      return html`
+        <${TextField}
+          key=${key}
+          label=${label}
+          type="number"
+          value=${value ?? ""}
+          onChange=${(e) => updateVar(key, e.target.value === "" ? "" : Number(e.target.value))}
+          helperText=${help}
+          size="small"
+          fullWidth
+          sx=${{ mb: 1.5 }}
+        />
+      `;
+    }
+
+    // Multiline for long-text keys
+    const k = key.toLowerCase();
+    const multiline = k.includes("prompt") || k.includes("problem") || k.includes("description") || k.includes("query") || k.includes("body") || k.includes("content");
+
+    return html`
+      <${TextField}
+        key=${key}
+        label=${label}
+        value=${value ?? ""}
+        onChange=${(e) => updateVar(key, e.target.value)}
+        helperText=${help}
+        size="small"
+        fullWidth
+        multiline=${multiline}
+        minRows=${multiline ? 2 : undefined}
+        maxRows=${multiline ? 6 : undefined}
+        sx=${{ mb: 1.5 }}
+      />
+    `;
+  };
+
+  return html`
+    <${Dialog}
+      open=${true}
+      onClose=${closeExecuteDialog}
+      maxWidth="sm"
+      fullWidth
+      PaperProps=${{ sx: { bgcolor: 'var(--color-bg-secondary, #1a1f2e)', color: 'var(--color-text, #e8eaf0)', borderRadius: '12px' } }}
+    >
+      <${DialogTitle} sx=${{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <span style="font-size: 20px">${resolveIcon("play")}</span>
+        <span>Execute: ${wf.name}</span>
+      <//>
+
+      <${DialogContent} dividers>
+        ${wf.description && html`
+          <${Typography} variant="body2" sx=${{ color: 'text.secondary', mb: 2 }}>
+            ${wf.description}
+          <//>
+        `}
+
+        ${!hasVars && html`
+          <${Alert} severity="info" sx=${{ mb: 2 }}>
+            This workflow has no configurable variables. It will run with defaults.
+          <//>
+        `}
+
+        ${required.length > 0 && html`
+          <${Typography} variant="subtitle2" sx=${{ mb: 1, color: '#f59e0b', fontWeight: 600 }}>
+            Required Parameters
+          <//>
+          ${required.map(renderField)}
+          <${Divider} sx=${{ my: 1.5 }} />
+        `}
+
+        ${optional.length > 0 && html`
+          <${Typography} variant="subtitle2" sx=${{ mb: 1, fontWeight: 600 }}>
+            Optional Parameters ${html`<${Chip} label=${String(optional.length)} size="small" sx=${{ ml: 1, height: 20, fontSize: '11px' }} />`}
+          <//>
+          ${optional.map(renderField)}
+        `}
+
+        ${hasVars && html`
+          <${Box} sx=${{ display: 'flex', justifyContent: 'flex-end', mt: 1 }}>
+            <${Button} size="small" variant="text" onClick=${resetDefaults} sx=${{ textTransform: 'none', fontSize: '12px' }}>
+              Reset to Defaults
+            <//>
+          <//>
+        `}
+
+        ${result?.ok && html`
+          <${Alert} severity="success" sx=${{ mt: 2 }}>Workflow dispatched successfully!<//>
+        `}
+        ${result && !result.ok && html`
+          <${Alert} severity="error" sx=${{ mt: 2 }}>${result.error || "Launch failed"}<//>
+        `}
+      <//>
+
+      <${DialogActions} sx=${{ px: 3, py: 2 }}>
+        <${Button} onClick=${closeExecuteDialog} sx=${{ textTransform: 'none' }}>Cancel<//>
+        <${Button}
+          variant="contained"
+          onClick=${launchFromDialog}
+          disabled=${launching}
+          startIcon=${launching ? html`<${CircularProgress} size=${16} />` : null}
+          sx=${{ textTransform: 'none' }}
+        >
+          ${launching ? "Launching…" : "Launch Workflow"}
+        <//>
+      <//>
+    <//>
+  `;
 }
 
 async function setWorkflowEnabled(id, enabled) {
@@ -673,7 +915,7 @@ function WorkflowCanvas({ workflow, onSave }) {
               showToast("Workflow is paused. Resume it before running.", "warning");
               return;
             }
-            executeWorkflow(workflow.id);
+            openExecuteDialog(workflow.id);
           }}
         >
           <span class="btn-icon">${resolveIcon("play")}</span>
@@ -1818,7 +2060,7 @@ function WorkflowListView() {
                         showToast("Workflow is paused. Resume it before running.", "warning");
                         return;
                       }
-                      executeWorkflow(wf.id);
+                      openExecuteDialog(wf.id);
                     }}
                   >
                     <span class="icon-inline">${resolveIcon("play")}</span>
@@ -2599,6 +2841,7 @@ export function WorkflowsTab() {
         ? html`<${RunHistoryView} />`
         : html`<${WorkflowListView} />`
       }
+      <${ExecuteWorkflowDialog} />
     </div>
   `;
 }

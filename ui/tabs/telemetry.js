@@ -21,11 +21,13 @@ import {
   telemetryErrors,
   telemetryAlerts,
   usageAnalytics,
+  shreddingTelemetry,
   loadTelemetrySummary,
   loadTelemetryErrors,
   loadTelemetryExecutors,
   loadTelemetryAlerts,
   loadUsageAnalytics,
+  loadShreddingTelemetry,
   scheduleRefresh,
 } from "../modules/state.js";
 import {
@@ -231,6 +233,202 @@ const PERIODS = [
 const TREND_TABS = ["agents", "skills", "mcp"];
 const TREND_TAB_LABELS = { agents: "Agents", skills: "Skills", mcp: "MCP Tools" };
 
+// ── Context Shredding Panel ──────────────────────────────────────────────────
+
+const SHRED_PALETTE = ["#818cf8", "#38bdf8", "#34d399", "#fb923c", "#f472b6", "#a78bfa"];
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return "–";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)} K`;
+  return `${n}`;
+}
+
+/**
+ * Mini inline sparkline SVG — no axes, just the shape of the data.
+ */
+function Sparkline({ values, color = "#818cf8" }) {
+  if (!values?.length) return null;
+  const W = 120, H = 32, PAD = 2;
+  const max = Math.max(...values, 1);
+  const n = values.length;
+  const xOf = (i) => PAD + (n < 2 ? (W - PAD * 2) / 2 : (i / (n - 1)) * (W - PAD * 2));
+  const yOf = (v) => H - PAD - ((v / max) * (H - PAD * 2));
+
+  let d = `M ${xOf(0).toFixed(1)} ${yOf(values[0]).toFixed(1)}`;
+  for (let i = 1; i < values.length; i++) {
+    d += ` L ${xOf(i).toFixed(1)} ${yOf(values[i]).toFixed(1)}`;
+  }
+
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true"
+      style="display:inline-block;vertical-align:middle;opacity:0.85">
+      <path d=${d} fill="none" stroke=${color} stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
+/**
+ * Context Shredding telemetry panel.
+ * Shows: total savings, avg reduction %, daily trend, per-agent breakdown,
+ * and a table of recent events.
+ */
+function ShreddingPanel({ period }) {
+  const data = shreddingTelemetry.value;
+
+  useEffect(() => {
+    loadShreddingTelemetry(period).catch(() => {});
+  }, [period]);
+
+  if (!data) {
+    return html`
+      <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+        <${Typography} variant="h6" gutterBottom>✂ Context Shredding<//>
+        <${EmptyState}
+          title="No shredding data yet"
+          description="Shredding stats will appear here once agents start running with context compression enabled."
+        />
+      <//>
+    `;
+  }
+
+  const {
+    totalEvents = 0,
+    totalOriginalChars = 0,
+    totalSavedChars = 0,
+    avgSavedPct = 0,
+    sortedDates = [],
+    dailySaved = {},
+    dailyCounts = {},
+    topAgents = [],
+    recentEvents = [],
+  } = data;
+
+  const sparkValues = sortedDates.map((d) => dailySaved[d] || 0);
+  const sparkCounts = sortedDates.map((d) => dailyCounts[d] || 0);
+
+  return html`
+    <${Paper} elevation=${1} sx=${{ p: 2, mb: 2 }}>
+      <!-- Header -->
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 1.5 }}>
+        <${Typography} variant="h6">✂ Context Shredding<//>
+        <${Chip} label="live" size="small" color="success" variant="outlined" />
+      <//>
+
+      <!-- Stat cards row -->
+      <${Stack} direction=${{ xs: "column", sm: "row" }} spacing=${1.5} sx=${{ mb: 2, flexWrap: "wrap" }}>
+        <${AnalyticsStat} icon="✂" label="Events" value=${formatCount(totalEvents)} />
+        <${AnalyticsStat} icon="📉" label="Chars Saved"
+          value=${totalSavedChars >= 1_000_000
+            ? `${(totalSavedChars / 1_000_000).toFixed(2)} M`
+            : totalSavedChars >= 1_000
+              ? `${(totalSavedChars / 1_000).toFixed(1)} K`
+              : String(totalSavedChars)} />
+        <${AnalyticsStat} icon="%" label="Avg Reduction" value=${avgSavedPct > 0 ? `${avgSavedPct}%` : "–"} />
+        <${AnalyticsStat} icon="📦" label="Original Chars"
+          value=${totalOriginalChars >= 1_000_000
+            ? `${(totalOriginalChars / 1_000_000).toFixed(2)} M`
+            : totalOriginalChars >= 1_000
+              ? `${(totalOriginalChars / 1_000).toFixed(1)} K`
+              : String(totalOriginalChars)} />
+      <//>
+
+      <!-- Trend row: daily savings sparkline + by-agent bar -->
+      <${Stack} direction=${{ xs: "column", md: "row" }} spacing=${2} sx=${{ mb: 2 }}>
+
+        <!-- Daily savings trend -->
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>Chars Saved per Day<//>
+          ${sparkValues.length > 1 ? html`
+            <${Box} sx=${{ overflow: "hidden" }}>
+              <${TrendLines}
+                dates=${sortedDates}
+                seriesMap=${{ "chars saved": sparkValues }}
+                palette=${SHRED_PALETTE}
+              />
+            <//>
+          ` : html`<${EmptyState} title="Not enough data" description="Need ≥2 days of events." />`}
+        <//>
+
+        <!-- By-agent -->
+        <${Paper} variant="outlined" sx=${{ p: 1.5, flex: 1 }}>
+          <${Typography} variant="subtitle2" gutterBottom>By Agent Type<//>
+          <${TopBarChart} items=${topAgents} palette=${SHRED_PALETTE} title="By Agent" />
+        <//>
+
+      <//>
+
+      <!-- Reduction % gauge bar -->
+      ${avgSavedPct > 0 ? html`
+        <${Box} sx=${{ mb: 2 }}>
+          <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 0.5 }}>
+            <${Typography} variant="caption" color="text.secondary">Context Reduction<//>
+            <${Typography} variant="caption" sx=${{ fontWeight: 600 }}>${avgSavedPct}% avg<//>
+          <//>
+          <${LinearProgress}
+            variant="determinate"
+            value=${Math.min(avgSavedPct, 100)}
+            sx=${{
+              height: 8, borderRadius: 4,
+              bgcolor: "grey.800",
+              "& .MuiLinearProgress-bar": { bgcolor: "#818cf8" },
+            }}
+          />
+        <//>
+      ` : null}
+
+      <!-- Recent events table -->
+      ${recentEvents.length > 0 ? html`
+        <${Typography} variant="subtitle2" gutterBottom>Recent Shredding Events<//>
+        <${TableContainer}>
+          <${Table} size="small">
+            <${TableHead}>
+              <${TableRow}>
+                <${TableCell}>Time<//>
+                <${TableCell} align="right">Original<//>
+                <${TableCell} align="right">Saved<//>
+                <${TableCell} align="right">Reduction<//>
+                <${TableCell}>Agent<//>
+              </${TableRow}>
+            <//>
+            <${TableBody}>
+              ${recentEvents.slice(0, 10).map((ev, i) => html`
+                <${TableRow} key=${i}>
+                  <${TableCell}>
+                    <${Typography} variant="caption">${formatRelative(ev.timestamp)}<//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Typography} variant="caption">${formatBytes(ev.originalChars)}<//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Typography} variant="caption" color="success.main">
+                      ${ev.savedChars > 0 ? `-${formatBytes(ev.savedChars)}` : "0"}
+                    <//>
+                  <//>
+                  <${TableCell} align="right">
+                    <${Chip}
+                      label=${`${ev.savedPct || 0}%`}
+                      size="small"
+                      color=${ev.savedPct >= 30 ? "success" : ev.savedPct >= 10 ? "warning" : "default"}
+                      variant="outlined"
+                    />
+                  <//>
+                  <${TableCell}>
+                    <${Typography} variant="caption" color="text.secondary">
+                      ${ev.agentType || "–"}
+                    <//>
+                  <//>
+                </${TableRow}>
+              `)}
+            <//>
+          <//>
+        <//>
+      ` : null}
+    <//>
+  `;
+}
+
 // ── Main exported component ──────────────────────────────────────────────────
 
 export function TelemetryTab() {
@@ -240,6 +438,7 @@ export function TelemetryTab() {
 
   useEffect(() => {
     loadUsageAnalytics(period).catch(() => {});
+    loadShreddingTelemetry(period).catch(() => {});
   }, [period]);
 
   const trend = data?.trend;
@@ -289,6 +488,7 @@ export function TelemetryTab() {
           `)}
           <${Button} size="small" variant="outlined" onClick=${() => {
             loadUsageAnalytics(period).catch(() => {});
+            loadShreddingTelemetry(period).catch(() => {});
             loadTelemetrySummary();
             loadTelemetryErrors();
             loadTelemetryExecutors();
@@ -362,6 +562,9 @@ export function TelemetryTab() {
             palette=${MCP_PALETTE} title="Top MCP Tools" />
         <//>
       <//>
+
+      <!-- Context Shredding Panel -->
+      <${ShreddingPanel} period=${period} />
 
       <!-- Errors + alerts (preserved from classic telemetry) -->
       <${ClassicTelemetry} />

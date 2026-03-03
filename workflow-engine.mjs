@@ -34,6 +34,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { writeFile as writeFileAsync } from "node:fs/promises";
 import { resolve, basename, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -63,6 +64,10 @@ const NODE_TIMEOUT_MS = readBoundedEnvInt("WORKFLOW_NODE_TIMEOUT_MS", 10 * 60 * 
 const MAX_CONCURRENT_BRANCHES = readBoundedEnvInt("WORKFLOW_MAX_CONCURRENT_BRANCHES", 8, {
   min: 1,
   max: 64,
+});
+const MAX_CONCURRENT_RUNS = readBoundedEnvInt("WORKFLOW_MAX_CONCURRENT_RUNS", 16, {
+  min: 1,
+  max: 256,
 });
 const MAX_PERSISTED_RUNS = readBoundedEnvInt("WORKFLOW_MAX_PERSISTED_RUNS", 200, {
   min: 20,
@@ -383,6 +388,12 @@ export class WorkflowEngine extends EventEmitter {
     this._loaded = false;
     this._checkpointTimers = new Map(); // runId → debounce timer
     this._resumingRuns = false;
+
+    // ── Concurrency control ───────────────────────────────────────────
+    this._runSlots = 0;              // current number of executing runs
+    this._runQueue = [];             // FIFO queue of { resolve, reject, args }
+    this._runIndexCache = null;      // cached run index (invalidated on writes)
+    this._runIndexCacheMtime = 0;    // mtime of the cached index file
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -527,6 +538,21 @@ export class WorkflowEngine extends EventEmitter {
     return JSON.stringify(def, null, 2);
   }
 
+  // ── Concurrency Stats ───────────────────────────────────────────────
+
+  /**
+   * Return live concurrency stats for monitoring / dashboards.
+   * @returns {{ activeRuns: number, maxConcurrentRuns: number, queuedRuns: number, maxConcurrentBranches: number }}
+   */
+  getConcurrencyStats() {
+    return {
+      activeRuns: this._runSlots,
+      maxConcurrentRuns: MAX_CONCURRENT_RUNS,
+      queuedRuns: this._runQueue.length,
+      maxConcurrentBranches: MAX_CONCURRENT_BRANCHES,
+    };
+  }
+
   // ── Execution ─────────────────────────────────────────────────────────
 
   /**
@@ -542,6 +568,34 @@ export class WorkflowEngine extends EventEmitter {
     if (def.enabled === false && !opts.force) {
       throw new Error(`${TAG} Workflow "${def.name}" is disabled`);
     }
+
+    // ── Concurrency gate ──────────────────────────────────────────────
+    // If we're at capacity, queue this run and wait for a slot.
+    if (this._runSlots >= MAX_CONCURRENT_RUNS) {
+      this.emit("run:queued", { workflowId, name: def.name, queueDepth: this._runQueue.length + 1 });
+      await new Promise((resolve, reject) => {
+        this._runQueue.push({ resolve, reject });
+      });
+    }
+    this._runSlots++;
+
+    try {
+      return await this._executeInner(def, workflowId, inputData, opts);
+    } finally {
+      this._runSlots--;
+      // Wake the next queued run, if any
+      if (this._runQueue.length > 0) {
+        const next = this._runQueue.shift();
+        next.resolve();
+      }
+    }
+  }
+
+  /**
+   * Inner execute logic — called only once a concurrency slot is acquired.
+   * @private
+   */
+  async _executeInner(def, workflowId, inputData, opts) {
 
     const ctx = new WorkflowContext({
       ...def.variables,
@@ -1774,7 +1828,10 @@ export class WorkflowEngine extends EventEmitter {
         this._ensureDirs();
         const detail = this._serializeRunContext(ctx, true);
         const detailPath = resolve(this.runsDir, `${runId}.json`);
-        writeFileSync(detailPath, JSON.stringify(detail, null, 2), "utf8");
+        // Async write — checkpoint is fire-and-forget, no need to block event loop
+        writeFileAsync(detailPath, JSON.stringify(detail, null, 2), "utf8").catch((err) => {
+          console.error(`${TAG} Checkpoint write failed for run ${runId}:`, err.message);
+        });
       } catch (err) {
         console.error(`${TAG} Checkpoint failed for run ${runId}:`, err.message);
       }

@@ -1013,7 +1013,8 @@
     border-radius: 12px;
     background: transparent;
     border: none;
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    opacity: 0.9;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -1033,6 +1034,7 @@
   .sidebar-nav-item span {
     font-size: 12px;
     letter-spacing: 0.01em;
+    color: inherit;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1043,6 +1045,7 @@
 .sidebar-nav-item:hover {
   background: var(--accent-subtle);
   color: var(--text-bright);
+  opacity: 1;
 }
 
 .sidebar-nav-item:focus-visible {
@@ -1053,6 +1056,7 @@
 .sidebar-nav-item.active {
   background: var(--bg-card-hover);
   color: var(--accent);
+  opacity: 1;
   box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.22);
 }
 
@@ -1416,6 +1420,17 @@ body.is-resizing * {
 .sidebar .MuiTab-root {
   flex-direction: row !important;
   gap: 8px !important;
+  color: var(--text-primary) !important;
+  opacity: 0.95 !important;
+}
+
+.sidebar .MuiTab-root.Mui-selected {
+  color: var(--accent) !important;
+  opacity: 1 !important;
+}
+
+.sidebar .MuiTab-root:hover {
+  opacity: 1 !important;
 }
 .MuiTab-iconWrapper {
   display: flex !important;

@@ -673,6 +673,16 @@ export function listTemplates() {
       replaces: t.metadata?.replaces || null,
       recommended: t.recommended === true,
       enabled: t.enabled !== false,
+      trigger: t.trigger || null,
+      variables: t.variables && typeof t.variables === "object"
+        ? Object.entries(t.variables).map(([key, defaultValue]) => ({
+            key,
+            defaultValue,
+            type: typeof defaultValue === "number"  ? "number"
+                : typeof defaultValue === "boolean" ? "toggle"
+                : "text",
+          }))
+        : [],
     };
   });
 }

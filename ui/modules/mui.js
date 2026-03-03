@@ -406,9 +406,18 @@ export const veTheme = createMuiTheme({
           fontSize: "0.8125rem",
           minHeight: 40,
           padding: "8px 14px",
+          color: "#e8e5de",
+          opacity: 0.95,
           // Ensure icon always sits beside label (iconPosition="start")
           flexDirection: "row",
           gap: 8,
+          "&.Mui-selected": {
+            color: "#da7756",
+            opacity: 1,
+          },
+          "&:hover": {
+            opacity: 1,
+          },
           "& .MuiTab-iconWrapper": { marginBottom: "0 !important", marginRight: 0 },
         },
         // Constrain raw SVG icons (ICONS map returns unwrapped <svg> nodes)

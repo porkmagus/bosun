@@ -1,6 +1,6 @@
 /* ─────────────────────────────────────────────────────────────
  *  Tab: Manual Flows — One-shot template-driven transformations
- *  Users pick a template, fill a form, and trigger a run.
+ *  + Workflow Launcher — trigger any automatic workflow with custom params
  * ────────────────────────────────────────────────────────────── */
 import { h } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
@@ -20,7 +20,7 @@ import {
   TextField, Select, MenuItem, FormControl, InputLabel, Switch,
   FormControlLabel, Tooltip, Paper, Divider, CircularProgress, Alert,
   Dialog, DialogTitle, DialogContent, DialogActions,
-  Tabs, Tab,
+  Tabs, Tab, LinearProgress, Collapse, Badge, Fade,
 } from "@mui/material";
 
 /* ═══════════════════════════════════════════════════════════════
@@ -31,8 +31,19 @@ const flowTemplates = signal([]);
 const flowRuns = signal([]);
 const selectedTemplate = signal(null);
 const activeRun = signal(null);
-const viewMode = signal("templates"); // "templates" | "form" | "runs"
+const viewMode = signal("templates"); // "templates" | "form" | "runs" | "wf-launcher" | "wf-form"
 const executing = signal(false);
+
+// ── Top-level tab (Manual Flows vs Workflow Launcher) ──
+const activeTab = signal(0); // 0 = Manual Flows, 1 = Workflow Launcher
+
+// ── Workflow Launcher state ──
+const wfTemplates = signal([]);
+const selectedWfTemplate = signal(null);
+const wfLaunching = signal(false);
+const wfLaunchResult = signal(null);
+const wfSearchQuery = signal("");
+const wfSelectedCategory = signal("all");
 
 /* ═══════════════════════════════════════════════════════════════
  *  API Helpers
@@ -86,6 +97,45 @@ async function executeFlow(templateId, formValues) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+ *  Workflow Launcher API Helpers
+ * ═══════════════════════════════════════════════════════════════ */
+
+async function loadWfTemplates() {
+  try {
+    const data = await apiFetch("/api/workflows/templates");
+    if (data?.templates) wfTemplates.value = data.templates;
+  } catch (err) {
+    console.error("[manual-flows] Failed to load workflow templates:", err);
+  }
+}
+
+async function launchWorkflowTemplate(templateId, variables) {
+  wfLaunching.value = true;
+  wfLaunchResult.value = null;
+  try {
+    const data = await apiFetch("/api/workflows/launch-template", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId, variables }),
+    });
+    wfLaunchResult.value = data;
+    showToast(
+      data?.accepted
+        ? `Workflow "${data.templateName}" dispatched`
+        : `Workflow "${data?.templateName || templateId}" completed`,
+      "success",
+    );
+    return data;
+  } catch (err) {
+    wfLaunchResult.value = { ok: false, error: err.message };
+    showToast("Failed to launch workflow: " + err.message, "error");
+    return null;
+  } finally {
+    wfLaunching.value = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
  *  Category metadata
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -94,6 +144,19 @@ const CATEGORY_META = {
   generate: { label: "Generate & Prepare", icon: "book", color: "#10b981", bg: "#10b98115" },
   transform: { label: "Transform & Refactor", icon: "refresh", color: "#f59e0b", bg: "#f59e0b15" },
   custom: { label: "Custom", icon: "settings", color: "#8b5cf6", bg: "#8b5cf615" },
+};
+
+// ── Workflow template category colors ──
+const WF_CATEGORY_META = {
+  github:      { label: "GitHub",       icon: "git-branch",  color: "#6e5494", bg: "#6e549415" },
+  agents:      { label: "Agents",       icon: "robot",       color: "#3b82f6", bg: "#3b82f615" },
+  planning:    { label: "Planning",     icon: "calendar",    color: "#10b981", bg: "#10b98115" },
+  cicd:        { label: "CI/CD",        icon: "rocket",      color: "#f59e0b", bg: "#f59e0b15" },
+  reliability: { label: "Reliability",  icon: "shield",      color: "#ef4444", bg: "#ef444415" },
+  security:    { label: "Security",     icon: "lock",        color: "#dc2626", bg: "#dc262615" },
+  lifecycle:   { label: "Lifecycle",    icon: "refresh",     color: "#8b5cf6", bg: "#8b5cf615" },
+  research:    { label: "Research",     icon: "search",      color: "#06b6d4", bg: "#06b6d415" },
+  custom:      { label: "Custom",       icon: "settings",    color: "#6b7280", bg: "#6b728015" },
 };
 
 function getCategoryMeta(cat) {
@@ -510,24 +573,6 @@ function TemplateListView() {
 
   return html`
     <div>
-      <!-- Header -->
-      <${Stack} direction="row" alignItems="center" spacing=${1.5} sx=${{ mb: 3 }}>
-        <${Typography} variant="h5" fontWeight=${700}>Manual Flows</${Typography}>
-        <div style="flex: 1;" />
-        <${Button}
-          variant="outlined"
-          size="small"
-          onClick=${() => {
-            viewMode.value = "runs";
-            haptic();
-          }}
-          startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
-          sx=${{ textTransform: "none" }}
-        >
-          Run History
-        </${Button}>
-      </${Stack}>
-
       <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 3, maxWidth: "600px" }}>
         One-shot transformations for your codebase. Pick a template, fill the form, and trigger.
         Each flow runs once — annotate, generate skills, prepare configs, and more.
@@ -580,6 +625,545 @@ function TemplateListView() {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+ *  Workflow Launcher — browse & run automatic workflow templates
+ *  with custom parameters (auto-detected from template variables)
+ * ═══════════════════════════════════════════════════════════════ */
+
+/**
+ * Infer a human-readable label from a camelCase or snake_case variable key.
+ */
+function humanizeKey(key) {
+  return key
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Infer concise helper text from a variable key.
+ */
+function inferHelpText(key, defaultValue) {
+  const k = key.toLowerCase();
+  if (k.includes("timeout") || k.includes("delay")) return `Duration in milliseconds (default: ${defaultValue})`;
+  if (k.includes("max") && k.includes("iter")) return `Maximum number of iterations (default: ${defaultValue})`;
+  if (k.includes("max") && k.includes("retr")) return `Maximum retry attempts (default: ${defaultValue})`;
+  if (k.includes("branch")) return `Git branch name (default: ${defaultValue || "main"})`;
+  if (k.includes("domain")) return `Knowledge domain or area (default: ${defaultValue || "general"})`;
+  if (k.includes("problem")) return "Describe the problem, question, or objective";
+  if (k.includes("prnumber") || k.includes("pr_number")) return "Pull request number";
+  if (k.includes("taskid") || k.includes("task_id")) return "Task identifier (e.g. TASK-1)";
+  if (typeof defaultValue === "boolean") return `Toggle on/off (default: ${defaultValue ? "on" : "off"})`;
+  if (typeof defaultValue === "number") return `Numeric value (default: ${defaultValue})`;
+  return defaultValue ? `Default: ${defaultValue}` : "";
+}
+
+/**
+ * Workflow template card for the launcher grid.
+ */
+function WfTemplateCard({ template, onClick }) {
+  const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
+  const varCount = (template.variables || []).length;
+  const hasBackEdges = (template.tags || []).some((t) => t === "back-edge" || t === "convergence");
+
+  return html`
+    <${Card}
+      variant="outlined"
+      sx=${{
+        cursor: "pointer",
+        transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+        position: "relative",
+        overflow: "visible",
+        "&:hover": {
+          borderColor: catMeta.color,
+          transform: "translateY(-2px)",
+          boxShadow: "0 8px 25px rgba(0,0,0,0.25)",
+        },
+      }}
+      onClick=${onClick}
+    >
+      <${CardContent} sx=${{ pb: "12px !important" }}>
+        <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 1 }}>
+          <${Box} sx=${{
+            width: 32, height: 32, borderRadius: "8px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: catMeta.bg, border: "1px solid " + catMeta.color + "30",
+          }}>
+            <span class="icon-inline" style=${{ fontSize: "16px", color: catMeta.color }}>
+              ${resolveIcon(catMeta.icon)}
+            </span>
+          </${Box}>
+          <${Typography} variant="subtitle2" fontWeight=${600} sx=${{ flex: 1, lineHeight: 1.3 }}>
+            ${template.name}
+          </${Typography}>
+        </${Stack}>
+
+        <${Typography} variant="body2" color="text.secondary" sx=${{
+          mb: 1.5, lineHeight: 1.5, fontSize: "0.8rem",
+          display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+        }}>
+          ${template.description}
+        </${Typography}>
+
+        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" useFlexGap>
+          <${Chip}
+            label=${catMeta.label}
+            size="small"
+            sx=${{ fontSize: "10px", height: "20px", background: catMeta.bg, color: catMeta.color }}
+            variant="outlined"
+          />
+          ${varCount > 0 && html`
+            <${Chip}
+              label=${`${varCount} param${varCount !== 1 ? "s" : ""}`}
+              size="small"
+              sx=${{ fontSize: "10px", height: "20px" }}
+              variant="outlined"
+            />
+          `}
+          <${Chip}
+            label=${`${template.nodeCount} nodes`}
+            size="small"
+            sx=${{ fontSize: "10px", height: "20px" }}
+            variant="outlined"
+          />
+          ${template.trigger === "trigger.manual" && html`
+            <${Chip} label="Manual" size="small" color="primary"
+              sx=${{ fontSize: "10px", height: "20px" }} variant="outlined" />
+          `}
+        </${Stack}>
+      </${CardContent}>
+    </${Card}>
+  `;
+}
+
+/**
+ * Workflow launch form — auto-renders fields from template variables.
+ */
+function WfLaunchForm({ template, onBack }) {
+  const [formValues, setFormValues] = useState(() => {
+    const defaults = {};
+    for (const v of template.variables || []) {
+      defaults[v.key] = v.defaultValue !== undefined ? v.defaultValue : "";
+    }
+    return defaults;
+  });
+  const [expanded, setExpanded] = useState(() => {
+    // Auto-expand if there are 5 or fewer params, or if any param lacks a default
+    const vars = template.variables || [];
+    return vars.length <= 5 || vars.some((v) => v.defaultValue === "" || v.defaultValue == null);
+  });
+
+  const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
+
+  const handleChange = useCallback((key, value) => {
+    setFormValues((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handleLaunch = useCallback(async () => {
+    haptic();
+    await launchWorkflowTemplate(template.id, formValues);
+  }, [template.id, formValues]);
+
+  const handleReset = useCallback(() => {
+    const defaults = {};
+    for (const v of template.variables || []) {
+      defaults[v.key] = v.defaultValue !== undefined ? v.defaultValue : "";
+    }
+    setFormValues(defaults);
+  }, [template.variables]);
+
+  const vars = template.variables || [];
+  // Separate required-feeling params (empty defaults) from optional
+  const requiredVars = vars.filter((v) => v.defaultValue === "" || v.defaultValue == null);
+  const optionalVars = vars.filter((v) => v.defaultValue !== "" && v.defaultValue != null);
+
+  return html`
+    <div>
+      <!-- Back button -->
+      <${Button}
+        variant="text" size="small"
+        onClick=${() => { onBack(); wfLaunchResult.value = null; }}
+        sx=${{ mb: 2, textTransform: "none" }}
+        startIcon=${html`<span class="icon-inline">${resolveIcon("chevron-left")}</span>`}
+      >
+        Back to Workflows
+      </${Button}>
+
+      <!-- Header card -->
+      <${Paper} variant="outlined" sx=${{
+        p: 2.5, mb: 3,
+        borderLeft: "4px solid " + catMeta.color,
+        background: "linear-gradient(135deg, " + catMeta.bg + " 0%, transparent 100%)",
+      }}>
+        <${Stack} direction="row" alignItems="center" spacing=${1.5} sx=${{ mb: 1 }}>
+          <${Box} sx=${{
+            width: 40, height: 40, borderRadius: "10px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: catMeta.color + "20",
+          }}>
+            <span class="icon-inline" style=${{ fontSize: "20px", color: catMeta.color }}>
+              ${resolveIcon(catMeta.icon)}
+            </span>
+          </${Box}>
+          <div style="flex: 1;">
+            <${Typography} variant="h6" fontWeight=${700}>${template.name}</${Typography}>
+            <${Typography} variant="body2" color="text.secondary" sx=${{ mt: 0.5 }}>
+              ${template.description}
+            </${Typography}>
+          </div>
+        </${Stack}>
+
+        <${Stack} direction="row" spacing=${1} sx=${{ mt: 1.5 }}>
+          <${Chip} label=${catMeta.label} size="small" sx=${{ fontSize: "10px", background: catMeta.bg, color: catMeta.color }} />
+          <${Chip} label=${`${template.nodeCount} nodes · ${template.edgeCount} edges`} size="small" variant="outlined" sx=${{ fontSize: "10px" }} />
+          ${template.trigger && html`
+            <${Chip} label=${template.trigger.replace("trigger.", "").replace(/_/g, " ")} size="small" variant="outlined" sx=${{ fontSize: "10px" }} />
+          `}
+        </${Stack}>
+      </${Paper}>
+
+      <!-- Parameters form -->
+      <${Paper} variant="outlined" sx=${{ p: 2.5, mb: 3 }}>
+        <${Stack} direction="row" alignItems="center" justifyContent="space-between" sx=${{ mb: 2 }}>
+          <${Typography} variant="subtitle2" fontWeight=${600}>
+            ${vars.length > 0
+              ? "Parameters"
+              : "No Configurable Parameters"}
+          </${Typography}>
+          ${vars.length > 0 && html`
+            <${Button} size="small" variant="text" onClick=${handleReset}
+              sx=${{ textTransform: "none", fontSize: "0.75rem" }}
+              startIcon=${html`<span class="icon-inline" style="font-size: 14px">${resolveIcon("refresh")}</span>`}
+            >
+              Reset Defaults
+            </${Button}>
+          `}
+        </${Stack}>
+
+        ${vars.length === 0 && html`
+          <${Alert} severity="info" sx=${{ mb: 2 }}>
+            This workflow has no configurable parameters. It will run with its default configuration.
+          </${Alert}>
+        `}
+
+        <!-- Required params (always visible) -->
+        ${requiredVars.map((v) => html`
+          <${WfParamField}
+            key=${v.key}
+            variable=${v}
+            value=${formValues[v.key]}
+            onChange=${handleChange}
+            required=${true}
+          />
+        `)}
+
+        <!-- Optional params (collapsible if many) -->
+        ${optionalVars.length > 0 && requiredVars.length > 0 && html`
+          <${Divider} sx=${{ my: 2 }}>
+            <${Chip} label=${`${optionalVars.length} optional parameter${optionalVars.length !== 1 ? "s" : ""}`}
+              size="small" variant="outlined" sx=${{ fontSize: "10px" }}
+              onClick=${() => setExpanded(!expanded)} />
+          </${Divider}>
+        `}
+
+        ${(expanded || requiredVars.length === 0) && optionalVars.map((v) => html`
+          <${WfParamField}
+            key=${v.key}
+            variable=${v}
+            value=${formValues[v.key]}
+            onChange=${handleChange}
+            required=${false}
+          />
+        `)}
+
+        ${!expanded && optionalVars.length > 0 && requiredVars.length > 0 && html`
+          <${Button} fullWidth size="small" variant="text"
+            onClick=${() => setExpanded(true)}
+            sx=${{ textTransform: "none", mt: 1, color: "text.secondary" }}>
+            Show ${optionalVars.length} optional parameters...
+          </${Button}>
+        `}
+
+        <${Divider} sx=${{ my: 2.5 }} />
+
+        <${Stack} direction="row" spacing=${1.5} justifyContent="flex-end">
+          <${Button} variant="outlined" size="small"
+            onClick=${() => { onBack(); wfLaunchResult.value = null; }}
+            sx=${{ textTransform: "none" }}>
+            Cancel
+          </${Button}>
+
+          <${Button}
+            variant="contained"
+            onClick=${handleLaunch}
+            disabled=${wfLaunching.value}
+            startIcon=${wfLaunching.value
+              ? html`<${CircularProgress} size=${16} color="inherit" />`
+              : html`<span class="icon-inline">${resolveIcon("play")}</span>`}
+            sx=${{
+              textTransform: "none",
+              background: catMeta.color,
+              "&:hover": { background: catMeta.color, filter: "brightness(1.2)" },
+            }}
+          >
+            ${wfLaunching.value ? "Launching…" : "Launch Workflow"}
+          </${Button}>
+        </${Stack}>
+      </${Paper}>
+
+      <!-- Launch result -->
+      ${wfLaunchResult.value && html`
+        <${Fade} in>
+          <${Paper} variant="outlined" sx=${{
+            p: 2.5,
+            borderColor: wfLaunchResult.value.ok ? "#10b981" + "60" : "#ef4444" + "60",
+            borderLeft: "4px solid " + (wfLaunchResult.value.ok ? "#10b981" : "#ef4444"),
+          }}>
+            ${wfLaunchResult.value.ok ? html`
+              <${Alert} severity="success" sx=${{ mb: 1.5 }}>
+                Workflow dispatched successfully
+              </${Alert}>
+              <${Stack} spacing=${0.5}>
+                <${Typography} variant="body2"><strong>Template:</strong> ${wfLaunchResult.value.templateName}</${Typography}>
+                <${Typography} variant="body2"><strong>Workflow ID:</strong> <code>${wfLaunchResult.value.workflowId}</code></${Typography}>
+                <${Typography} variant="body2"><strong>Mode:</strong> ${wfLaunchResult.value.mode}</${Typography}>
+                ${wfLaunchResult.value.dispatchedAt && html`
+                  <${Typography} variant="caption" color="text.secondary">
+                    Dispatched at ${new Date(wfLaunchResult.value.dispatchedAt).toLocaleString()}
+                  </${Typography}>
+                `}
+              </${Stack}>
+              ${wfLaunchResult.value.variables && html`
+                <${Divider} sx=${{ my: 1.5 }} />
+                <${Typography} variant="caption" fontWeight=${600} sx=${{ mb: 0.5, display: "block" }}>
+                  Effective Variables:
+                </${Typography}>
+                <${Box} sx=${{
+                  p: 1.5, borderRadius: 1,
+                  background: "rgba(0,0,0,0.2)",
+                  fontFamily: "monospace", fontSize: "0.8em",
+                  maxHeight: 200, overflow: "auto",
+                }}>
+                  ${Object.entries(wfLaunchResult.value.variables).map(([k, v]) => html`
+                    <div key=${k}><span style="color: #10b981">${k}</span>: ${JSON.stringify(v)}</div>
+                  `)}
+                </${Box}>
+              `}
+            ` : html`
+              <${Alert} severity="error">
+                ${wfLaunchResult.value.error || "Unknown error"}
+              </${Alert}>
+            `}
+          </${Paper}>
+        </${Fade}>
+      `}
+    </div>
+  `;
+}
+
+/**
+ * Auto-generated parameter field from workflow template variable definition.
+ */
+function WfParamField({ variable, value, onChange, required }) {
+  const { key, defaultValue, type } = variable;
+  const label = humanizeKey(key);
+  const help = inferHelpText(key, defaultValue);
+  const currentValue = value !== undefined ? value : (defaultValue ?? "");
+
+  if (type === "toggle") {
+    return html`
+      <${Box} sx=${{ mb: 2 }}>
+        <${FormControlLabel}
+          control=${html`<${Switch}
+            checked=${!!currentValue}
+            onChange=${(e) => onChange(key, e.target.checked)}
+            size="small"
+          />`}
+          label=${html`<span>${label}${required ? html` <span style="color: #ef4444">*</span>` : ""}</span>`}
+        />
+        ${help && html`<${Typography} variant="caption" display="block" color="text.secondary" sx=${{ ml: 4.5, mt: -0.5 }}>${help}</${Typography}>`}
+      </${Box}>
+    `;
+  }
+
+  if (type === "number") {
+    return html`
+      <${TextField}
+        fullWidth size="small" type="number"
+        label=${label + (required ? " *" : "")}
+        value=${currentValue}
+        onChange=${(e) => onChange(key, Number(e.target.value))}
+        helperText=${help}
+        sx=${{ mb: 2 }}
+      />
+    `;
+  }
+
+  // Default: text field (with multiline for long defaults or keys like "problem", "prompt", etc.)
+  const isLongText = key.toLowerCase().includes("problem") || key.toLowerCase().includes("prompt")
+    || key.toLowerCase().includes("description") || key.toLowerCase().includes("instructions")
+    || (typeof defaultValue === "string" && defaultValue.length > 80);
+
+  return html`
+    <${TextField}
+      fullWidth size="small"
+      label=${label + (required ? " *" : "")}
+      value=${currentValue}
+      onChange=${(e) => onChange(key, e.target.value)}
+      helperText=${help}
+      multiline=${isLongText}
+      rows=${isLongText ? 3 : undefined}
+      placeholder=${defaultValue ? String(defaultValue) : ""}
+      sx=${{ mb: 2, ...(isLongText ? { "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.85em" } } : {}) }}
+    />
+  `;
+}
+
+/**
+ * Workflow Launcher list view — browse all automatic workflow templates,
+ * filter by category/search, and select one to configure + launch.
+ */
+function WfLauncherView() {
+  const templates = wfTemplates.value || [];
+  const search = wfSearchQuery.value.toLowerCase();
+  const catFilter = wfSelectedCategory.value;
+
+  // Available categories (from loaded templates)
+  const categories = useMemo(() => {
+    const cats = new Map();
+    templates.forEach((t) => {
+      const key = t.category || "custom";
+      if (!cats.has(key)) cats.set(key, 0);
+      cats.set(key, cats.get(key) + 1);
+    });
+    const ordered = [
+      "github", "agents", "planning", "cicd",
+      "reliability", "security", "lifecycle", "research", "custom",
+    ];
+    return ordered
+      .filter((k) => cats.has(k))
+      .map((k) => ({ key: k, count: cats.get(k), meta: WF_CATEGORY_META[k] || WF_CATEGORY_META.custom }));
+  }, [templates]);
+
+  // Filter templates
+  const filtered = useMemo(() => {
+    return templates.filter((t) => {
+      if (catFilter !== "all" && t.category !== catFilter) return false;
+      if (search) {
+        const hay = (t.name + " " + t.description + " " + (t.tags || []).join(" ")).toLowerCase();
+        return hay.includes(search);
+      }
+      return true;
+    });
+  }, [templates, search, catFilter]);
+
+  // Group filtered by category
+  const groups = useMemo(() => {
+    const map = {};
+    filtered.forEach((t) => {
+      const cat = t.category || "custom";
+      if (!map[cat]) map[cat] = [];
+      map[cat].push(t);
+    });
+    const order = [
+      "github", "agents", "planning", "cicd",
+      "reliability", "security", "lifecycle", "research", "custom",
+    ];
+    return order
+      .filter((k) => map[k]?.length > 0)
+      .map((k) => ({ key: k, meta: WF_CATEGORY_META[k] || WF_CATEGORY_META.custom, items: map[k] }));
+  }, [filtered]);
+
+  return html`
+    <div>
+      <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 2.5, maxWidth: "700px" }}>
+        Launch any automatic workflow with custom parameters.
+        Select a workflow, configure its variables, and trigger a run — no need to edit the workflow definition.
+      </${Typography}>
+
+      <!-- Search + category filter bar -->
+      <${Stack} direction="row" spacing=${1.5} alignItems="center" sx=${{ mb: 3 }}>
+        <${TextField}
+          size="small"
+          placeholder="Search workflows..."
+          value=${wfSearchQuery.value}
+          onChange=${(e) => { wfSearchQuery.value = e.target.value; }}
+          sx=${{ flex: 1, maxWidth: 340 }}
+          InputProps=${{ startAdornment: html`<span class="icon-inline" style="margin-right: 8px; opacity: 0.5; font-size: 14px">${resolveIcon("search")}</span>` }}
+        />
+        <${Stack} direction="row" spacing=${0.5} sx=${{ flexWrap: "wrap" }}>
+          <${Chip}
+            label="All"
+            size="small"
+            variant=${catFilter === "all" ? "filled" : "outlined"}
+            onClick=${() => { wfSelectedCategory.value = "all"; }}
+            sx=${{ fontSize: "11px", cursor: "pointer" }}
+          />
+          ${categories.map(({ key, count, meta }) => html`
+            <${Chip}
+              key=${key}
+              label=${`${meta.label} (${count})`}
+              size="small"
+              variant=${catFilter === key ? "filled" : "outlined"}
+              onClick=${() => { wfSelectedCategory.value = key; }}
+              sx=${{
+                fontSize: "11px", cursor: "pointer",
+                ...(catFilter === key ? { background: meta.color + "30", color: meta.color } : {}),
+              }}
+            />
+          `)}
+        </${Stack}>
+      </${Stack}>
+
+      <!-- Template grid -->
+      ${groups.length === 0 && html`
+        <${Paper} variant="outlined" sx=${{ p: 4, textAlign: "center" }}>
+          <${Typography} color="text.secondary">
+            ${search || catFilter !== "all"
+              ? "No workflows match your filter."
+              : "No workflow templates available."}
+          </${Typography}>
+        </${Paper}>
+      `}
+
+      ${groups.map(({ key, meta, items }) => html`
+        <div key=${key} style="margin-bottom: 20px;">
+          <${Stack} direction="row" alignItems="center" spacing=${1} sx=${{ mb: 1.5, pb: 0.5, borderBottom: "1px solid", borderColor: "divider" }}>
+            <${Box} sx=${{
+              width: 24, height: 24, borderRadius: "6px",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: meta.bg,
+            }}>
+              <span class="icon-inline" style=${{ fontSize: "12px", color: meta.color }}>
+                ${resolveIcon(meta.icon)}
+              </span>
+            </${Box}>
+            <${Typography} variant="subtitle2" fontWeight=${600} color="text.secondary">
+              ${meta.label}
+            </${Typography}>
+            <${Chip} label=${items.length} size="small" sx=${{ fontSize: "10px", height: "18px" }} />
+          </${Stack}>
+
+          <div style="display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));">
+            ${items.map((t) => html`
+              <${WfTemplateCard}
+                key=${t.id}
+                template=${t}
+                onClick=${() => {
+                  selectedWfTemplate.value = t;
+                  viewMode.value = "wf-form";
+                  wfLaunchResult.value = null;
+                  haptic();
+                }}
+              />
+            `)}
+          </div>
+        </div>
+      `)}
+    </div>
+  `;
+}
+
+/* ═══════════════════════════════════════════════════════════════
  *  Main Tab Export
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -587,15 +1171,20 @@ export function ManualFlowsTab() {
   useEffect(() => {
     loadTemplates();
     loadRuns();
+    loadWfTemplates();
   }, []);
 
   useEffect(() => {
     const onWorkspaceSwitched = () => {
       selectedTemplate.value = null;
+      selectedWfTemplate.value = null;
       activeRun.value = null;
+      wfLaunchResult.value = null;
       viewMode.value = "templates";
+      activeTab.value = 0;
       loadTemplates();
       loadRuns();
+      loadWfTemplates();
     };
     window.addEventListener("ve:workspace-switched", onWorkspaceSwitched);
     return () => window.removeEventListener("ve:workspace-switched", onWorkspaceSwitched);
@@ -606,9 +1195,15 @@ export function ManualFlowsTab() {
       if (e.key !== "Escape") return;
       const activeTag = document.activeElement?.tagName || "";
       if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag)) return;
-      if (viewMode.value !== "templates") {
+
+      if (viewMode.value === "wf-form") {
         e.preventDefault();
-        viewMode.value = "templates";
+        viewMode.value = "wf-launcher";
+        selectedWfTemplate.value = null;
+        wfLaunchResult.value = null;
+      } else if (viewMode.value !== "templates" && viewMode.value !== "wf-launcher") {
+        e.preventDefault();
+        viewMode.value = activeTab.value === 0 ? "templates" : "wf-launcher";
         selectedTemplate.value = null;
         activeRun.value = null;
       }
@@ -618,23 +1213,103 @@ export function ManualFlowsTab() {
   }, []);
 
   const mode = viewMode.value;
+  const tab = activeTab.value;
+
+  const handleTabChange = useCallback((_e, newTab) => {
+    activeTab.value = newTab;
+    viewMode.value = newTab === 0 ? "templates" : "wf-launcher";
+    selectedTemplate.value = null;
+    selectedWfTemplate.value = null;
+    activeRun.value = null;
+    wfLaunchResult.value = null;
+    haptic();
+  }, []);
+
+  // ── Render based on current view mode ──
+  const renderContent = () => {
+    // Manual flow form
+    if (mode === "form" && selectedTemplate.value) {
+      return html`<${FlowFormView}
+        template=${selectedTemplate.value}
+        onBack=${() => {
+          viewMode.value = "templates";
+          selectedTemplate.value = null;
+        }}
+      />`;
+    }
+    // Run history
+    if (mode === "runs") {
+      return html`<${RunHistoryList}
+        onBack=${() => { viewMode.value = "templates"; }}
+      />`;
+    }
+    // Workflow launch form
+    if (mode === "wf-form" && selectedWfTemplate.value) {
+      return html`<${WfLaunchForm}
+        template=${selectedWfTemplate.value}
+        onBack=${() => {
+          viewMode.value = "wf-launcher";
+          selectedWfTemplate.value = null;
+        }}
+      />`;
+    }
+    // Workflow launcher grid
+    if (mode === "wf-launcher" || tab === 1) {
+      return html`<${WfLauncherView} />`;
+    }
+    // Default: manual flow templates
+    return html`<${TemplateListView} />`;
+  };
 
   return html`
     <div style="padding: 12px; max-width: 1200px; margin: 0 auto;">
-      ${mode === "form" && selectedTemplate.value
-        ? html`<${FlowFormView}
-            template=${selectedTemplate.value}
-            onBack=${() => {
-              viewMode.value = "templates";
-              selectedTemplate.value = null;
+      <!-- Tab switcher: Manual Flows vs Workflow Launcher -->
+      ${mode !== "form" && mode !== "runs" && mode !== "wf-form" && html`
+        <${Stack} direction="row" alignItems="center" spacing=${2} sx=${{ mb: 3 }}>
+          <${Typography} variant="h5" fontWeight=${700} sx=${{ flex: 0 }}>
+            ${tab === 0 ? "Manual Flows" : "Workflow Launcher"}
+          </${Typography}>
+
+          <${Tabs}
+            value=${tab}
+            onChange=${handleTabChange}
+            sx=${{
+              minHeight: 36,
+              "& .MuiTab-root": { minHeight: 36, py: 0, textTransform: "none", fontSize: "0.85rem" },
+              "& .MuiTabs-indicator": { height: 2 },
             }}
-          />`
-        : mode === "runs"
-        ? html`<${RunHistoryList}
-            onBack=${() => { viewMode.value = "templates"; }}
-          />`
-        : html`<${TemplateListView} />`
-      }
+          >
+            <${Tab} label="Manual Flows"
+              icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 4px">${resolveIcon("play")}</span>`}
+              iconPosition="start" />
+            <${Tab}
+              label=${html`
+                <${Stack} direction="row" alignItems="center" spacing=${0.5}>
+                  <span>Workflow Launcher</span>
+                  <${Chip} label=${(wfTemplates.value || []).length} size="small"
+                    sx=${{ fontSize: "10px", height: "18px", minWidth: "24px" }} />
+                </${Stack}>
+              `}
+              icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 4px">${resolveIcon("rocket")}</span>`}
+              iconPosition="start" />
+          </${Tabs}>
+
+          <div style="flex: 1;" />
+
+          ${tab === 0 && html`
+            <${Button}
+              variant="outlined" size="small"
+              onClick=${() => { viewMode.value = "runs"; haptic(); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
+              sx=${{ textTransform: "none" }}
+            >
+              Run History
+            </${Button}>
+          `}
+        </${Stack}>
+      `}
+
+      ${renderContent()}
     </div>
   `;
 }

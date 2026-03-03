@@ -8209,6 +8209,80 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/telemetry/shredding") {
+    try {
+      const days = Number(url.searchParams.get("days") || "30");
+      const shreddingPath = resolve(
+        resolveAgentWorkLogDir(),
+        "shredding-stats.jsonl",
+      );
+      const raw = await readJsonlTail(shreddingPath, 10_000);
+      const events = raw.filter((e) => withinDays(e, days));
+
+      // Aggregate totals
+      let totalEvents = events.length;
+      let totalOriginalChars = 0;
+      let totalCompressedChars = 0;
+      let totalSavedChars = 0;
+      const dailySaved = {};
+      const dailyCounts = {};
+      const agentCounts = {};
+
+      for (const e of events) {
+        totalOriginalChars  += e.originalChars  || 0;
+        totalCompressedChars += e.compressedChars || 0;
+        totalSavedChars     += e.savedChars      || 0;
+        const day = (e.timestamp || "").slice(0, 10);
+        if (day) {
+          dailySaved[day]  = (dailySaved[day]  || 0) + (e.savedChars || 0);
+          dailyCounts[day] = (dailyCounts[day] || 0) + 1;
+        }
+        const agent = e.agentType || "unknown";
+        agentCounts[agent] = (agentCounts[agent] || 0) + 1;
+      }
+
+      const avgSavedPct = totalOriginalChars > 0
+        ? Math.round((totalSavedChars / totalOriginalChars) * 100)
+        : 0;
+
+      const sortedDates = Object.keys(dailySaved).sort();
+      const topAgents = Object.entries(agentCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([name, count]) => ({ name, count }));
+
+      // Recent events (last 20)
+      const recentEvents = events.slice(-20).reverse().map((e) => ({
+        timestamp:      e.timestamp,
+        savedChars:     e.savedChars      || 0,
+        savedPct:       e.savedPct        || 0,
+        originalChars:  e.originalChars   || 0,
+        compressedChars: e.compressedChars || 0,
+        agentType:      e.agentType       || null,
+        attemptId:      e.attemptId       || null,
+      }));
+
+      jsonResponse(res, 200, {
+        ok: true,
+        data: {
+          totalEvents,
+          totalOriginalChars,
+          totalCompressedChars,
+          totalSavedChars,
+          avgSavedPct,
+          sortedDates,
+          dailySaved,
+          dailyCounts,
+          topAgents,
+          recentEvents,
+        },
+      });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/analytics/usage") {
     try {
       const days = Number(url.searchParams.get("days") || "30");
@@ -8822,6 +8896,103 @@ async function handleApi(req, res, url) {
       }
       const saved = await engine.save(body);
       jsonResponse(res, 200, { ok: true, workflow: saved });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  // GET /api/workflows/concurrency — live concurrency stats for dashboard
+  if (path === "/api/workflows/concurrency" && req.method === "GET") {
+    try {
+      const stats = engine.getConcurrencyStats();
+      jsonResponse(res, 200, { ok: true, ...stats });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  // POST /api/workflows/launch-template — install (if needed) + execute a
+  // workflow template with custom variable overrides, all in one step.
+  // Body: { templateId, variables?: Record<string,any>, waitForCompletion?: boolean }
+  if (path === "/api/workflows/launch-template" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const templateId = String(body?.templateId || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const wfCtx = await getWorkflowRequestContext(url);
+      if (!wfCtx.ok) {
+        jsonResponse(res, wfCtx.status, { ok: false, error: wfCtx.error });
+        return;
+      }
+      const engine = wfCtx.engine;
+      const tplMod = _wfTemplates;
+
+      // 1. Resolve template
+      const template = tplMod.getTemplate(templateId);
+      if (!template) {
+        jsonResponse(res, 404, { ok: false, error: `Template "${templateId}" not found` });
+        return;
+      }
+
+      // 2. Find or auto-install the workflow
+      let workflowId;
+      const installed = engine.list().find(
+        (wf) => wf.metadata?.installedFrom === templateId || wf.name === template.name,
+      );
+      if (installed) {
+        workflowId = installed.id;
+      } else {
+        // Auto-install silently
+        const saved = tplMod.installTemplate(templateId, engine);
+        workflowId = saved.id;
+      }
+
+      // 3. Build input: merge caller-supplied variables as execution input
+      const userVars = body?.variables && typeof body.variables === "object" ? body.variables : {};
+      const executeInput = { ...userVars };
+
+      // 4. Execute (dispatch by default for long-running research workflows)
+      const shouldWait = body?.waitForCompletion === true;
+      if (!shouldWait) {
+        const dispatchedAt = new Date().toISOString();
+        Promise.resolve()
+          .then(() => engine.execute(workflowId, executeInput, { force: true }))
+          .then((ctx) => {
+            const runStatus = Array.isArray(ctx?.errors) && ctx.errors.length > 0 ? "failed" : "completed";
+            console.log(`[workflows] Template launch finished template=${templateId} workflow=${workflowId} status=${runStatus}`);
+          })
+          .catch((err) => {
+            console.error(`[workflows] Template launch failed template=${templateId}: ${err.message}`);
+          });
+
+        jsonResponse(res, 202, {
+          ok: true,
+          accepted: true,
+          mode: "dispatch",
+          templateId,
+          templateName: template.name,
+          workflowId,
+          variables: { ...template.variables, ...userVars },
+          dispatchedAt,
+        });
+        return;
+      }
+
+      const result = await engine.execute(workflowId, executeInput, { force: true });
+      jsonResponse(res, 200, {
+        ok: true,
+        mode: "sync",
+        templateId,
+        templateName: template.name,
+        workflowId,
+        result,
+      });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }

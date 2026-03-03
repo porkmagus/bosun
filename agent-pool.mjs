@@ -50,7 +50,7 @@ import {
   streamRetryDelay,
   MAX_STREAM_RETRIES,
 } from "./stream-resilience.mjs";
-import { compressAllItems } from "./context-cache.mjs";
+import { compressAllItems, estimateSavings, recordShreddingEvent } from "./context-cache.mjs";
 import { resolveContextShreddingOptions } from "./context-shredding-config.mjs";
 
 // Lazy-load MCP registry to avoid circular dependencies.
@@ -2372,6 +2372,12 @@ export async function execPooledPrompt(userMessage, options = {}) {
     console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);
   }
 
+  // Record shredding telemetry (non-fatal)
+  try {
+    const savings = estimateSavings(result.items, compressedItems);
+    recordShreddingEvent({ ...savings, agentType: sdk });
+  } catch { /* non-fatal */ }
+
   return {
     finalResponse: result.output,
     items: compressedItems,
@@ -3163,6 +3169,11 @@ export async function launchOrResumeThread(
     try {
       const shreddingOpts2 = resolveContextShreddingOptions(undefined, resultSdk);
       const compressedItems = await compressAllItems(result.items, shreddingOpts2);
+      // Record shredding telemetry (non-fatal)
+      try {
+        const savings = estimateSavings(result.items, compressedItems);
+        recordShreddingEvent({ ...savings, agentType: resultSdk });
+      } catch { /* non-fatal */ }
       return { ...result, items: compressedItems, threadId: finalThreadId, resumed: false };
     } catch (compErr) {
       console.warn(`${TAG} context compression failed (non-fatal): ${compErr.message}`);

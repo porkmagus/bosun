@@ -286,6 +286,74 @@ export const BUILTIN_FLOW_TEMPLATES = [
       },
     ],
   },
+  {
+    id: "research-agent",
+    name: "Research Agent (Aletheia-Style)",
+    description:
+      "Launch an iterative research agent inspired by Google DeepMind's Aletheia. " +
+      "Generates a candidate solution, verifies it with an independent model, " +
+      "and iterates through revision or full regeneration cycles until convergence. " +
+      "Supports literature search, configurable iteration limits, and multi-domain research.",
+    icon: "microscope",
+    category: "research",
+    tags: ["research", "aletheia", "convergence", "verification", "ai-agent"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "problem",
+        label: "Research Problem",
+        type: "textarea",
+        placeholder: "e.g. Prove that for every ε > 0 there exists a δ > 0 such that...",
+        defaultValue: "",
+        required: true,
+        helpText: "The research problem or question to investigate. Be as specific as possible.",
+      },
+      {
+        id: "domain",
+        label: "Domain",
+        type: "select",
+        defaultValue: "mathematics",
+        options: [
+          { label: "Mathematics", value: "mathematics" },
+          { label: "Computer Science", value: "computer-science" },
+          { label: "Physics", value: "physics" },
+          { label: "Biology", value: "biology" },
+          { label: "Chemistry", value: "chemistry" },
+          { label: "Engineering", value: "engineering" },
+        ],
+        required: true,
+        helpText: "Research domain — guides literature search and agent prompts.",
+      },
+      {
+        id: "maxIterations",
+        label: "Max Iterations",
+        type: "number",
+        defaultValue: 10,
+        required: false,
+        helpText: "Maximum generate→verify→revise cycles before stopping (1-50).",
+      },
+      {
+        id: "searchLiterature",
+        label: "Search Literature First",
+        type: "toggle",
+        defaultValue: true,
+        helpText: "Run a web search for relevant papers before generating a solution.",
+      },
+      {
+        id: "executionMode",
+        label: "Execution Mode",
+        type: "select",
+        defaultValue: "workflow",
+        options: [
+          { label: "Workflow Engine (back-edge loops)", value: "workflow" },
+          { label: "Task Dispatch (agent picks up)", value: "task" },
+        ],
+        required: true,
+        helpText: "Workflow mode runs the full generate→verify→revise loop automatically. Task mode dispatches to an available agent.",
+      },
+    ],
+  },
 ];
 
 // ── Template Registry ────────────────────────────────────────────────────────
@@ -554,6 +622,9 @@ export async function executeFlow(templateId, formValues, rootDir, context = {})
         break;
       case "codebase-health-check":
         result = await executeHealthCheck(run.formValues, rootDir, context);
+        break;
+      case "research-agent":
+        result = await executeResearchAgent(run.formValues, rootDir, context);
         break;
       default:
         // For custom templates, create a Bosun task

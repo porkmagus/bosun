@@ -53,6 +53,55 @@ let _logCounter = 0;
 /** In-memory index: logId → { file, ts, toolName, argsPreview } */
 const _logIndex = new Map();
 
+// ---------------------------------------------------------------------------
+// Shredding Telemetry Ring Buffer
+// ---------------------------------------------------------------------------
+
+/** Max events to keep in the in-process ring buffer */
+const MAX_SHREDDING_BUFFER = 500;
+
+/**
+ * @typedef {Object} ShreddingEvent
+ * @property {string}  timestamp       - ISO timestamp
+ * @property {number}  originalChars   - Chars before compression
+ * @property {number}  compressedChars - Chars after compression
+ * @property {number}  savedChars      - Difference
+ * @property {number}  savedPct        - % reduction
+ * @property {string}  [agentType]     - SDK / agent type
+ * @property {string}  [attemptId]     - Task attempt ID
+ * @property {string}  [taskId]        - Task ID
+ */
+
+/** @type {ShreddingEvent[]} */
+const _shreddingRingBuffer = [];
+
+/** Absolute path to the persistent shredding stats log */
+const SHREDDING_LOG_FILE = resolve(__dirname, ".cache", "agent-work-logs", "shredding-stats.jsonl");
+
+// ---------------------------------------------------------------------------
+// Tool-Log Memory Cache
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} MemCacheEntry
+ * @property {object} entry      - The full parsed tool log entry
+ * @property {number} sizeBytes  - Byte size of serialized entry
+ * @property {number} addedAt    - Unix ms when cached
+ */
+
+/** logId → MemCacheEntry */
+const _contentCache = new Map();
+
+/** Total bytes across all in-memory cached entries */
+let _contentCacheTotalBytes = 0;
+
+/** @type {{ enabled: boolean, maxSizeBytes: number, archiveSizeLimitBytes: number }} */
+const _contentCacheConfig = {
+  enabled: false,
+  maxSizeBytes: 50 * 1024 * 1024,           // 50 MB default in-memory limit
+  archiveSizeLimitBytes: 200 * 1024 * 1024,  // 200 MB disk prune trigger
+};
+
 // ── Tier boundaries (measured in "age" = currentTurn - itemTurn) ──────────
 const TIER_0_MAX_AGE = 2;  // last 3 turns: full context
 const TIER_1_MAX_AGE = 5;  // turns 3-5: light compression
@@ -153,6 +202,18 @@ async function writeToCache(item, toolName, argsPreview) {
       toolName: entry.toolName,
       argsPreview: entry.argsPreview,
     });
+
+    // Optionally keep full content in memory for fast retrieval
+    if (_contentCacheConfig.enabled) {
+      const serialized = JSON.stringify(entry);
+      const sizeBytes = serialized.length * 2; // rough UTF-16 estimate
+      _contentCache.set(logId, { entry, sizeBytes, addedAt: Date.now() });
+      _contentCacheTotalBytes += sizeBytes;
+      // Evict oldest entries if over the size cap
+      if (_contentCacheTotalBytes > _contentCacheConfig.maxSizeBytes) {
+        _evictContentCacheBySize();
+      }
+    }
   } catch (err) {
     console.warn(`${TAG} failed to cache tool log ${logId}: ${err.message}`);
   }
@@ -174,6 +235,12 @@ export async function retrieveToolLog(id) {
   const numId = Number(id);
   if (!Number.isFinite(numId) || numId < 1) {
     return { found: false, error: "Invalid log ID" };
+  }
+
+  // Fast path: in-memory content cache (only populated when toolLogCache.enabled = true)
+  const memEntry = _contentCache.get(numId);
+  if (memEntry) {
+    return { found: true, entry: memEntry.entry, fromMemCache: true };
   }
 
   // Try in-memory index first
@@ -1557,4 +1624,160 @@ export function getToolLogDir() {
  */
 export function getDefaultCompressOptions() {
   return resolveOpts({});
+}
+
+// ---------------------------------------------------------------------------
+// Tool-Log Memory Cache — Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Evict the oldest content-cache entries until we're under the size limit.
+ * Internal helper — called automatically on write.
+ */
+function _evictContentCacheBySize() {
+  if (!_contentCache.size) return;
+  const sorted = [..._contentCache.entries()].sort((a, b) => a[1].addedAt - b[1].addedAt);
+  let idx = 0;
+  while (_contentCacheTotalBytes > _contentCacheConfig.maxSizeBytes && idx < sorted.length) {
+    const [logId, entry] = sorted[idx++];
+    _contentCacheTotalBytes = Math.max(0, _contentCacheTotalBytes - entry.sizeBytes);
+    _contentCache.delete(logId);
+  }
+}
+
+/**
+ * Configure the tool-log in-memory content cache.
+ *
+ * Supported options:
+ *   - `enabled` {boolean}              — master switch (default: false)
+ *   - `maxSizeBytes` {number}          — max total bytes in cache (default: 50MB)
+ *   - `archiveSizeLimitBytes` {number} — triggers disk pruning when exceeded (default: 200MB)
+ *
+ * @param {{ enabled?: boolean, maxSizeBytes?: number, archiveSizeLimitBytes?: number }} opts
+ */
+export function configureToolLogMemCache(opts = {}) {
+  if (typeof opts.enabled === "boolean") _contentCacheConfig.enabled = opts.enabled;
+  if (typeof opts.maxSizeBytes === "number" && opts.maxSizeBytes > 0) {
+    _contentCacheConfig.maxSizeBytes = opts.maxSizeBytes;
+  }
+  if (typeof opts.archiveSizeLimitBytes === "number" && opts.archiveSizeLimitBytes > 0) {
+    _contentCacheConfig.archiveSizeLimitBytes = opts.archiveSizeLimitBytes;
+  }
+  // Trim if new limit is smaller than current usage
+  if (_contentCacheTotalBytes > _contentCacheConfig.maxSizeBytes) {
+    _evictContentCacheBySize();
+  }
+}
+
+/**
+ * Evict tool-log memory cache entries that are older than `maxAgeMs`,
+ * or all entries if `all` is true.
+ *
+ * @param {{ maxAgeMs?: number, all?: boolean }} [opts]
+ * @returns {number} Number of entries evicted
+ */
+export function evictToolLogMemCache({ maxAgeMs, all = false } = {}) {
+  if (all) {
+    const count = _contentCache.size;
+    _contentCache.clear();
+    _contentCacheTotalBytes = 0;
+    return count;
+  }
+  if (!maxAgeMs || !Number.isFinite(maxAgeMs)) return 0;
+  const cutoff = Date.now() - maxAgeMs;
+  let evicted = 0;
+  for (const [logId, entry] of _contentCache.entries()) {
+    if (entry.addedAt < cutoff) {
+      _contentCacheTotalBytes = Math.max(0, _contentCacheTotalBytes - entry.sizeBytes);
+      _contentCache.delete(logId);
+      evicted++;
+    }
+  }
+  return evicted;
+}
+
+/**
+ * Return statistics about the current in-memory tool-log content cache.
+ *
+ * @returns {{ enabled: boolean, count: number, totalBytes: number, maxSizeBytes: number, archiveSizeLimitBytes: number }}
+ */
+export function getToolLogMemCacheStats() {
+  return {
+    enabled: _contentCacheConfig.enabled,
+    count: _contentCache.size,
+    totalBytes: _contentCacheTotalBytes,
+    maxSizeBytes: _contentCacheConfig.maxSizeBytes,
+    archiveSizeLimitBytes: _contentCacheConfig.archiveSizeLimitBytes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Context Shredding Telemetry
+// ---------------------------------------------------------------------------
+
+/**
+ * Append a shredding event to the ring buffer and persist to disk.
+ *
+ * @param {{ originalChars: number, compressedChars: number, savedChars: number, savedPct: number,
+ *           agentType?: string, attemptId?: string, taskId?: string }} stats
+ */
+export function recordShreddingEvent(stats) {
+  if (!stats || typeof stats !== "object") return;
+  const { originalChars = 0, compressedChars = 0, savedChars = 0, savedPct = 0,
+          agentType = null, attemptId = null, taskId = null } = stats;
+
+  // Skip no-op events (nothing to report)
+  if (originalChars === 0 && compressedChars === 0) return;
+
+  const event = {
+    timestamp: new Date().toISOString(),
+    originalChars,
+    compressedChars,
+    savedChars,
+    savedPct,
+    ...(agentType  ? { agentType }  : {}),
+    ...(attemptId  ? { attemptId }  : {}),
+    ...(taskId     ? { taskId }     : {}),
+  };
+
+  // Ring buffer — evict oldest when full
+  _shreddingRingBuffer.push(event);
+  if (_shreddingRingBuffer.length > MAX_SHREDDING_BUFFER) {
+    _shreddingRingBuffer.shift();
+  }
+
+  // Persist to disk (fire-and-forget, non-blocking)
+  _appendShreddingEventToDisk(event).catch((err) => {
+    console.warn(`${TAG} failed to persist shredding event: ${err.message}`);
+  });
+}
+
+/** @returns {ShreddingEvent[]} Copy of the ring buffer */
+export function getShreddingStats() {
+  return [..._shreddingRingBuffer];
+}
+
+/** Clear ring buffer — intended for tests only */
+export function clearShreddingStats() {
+  _shreddingRingBuffer.length = 0;
+}
+
+/**
+ * Append a shredding event JSON line to the shredding log file.
+ * Creates the parent directory if needed.
+ * @param {ShreddingEvent} event
+ */
+async function _appendShreddingEventToDisk(event) {
+  const fs = await getFs();
+  const { resolve: nodeResolve } = await import("node:path");
+  const dir = nodeResolve(SHREDDING_LOG_FILE, "..");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.appendFile(SHREDDING_LOG_FILE, JSON.stringify(event) + "\n", "utf8");
+}
+
+/**
+ * Returns the absolute path to the shredding stats log file.
+ */
+export function getShreddingLogFile() {
+  return SHREDDING_LOG_FILE;
 }

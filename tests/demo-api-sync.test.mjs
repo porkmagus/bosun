@@ -156,6 +156,11 @@ const INTENTIONALLY_SKIPPED = new Set([
   "/api/manual-flows/execute",
   "/api/manual-flows/runs",
   "/api/manual-flows/runs/:id",
+  // Workflow launcher & concurrency — server-only
+  "/api/workflows/launch-template",
+  "/api/workflows/concurrency",
+  // Telemetry — server-only
+  "/api/telemetry/shredding",
 ]);
 
 // ── Session actions intentionally skipped in demo ─────────────────────
