@@ -1258,6 +1258,13 @@
   min-height: 0;
 }
 
+/* Prevent chat-input-area from collapsing on mobile — it must stay visible
+   above the bottom-nav, even when vertical space is tight. */
+.app-shell[data-tab="chat"] .main-content .chat-input-area {
+  flex: 0 0 auto;
+  min-height: auto;
+}
+
 @media (max-width: 768px) {
   .app-shell[data-tab="chat"] .main-panel {
     border-radius: 0;
