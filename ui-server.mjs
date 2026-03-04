@@ -926,10 +926,11 @@ async function getWorkflowEngineModule() {
         const telegramChatId = process.env.TELEGRAM_CHAT_ID;
         const telegramService = telegramToken
           ? {
-              async sendMessage(chatId, text) {
+              async sendMessage(chatId, text, options = {}) {
                 const target = chatId || telegramChatId;
                 if (!target) return;
                 try {
+                  const parseMode = String(options?.parseMode || "").trim() || "HTML";
                   await fetch(
                     `https://api.telegram.org/bot${telegramToken}/sendMessage`,
                     {
@@ -938,7 +939,8 @@ async function getWorkflowEngineModule() {
                       body: JSON.stringify({
                         chat_id: target,
                         text: String(text || ""),
-                        parse_mode: "HTML",
+                        parse_mode: parseMode,
+                        disable_notification: Boolean(options?.silent),
                       }),
                     }
                   );
@@ -2159,6 +2161,12 @@ function sessionMatchesWorkspaceContext(session, workspaceContext) {
   if (!session) return false;
   if (!workspaceContext || workspaceContext.allWorkspaces) return true;
   const sessionWorkspace = resolveSessionWorkspaceMeta(session);
+  const hasWorkspaceMeta =
+    Boolean(sessionWorkspace.workspaceId) || Boolean(sessionWorkspace.workspaceDir);
+  if (!hasWorkspaceMeta) {
+    // Backward compatibility for sessions created before workspace metadata existed.
+    return true;
+  }
   if (sessionWorkspace.workspaceId) {
     return sessionWorkspace.workspaceId === String(workspaceContext.workspaceFilter || "").trim().toLowerCase();
   }
@@ -9629,6 +9637,42 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/manual-flows/templates/install" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const templateId = String(body?.templateId || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const source = mf.getFlowTemplate(templateId, ctx.workspaceDir);
+      if (!source) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      if (source.builtin !== true) {
+        jsonResponse(res, 409, { ok: false, error: "Template is already user-installed" });
+        return;
+      }
+
+      const saved = mf.saveFlowTemplate(
+        {
+          ...source,
+          id: String(body?.targetId || `${templateId}-custom`).trim() || undefined,
+          name: String(body?.name || source.name || "").trim() || source.name,
+        },
+        ctx.workspaceDir,
+      );
+      jsonResponse(res, 201, { ok: true, template: saved });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/manual-flows/execute" && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
@@ -9657,6 +9701,38 @@ async function handleApi(req, res, url) {
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const runs = mf.listRuns(ctx.workspaceDir, { templateId, status, limit });
       jsonResponse(res, 200, { ok: true, runs });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path.startsWith("/api/manual-flows/templates/") && req.method === "DELETE") {
+    try {
+      const templateId = decodeURIComponent(path.replace("/api/manual-flows/templates/", "").split("/")[0] || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const existing = mf.getFlowTemplate(templateId, ctx.workspaceDir);
+      if (!existing) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      if (existing.builtin === true) {
+        jsonResponse(res, 403, { ok: false, error: "Built-in templates cannot be deleted" });
+        return;
+      }
+
+      const deleted = mf.deleteFlowTemplate(templateId, ctx.workspaceDir);
+      if (!deleted) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, deleted: templateId });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }
@@ -10565,7 +10641,9 @@ async function handleApi(req, res, url) {
   if (sessionMatch) {
     const sessionId = decodeURIComponent(sessionMatch[1]);
     const action = sessionMatch[2] || null;
-    const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: false });
+    // Session-specific routes should support workspace=all so the UI can open
+    // historical sessions while browsing cross-workspace lists.
+    const workspaceContext = resolveWorkspaceContextFromRequest(url, { allowAll: true });
     if (!workspaceContext) {
       jsonResponse(res, 400, { ok: false, error: "Unknown workspace" });
       return;

@@ -246,6 +246,8 @@ let lastPollErrorLogAtMs = 0;
 let lastFallbackSwitchLogMs = 0;
 let pollFailureStreak = 0;
 let telegramApiReachable = null; // null = unknown, true/false after probe
+let pollLockLostAtMs = 0;
+let pollLockRetryBackoffMs = 2000;
 
 // ── 409 Conflict Cooldown State ──────────────────────────────────────────────
 
@@ -296,6 +298,21 @@ function clearTelegramPollConflictState() {
   } catch {
     /* best-effort */
   }
+}
+
+async function ensureTelegramPollOwnership() {
+  const ownerClaim = await claimTelegramPollOwner("telegram-bot", {
+    ttlMs: TELEGRAM_POLL_OWNER_TTL_MS,
+  }).catch(() => null);
+  if (!ownerClaim?.ok) {
+    return false;
+  }
+  const lockOk = await acquireTelegramPollLock("telegram-bot");
+  if (!lockOk) {
+    await releaseTelegramPollOwner("telegram-bot").catch(() => {});
+    return false;
+  }
+  return true;
 }
 
 function parseAllowedTelegramIds(rawValue) {
@@ -2484,9 +2501,10 @@ async function pollUpdates() {
     if (res.status === 409) {
       const untilMs = Date.now() + TELEGRAM_POLL_CONFLICT_COOLDOWN_MS;
       writeTelegramPollConflictState(untilMs, `409 Conflict — cooldown until ${new Date(untilMs).toISOString()}`);
-      polling = false;
       await releaseTelegramPollLock();
       await releaseTelegramPollOwner("telegram-bot").catch(() => {});
+      pollLockLostAtMs = Date.now();
+      pollLockRetryBackoffMs = 2000;
       return [];
     }
     if (polling) await delayMs(getPollBackoffMs());
@@ -10379,6 +10397,28 @@ async function handleFreeText(text, chatId, options = {}) {
 
 async function pollLoop() {
   while (polling) {
+    if (pollLockLostAtMs > 0) {
+      const conflictState = readTelegramPollConflictState();
+      const now = Date.now();
+      if (conflictState && conflictState.untilMs > now) {
+        const waitMs = Math.max(500, conflictState.untilMs - now);
+        await delayMs(waitMs);
+        continue;
+      }
+
+      const reacquired = await ensureTelegramPollOwnership();
+      if (!reacquired) {
+        await delayMs(pollLockRetryBackoffMs);
+        pollLockRetryBackoffMs = Math.min(pollLockRetryBackoffMs * 2, 30_000);
+        continue;
+      }
+
+      pollLockLostAtMs = 0;
+      pollLockRetryBackoffMs = 2000;
+      clearTelegramPollConflictState();
+      console.log("[telegram-bot] polling ownership reacquired after conflict");
+    }
+
     try {
       const updates = await pollUpdates();
       for (const update of updates) {

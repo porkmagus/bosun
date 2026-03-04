@@ -61,6 +61,60 @@ function simplifyPathLabel(filePath) {
   return parts[0] || normalized;
 }
 
+const WORKFLOW_TELEGRAM_ICON_MAP = Object.freeze({
+  check: "✅",
+  close: "❌",
+  alert: "⚠️",
+  warning: "⚠️",
+  help: "❓",
+  info: "ℹ️",
+  dot: "•",
+  folder: "📁",
+  refresh: "🔄",
+  lock: "🔒",
+  unlock: "🔓",
+  play: "▶️",
+  pause: "⏸️",
+  stop: "⏹️",
+  rocket: "🚀",
+  gear: "⚙️",
+  wrench: "🔧",
+  search: "🔍",
+  clipboard: "📋",
+  chart: "📊",
+  hourglass: "⏳",
+  fire: "🔥",
+  bug: "🐛",
+  sparkles: "✨",
+});
+
+function decodeWorkflowUnicodeIconToken(name) {
+  const raw = String(name || "").trim().toLowerCase();
+  if (!raw) return "";
+  const normalized = raw.startsWith("u") ? raw.slice(1) : raw;
+  if (!/^[0-9a-f]{4,6}$/.test(normalized)) return "";
+  try {
+    return String.fromCodePoint(parseInt(normalized, 16));
+  } catch {
+    return "";
+  }
+}
+
+function normalizeWorkflowTelegramText(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return text.replace(/:([a-zA-Z0-9_+-]{2,}):/g, (token, iconName) => {
+    const key = String(iconName || "").trim().toLowerCase();
+    if (!key) return token;
+    const squashed = key.replace(/[-+]/g, "");
+    const glyph = WORKFLOW_TELEGRAM_ICON_MAP[key]
+      || WORKFLOW_TELEGRAM_ICON_MAP[squashed]
+      || decodeWorkflowUnicodeIconToken(key)
+      || decodeWorkflowUnicodeIconToken(squashed);
+    return glyph || token;
+  });
+}
+
 function parsePathListingLine(line) {
   const raw = String(line || "").trim();
   if (!raw) return null;
@@ -208,13 +262,9 @@ async function createKanbanTaskWithProject(kanban, taskData = {}, projectIdValue
     payload.projectId = resolvedProjectId;
   }
 
-  if (kanban.createTask.length >= 2) {
-    const taskPayload = { ...payload };
-    delete taskPayload.projectId;
-    return kanban.createTask(resolvedProjectId, taskPayload);
-  }
-
-  return kanban.createTask(payload);
+  const taskPayload = { ...payload };
+  delete taskPayload.projectId;
+  return kanban.createTask(resolvedProjectId, taskPayload);
 }
 
 function summarizeAssistantMessageData(data = {}) {
@@ -3416,18 +3466,23 @@ registerNodeType("notify.telegram", {
       message: { type: "string", description: "Message text (supports {{variables}} and Markdown)" },
       chatId: { type: "string", description: "Chat ID (uses default if empty)" },
       silent: { type: "boolean", default: false },
+      parseMode: { type: "string", enum: ["Markdown", "MarkdownV2", "HTML"], description: "Optional Telegram parse mode" },
     },
     required: ["message"],
   },
   async execute(node, ctx, engine) {
-    const message = ctx.resolve(node.config?.message || "");
+    const message = normalizeWorkflowTelegramText(ctx.resolve(node.config?.message || ""));
     const telegram = engine.services?.telegram;
+    const options = {
+      silent: node.config?.silent,
+      parseMode: node.config?.parseMode || undefined,
+    };
 
     if (telegram?.sendMessage) {
       await telegram.sendMessage(
         node.config?.chatId || undefined,
         message,
-        { silent: node.config?.silent }
+        options,
       );
       return { sent: true, message };
     }
@@ -3621,6 +3676,19 @@ function normalizePlannerTaskForCreation(task, index) {
   appendList("Verification", task.verification);
 
   const baseBranch = String(task.base_branch || "").trim();
+  const workspace = String(task.workspace || "").trim();
+  const repository = String(task.repository || task.repo || "").trim();
+  const repositories = Array.isArray(task.repositories)
+    ? task.repositories.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const priority = String(task.priority || "").trim().toLowerCase();
+  const tags = Array.isArray(task.tags || task.labels)
+    ? (task.tags || task.labels)
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean)
+    : [];
+  const requestedStatus = String(task.status || "").trim().toLowerCase();
+  const draft = Boolean(task.draft || requestedStatus === "draft");
   if (baseBranch) {
     lines.push("", `Base branch: \`${baseBranch}\``);
   }
@@ -3630,6 +3698,13 @@ function normalizePlannerTaskForCreation(task, index) {
     description: lines.join("\n").trim(),
     index,
     baseBranch: baseBranch || null,
+    workspace: workspace || null,
+    repository: repository || null,
+    repositories,
+    priority: ["low", "medium", "high", "critical"].includes(priority) ? priority : null,
+    tags,
+    draft,
+    requestedStatus: requestedStatus || null,
   };
 }
 
@@ -3731,6 +3806,17 @@ registerNodeType("action.materialize_planner_tasks", {
         description: task.description,
         status,
       };
+      if (task.priority) payload.priority = task.priority;
+      if (task.workspace) payload.workspace = task.workspace;
+      if (task.repository) payload.repository = task.repository;
+      if (Array.isArray(task.repositories) && task.repositories.length > 0) {
+        payload.repositories = task.repositories;
+      }
+      if (Array.isArray(task.tags) && task.tags.length > 0) payload.tags = task.tags;
+      if (task.baseBranch) payload.baseBranch = task.baseBranch;
+      if (task.draft || String(status || "").trim().toLowerCase() === "draft") {
+        payload.draft = true;
+      }
       if (projectId) payload.projectId = projectId;
       const createdTask = await createKanbanTaskWithProject(kanban, payload, projectId);
       created.push({
@@ -3776,6 +3862,10 @@ registerNodeType("agent.run_planner", {
       outputVariable: { type: "string", description: "Optional context key to store planner output text" },
       projectId: { type: "string" },
       dedup: { type: "boolean", default: true },
+      timeoutMs: { type: "number", default: 960000, description: "Node timeout in ms (recommended >= agentTimeoutMs)" },
+      agentTimeoutMs: { type: "number", default: 900000, description: "Planner agent execution timeout in ms" },
+      maxRetries: { type: "number", default: 0, description: "Retry attempts for planner node" },
+      retryable: { type: "boolean", default: false, description: "Whether planner node should auto-retry on failure" },
       maxRetainedEvents: { type: "number", default: WORKFLOW_AGENT_EVENT_PREVIEW_LIMIT, description: "Maximum planner events retained in run output" },
     },
   },
@@ -3784,6 +3874,15 @@ registerNodeType("agent.run_planner", {
     const context = ctx.resolve(node.config?.context || "");
     const explicitPrompt = ctx.resolve(node.config?.prompt || "");
     const outputVariable = ctx.resolve(node.config?.outputVariable || "");
+    const configuredNodeTimeout = Number(ctx.resolve(node.config?.timeoutMs || node.config?.timeout || 0));
+    const configuredAgentTimeout = Number(ctx.resolve(node.config?.agentTimeoutMs || 0));
+
+    let agentTimeoutMs = Number.isFinite(configuredAgentTimeout) && configuredAgentTimeout > 0
+      ? Math.max(10000, Math.trunc(configuredAgentTimeout))
+      : 9 * 60 * 1000;
+    if (!(Number.isFinite(configuredAgentTimeout) && configuredAgentTimeout > 0) && Number.isFinite(configuredNodeTimeout) && configuredNodeTimeout > 15000) {
+      agentTimeoutMs = Math.max(10000, Math.trunc(configuredNodeTimeout) - 5000);
+    }
 
     ctx.log(node.id, `Running planner for ${count} tasks`);
 
@@ -3798,7 +3897,8 @@ registerNodeType("agent.run_planner", {
       `Generate exactly ${count} new tasks.\n` +
       (context ? `${context}\n\n` : "\n") +
       `Your response MUST be a single fenced JSON block with shape { "tasks": [...] }.\n` +
-      `Do NOT include any text, commentary, or prose outside the JSON block.\n` +
+      `Do NOT include status updates, analysis notes, tool commentary, questions, or prose outside the JSON block.\n` +
+      `Do NOT reference or use legacy ve-kanban integration commands or scripts.\n` +
       `The downstream system will parse your output as JSON — any extra text will cause task creation to fail.`;
     const basePrompt = explicitPrompt || plannerPrompt || "";
     const promptText = basePrompt
@@ -3844,7 +3944,7 @@ registerNodeType("agent.run_planner", {
         result = await agentPool.launchEphemeralThread(
           promptText,
           process.cwd(),
-          15 * 60 * 1000,
+          agentTimeoutMs,
           launchExtra,
         );
       } finally {
@@ -3999,6 +4099,259 @@ registerNodeType("flow.gate", {
     return { gateOpened: true, mode: "manual", timedOut: true, waited: timeoutMs, reason };
   },
 });
+
+registerNodeType("flow.join", {
+  describe: () => "Explicitly join multiple branches before continuing",
+  schema: {
+    type: "object",
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["all", "any", "quorum"],
+        default: "all",
+        description: "Join condition. 'all' waits for all listed sources, 'any' waits for one, 'quorum' waits for N",
+      },
+      sourceNodeIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional explicit source node IDs to evaluate at join time",
+      },
+      quorum: {
+        type: "number",
+        description: "Required count when mode='quorum'",
+      },
+      includeSkipped: {
+        type: "boolean",
+        default: true,
+        description: "Whether skipped sources count as arrived",
+      },
+      failOnUnmet: {
+        type: "boolean",
+        default: false,
+        description: "Throw when join criteria are not met",
+      },
+    },
+  },
+  async execute(node, ctx) {
+    const mode = String(ctx.resolve(node.config?.mode || "all") || "all").toLowerCase();
+    const includeSkipped = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.includeSkipped ?? true, ctx),
+      true,
+    );
+    const failOnUnmet = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.failOnUnmet ?? false, ctx),
+      false,
+    );
+
+    const configuredSourceIds = Array.isArray(node.config?.sourceNodeIds)
+      ? node.config.sourceNodeIds
+      : [];
+    const sourceNodeIds = configuredSourceIds
+      .map((value) => String(resolveWorkflowNodeValue(value, ctx) || "").trim())
+      .filter(Boolean);
+
+    const statuses = sourceNodeIds.map((sourceNodeId) => {
+      const status = typeof ctx.getNodeStatus === "function"
+        ? String(ctx.getNodeStatus(sourceNodeId) || "pending").toLowerCase()
+        : "pending";
+      return { sourceNodeId, status };
+    });
+
+    const arrivedStates = includeSkipped
+      ? new Set(["completed", "failed", "skipped"])
+      : new Set(["completed", "failed"]);
+    const arrived = statuses.filter((entry) => arrivedStates.has(entry.status));
+    const pendingSources = statuses
+      .filter((entry) => !arrivedStates.has(entry.status))
+      .map((entry) => entry.sourceNodeId);
+
+    const resolvedQuorumRaw = Number(ctx.resolve(node.config?.quorum ?? 0));
+    const resolvedQuorum = Number.isFinite(resolvedQuorumRaw)
+      ? Math.max(1, Math.trunc(resolvedQuorumRaw))
+      : Math.max(1, sourceNodeIds.length || 1);
+
+    let joined = true;
+    if (sourceNodeIds.length > 0) {
+      if (mode === "any") {
+        joined = arrived.length > 0;
+      } else if (mode === "quorum") {
+        joined = arrived.length >= Math.min(resolvedQuorum, sourceNodeIds.length);
+      } else {
+        joined = pendingSources.length === 0;
+      }
+    }
+
+    if (!joined && failOnUnmet) {
+      throw new Error(
+        `Join criteria not met for node ${node.id}: mode=${mode}, pending=${pendingSources.join(",") || "none"}`,
+      );
+    }
+
+    return {
+      joined,
+      mode,
+      sourceCount: sourceNodeIds.length,
+      arrivedCount: arrived.length,
+      pendingSources,
+      quorum: mode === "quorum" ? resolvedQuorum : undefined,
+      includeSkipped,
+    };
+  },
+});
+
+registerNodeType("flow.end", {
+  describe: () => "End the workflow immediately with explicit terminal status",
+  schema: {
+    type: "object",
+    properties: {
+      status: {
+        type: "string",
+        enum: ["completed", "failed"],
+        default: "completed",
+      },
+      message: { type: "string", description: "Terminal reason or summary" },
+      output: {
+        description: "Optional structured output persisted on workflow terminal metadata",
+      },
+    },
+  },
+  async execute(node, ctx) {
+    const rawStatus = String(ctx.resolve(node.config?.status || "completed") || "completed")
+      .trim()
+      .toLowerCase();
+    const status = rawStatus === "failed" ? "failed" : "completed";
+    const message = String(ctx.resolve(node.config?.message || "") || "").trim();
+    const output = resolveWorkflowNodeValue(node.config?.output, ctx);
+
+    if (message) {
+      const level = status === "failed" ? "warn" : "info";
+      ctx.log(node.id, `Workflow end requested (${status}): ${message}`, level);
+    }
+
+    return {
+      _workflowEnd: true,
+      status,
+      message,
+      output,
+      nodeId: node.id,
+      timestamp: Date.now(),
+    };
+  },
+});
+
+const UNIVERSAL_FLOW_NODE = {
+  describe: () => "Run a universal reusable subworkflow (alias of execute-workflow pattern)",
+  schema: {
+    type: "object",
+    properties: {
+      workflowId: { type: "string", description: "Shared subworkflow to run" },
+      mode: { type: "string", enum: ["sync", "dispatch"], default: "sync" },
+      input: { type: "object", additionalProperties: true },
+      inheritContext: { type: "boolean", default: true },
+      outputVariable: { type: "string" },
+      allowRecursive: { type: "boolean", default: false },
+    },
+    required: ["workflowId"],
+  },
+  async execute(node, ctx, engine) {
+    const workflowId = String(ctx.resolve(node.config?.workflowId || "") || "").trim();
+    const mode = String(ctx.resolve(node.config?.mode || "sync") || "sync")
+      .trim()
+      .toLowerCase();
+    const outputVariable = String(ctx.resolve(node.config?.outputVariable || "") || "").trim();
+    const inheritContext = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.inheritContext ?? true, ctx),
+      true,
+    );
+    const allowRecursive = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.allowRecursive ?? false, ctx),
+      false,
+    );
+
+    if (!workflowId) {
+      throw new Error("flow.universal: 'workflowId' is required");
+    }
+    if (!engine || typeof engine.execute !== "function") {
+      throw new Error("flow.universal: workflow engine is not available");
+    }
+    if (mode !== "sync" && mode !== "dispatch") {
+      throw new Error(`flow.universal: invalid mode \"${mode}\"`);
+    }
+
+    const resolvedInputConfig = resolveWorkflowNodeValue(node.config?.input ?? {}, ctx);
+    if (
+      resolvedInputConfig != null &&
+      (typeof resolvedInputConfig !== "object" || Array.isArray(resolvedInputConfig))
+    ) {
+      throw new Error("flow.universal: 'input' must resolve to an object");
+    }
+    const configuredInput = resolvedInputConfig && typeof resolvedInputConfig === "object"
+      ? resolvedInputConfig
+      : {};
+
+    const sourceData = ctx.data && typeof ctx.data === "object" ? ctx.data : {};
+    const inheritedInput = inheritContext ? { ...sourceData } : {};
+
+    const parentWorkflowId = String(ctx.data?._workflowId || "").trim();
+    const workflowStack = normalizeWorkflowStack(ctx.data?._workflowStack);
+    if (parentWorkflowId && workflowStack[workflowStack.length - 1] !== parentWorkflowId) {
+      workflowStack.push(parentWorkflowId);
+    }
+    if (!allowRecursive && workflowStack.includes(workflowId)) {
+      const cyclePath = [...workflowStack, workflowId].join(" -> ");
+      throw new Error(
+        `flow.universal: recursive workflow call blocked (${cyclePath}). Set allowRecursive=true to override.`,
+      );
+    }
+
+    const childInput = {
+      ...inheritedInput,
+      ...configuredInput,
+      _workflowStack: [...workflowStack, workflowId],
+    };
+
+    if (mode === "dispatch") {
+      ctx.log(node.id, `Dispatching universal workflow \"${workflowId}\"`);
+      const dispatched = engine.execute(workflowId, childInput);
+      dispatched
+        .then((childCtx) => {
+          const status = childCtx?.errors?.length ? "failed" : "completed";
+          ctx.log(node.id, `Dispatched universal workflow \"${workflowId}\" finished with status=${status}`);
+        })
+        .catch((err) => {
+          ctx.log(node.id, `Dispatched universal workflow \"${workflowId}\" failed: ${err.message}`, "error");
+        });
+
+      const output = {
+        success: true,
+        queued: true,
+        mode: "dispatch",
+        workflowId,
+        parentRunId: ctx.id,
+      };
+      if (outputVariable) ctx.data[outputVariable] = output;
+      return output;
+    }
+
+    ctx.log(node.id, `Executing universal workflow \"${workflowId}\" (sync)`);
+    const childCtx = await engine.execute(workflowId, childInput);
+    const errorCount = Array.isArray(childCtx?.errors) ? childCtx.errors.length : 0;
+    const output = {
+      success: errorCount === 0,
+      queued: false,
+      mode: "sync",
+      workflowId,
+      runId: childCtx?.id || null,
+      status: errorCount > 0 ? "failed" : "completed",
+      errorCount,
+    };
+    if (outputVariable) ctx.data[outputVariable] = output;
+    return output;
+  },
+};
+
+registerNodeType("flow.universal", UNIVERSAL_FLOW_NODE);
+registerNodeType("flow.universial", UNIVERSAL_FLOW_NODE);
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  LOOP / ITERATION

@@ -153,6 +153,15 @@ Respond with JSON: { "action": "<choice>", "reason": "<why>", "message": "<optio
       message: "PR #{{prNumber}} merge strategy: {{decision.action}} — {{decision.reason}}",
       level: "info",
     }, { x: 400, y: 850 }),
+
+    node("end", "flow.end", "End Merge Strategy", {
+      status: "completed",
+      message: "PR merge strategy flow completed for PR #{{prNumber}}",
+      output: {
+        prNumber: "{{prNumber}}",
+        action: "{{decision.action}}",
+      },
+    }, { x: 400, y: 950 }),
   ],
   edges: [
     edge("trigger", "check-ci"),
@@ -179,6 +188,7 @@ Respond with JSON: { "action": "<choice>", "reason": "<why>", "message": "<optio
     edge("action-succeeded", "notify-complete", { condition: "$output?.result === true", port: "yes" }),
     edge("action-succeeded", "notify-action-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("notify-action-failed", "notify-complete"),
+    edge("notify-complete", "end"),
   ],
   metadata: {
     author: "bosun",

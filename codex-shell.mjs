@@ -646,6 +646,9 @@ function isRecoverableThreadError(err) {
     (lower.includes("invalid_request_error") && lower.includes("json"));
   return (
     isJsonBodyError ||
+    lower.includes("was provided without its required following item") ||
+    (lower.includes("type 'reasoning'") && lower.includes("required following item")) ||
+    lower.includes("function call output is missing for call id") ||
     lower.includes("invalid_encrypted_content") ||
     lower.includes("could not be verified") ||
     lower.includes("state db missing rollout path") ||

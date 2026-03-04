@@ -37,9 +37,9 @@ describe("monitor branch-merged guard", () => {
     );
   });
 
-  it("prunes stale merged-task cache entries for active tasks", () => {
+  it("removes legacy merged-task reconciliation in favor of workflows", () => {
     expect(source).toContain(
-      "Pruned ${prunedMergedTaskCacheCount} stale merged-task cache entr",
+      "legacy task-status reconciliation path removed — use workflows",
     );
   });
 });

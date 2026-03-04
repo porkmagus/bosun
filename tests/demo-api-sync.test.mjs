@@ -153,6 +153,8 @@ const INTENTIONALLY_SKIPPED = new Set([
   // Manual Flows — server-only (reads/writes workspace flow templates and runs)
   "/api/manual-flows/templates",
   "/api/manual-flows/templates/save",
+  "/api/manual-flows/templates/install",
+  "/api/manual-flows/templates/:id",
   "/api/manual-flows/execute",
   "/api/manual-flows/runs",
   "/api/manual-flows/runs/:id",

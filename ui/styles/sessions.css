@@ -30,6 +30,7 @@
   min-height: 0;
   flex: 1;
   overflow: hidden;
+  position: relative;
 }
 
 .session-split {
@@ -1755,6 +1756,12 @@ ul.md-list li::before {
 .chat-input.chat-input-drag {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--bg-card) 82%, var(--accent) 18%);
+}
+
+.chat-drop-overlay {
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
 
 .chat-send-btn {

@@ -772,7 +772,7 @@ describe("reconcileTaskStatuses", () => {
     }
   });
 
-  it("recovers stale inreview tasks with no attempt/PR back to todo", async () => {
+  it("returns workflow-replacement marker without mutating tasks", async () => {
     const staleAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const taskId = "stale-review-no-pr";
     addTask({
@@ -788,7 +788,8 @@ describe("reconcileTaskStatuses", () => {
 
     const result = await reconcileTaskStatuses("test-stale-inreview");
 
-    expect(result?.movedTodo).toBeGreaterThanOrEqual(1);
-    expect(getTask(taskId)?.status).toBe("todo");
+    expect(result?.movedTodo).toBe(0);
+    expect(result?.skippedByWorkflowReplacement).toBe(true);
+    expect(getTask(taskId)?.status).toBe("inreview");
   });
 });

@@ -195,4 +195,37 @@ describe("codex-shell stream safeguards", () => {
     expect(result.items[0].aggregated_output).toContain("…truncated");
     expect(result.items[1]).toMatchObject({ type: "stream_notice" });
   });
+
+  it("resets thread and retries when API reports broken reasoning chain", async () => {
+    let runAttempt = 0;
+    mockStartThread.mockImplementation(() => ({
+      id: `codex-test-thread-recoverable-${Date.now()}-${Math.random()}`,
+      runStreamed: async () => {
+        runAttempt += 1;
+        if (runAttempt === 1) {
+          throw new Error(
+            "Item 'rs_test' of type 'reasoning' was provided without its required following item.",
+          );
+        }
+        return {
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                type: "item.completed",
+                item: { type: "agent_message", text: "recovered after thread reset" },
+              };
+              yield { type: "turn.completed" };
+            },
+          },
+        };
+      },
+    }));
+
+    const result = await execCodexPrompt("recover from malformed reasoning state", {
+      timeoutMs: 5000,
+    });
+
+    expect(result.finalResponse).toContain("recovered after thread reset");
+    expect(runAttempt).toBe(2);
+  });
 });

@@ -490,15 +490,35 @@ export const TASK_FINALIZATION_GUARD_TEMPLATE = {
       level: "info",
     }, { x: 240, y: 1040 }),
 
-    node("chain-archiver", "action.execute_workflow", "Queue Archival", {
+    node("chain-archiver", "flow.universal", "Queue Archival", {
       workflowId: "template-task-archiver",
       mode: "dispatch",
       input: "({taskId: $data?.taskId, taskTitle: $data?.taskTitle, completedAt: new Date().toISOString(), taskJson: JSON.stringify($data?.task || {id: $data?.taskId, title: $data?.taskTitle})})",
     }, { x: 240, y: 1180 }),
 
+    node("end-success", "flow.end", "End Success", {
+      status: "completed",
+      message: "Task finalization guard completed successfully for {{taskId}}",
+      output: {
+        outcome: "passed",
+        taskId: "{{taskId}}",
+        taskTitle: "{{taskTitle}}",
+      },
+    }, { x: 240, y: 1310 }),
+
     node("notify-fail", "notify.telegram", "Notify Finalization Failure", {
       message: ":alert: Task finalization failed for **{{taskTitle}}** ({{taskId}}). Repair workflow handoff triggered.",
     }, { x: 540, y: 900 }),
+
+    node("end-failed", "flow.end", "End Failed", {
+      status: "failed",
+      message: "Task finalization guard failed for {{taskId}}",
+      output: {
+        outcome: "failed",
+        taskId: "{{taskId}}",
+        taskTitle: "{{taskTitle}}",
+      },
+    }, { x: 540, y: 1040 }),
   ],
   edges: [
     edge("trigger", "has-worktree"),
@@ -514,8 +534,10 @@ export const TASK_FINALIZATION_GUARD_TEMPLATE = {
     edge("create-pr-success", "mark-todo-failed", { condition: "$output?.result !== true", port: "no" }),
     edge("mark-inreview", "notify-pass"),
     edge("notify-pass", "chain-archiver"),
+    edge("chain-archiver", "end-success"),
     edge("mark-todo-failed", "notify-fail"),
     edge("mark-todo-missing", "notify-fail"),
+    edge("notify-fail", "end-failed"),
   ],
   metadata: {
     author: "bosun",

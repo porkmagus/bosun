@@ -12,9 +12,9 @@ const html = htm.bind(h);
 import { haptic } from "../modules/telegram.js";
 import { apiFetch } from "../modules/api.js";
 import { showToast } from "../modules/state.js";
+import { formatDate, formatDuration, formatRelative } from "../modules/utils.js";
 import { ICONS } from "../modules/icons.js";
 import { resolveIcon } from "../modules/icon-utils.js";
-import { formatRelative } from "../modules/utils.js";
 import {
   Typography, Box, Stack, Card, CardContent, Button, IconButton, Chip,
   TextField, Select, MenuItem, FormControl, InputLabel, Switch,
@@ -44,6 +44,50 @@ const wfLaunching = signal(false);
 const wfLaunchResult = signal(null);
 const wfSearchQuery = signal("");
 const wfSelectedCategory = signal("all");
+const wfManualRuns = signal([]);
+const selectedWfRunId = signal(null);
+const selectedWfRunDetail = signal(null);
+const wfManualRunsLoading = signal(false);
+
+const MANUAL_WORKFLOW_RUN_PAGE_SIZE = 100;
+
+function isManualWorkflowRun(run) {
+  const triggerSource = String(run?.triggerSource || "manual").trim().toLowerCase();
+  return triggerSource === "manual" || triggerSource === "ui-event";
+}
+
+async function loadManualWorkflowRuns(limit = MANUAL_WORKFLOW_RUN_PAGE_SIZE) {
+  const safeLimit = Number.isFinite(Number(limit)) && Number(limit) > 0
+    ? Math.min(Math.floor(Number(limit)), 300)
+    : MANUAL_WORKFLOW_RUN_PAGE_SIZE;
+  wfManualRunsLoading.value = true;
+  try {
+    const data = await apiFetch(`/api/workflows/runs?limit=${safeLimit}`);
+    const runs = Array.isArray(data?.runs) ? data.runs : [];
+    wfManualRuns.value = runs.filter((run) => isManualWorkflowRun(run));
+  } catch (err) {
+    console.error("[manual-flows] Failed to load manual workflow runs:", err);
+    wfManualRuns.value = [];
+  } finally {
+    wfManualRunsLoading.value = false;
+  }
+}
+
+async function loadManualWorkflowRunDetail(runId) {
+  const safeRunId = String(runId || "").trim();
+  if (!safeRunId) return null;
+  try {
+    const data = await apiFetch(`/api/workflows/runs/${encodeURIComponent(safeRunId)}`);
+    if (data?.run) {
+      selectedWfRunId.value = safeRunId;
+      selectedWfRunDetail.value = data.run;
+      return data.run;
+    }
+  } catch (err) {
+    console.error("[manual-flows] Failed to load run detail:", err);
+  }
+  return null;
+}
 
 /* ═══════════════════════════════════════════════════════════════
  *  API Helpers
@@ -96,6 +140,61 @@ async function executeFlow(templateId, formValues) {
   }
 }
 
+async function saveManualTemplate(template) {
+  try {
+    const data = await apiFetch("/api/manual-flows/templates/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(template),
+    });
+    if (data?.template) {
+      showToast("Template saved", "success");
+      loadTemplates().catch(() => {});
+      return data.template;
+    }
+  } catch (err) {
+    showToast("Failed to save template: " + err.message, "error");
+  }
+  return null;
+}
+
+async function deleteManualTemplate(templateId) {
+  const safeId = String(templateId || "").trim();
+  if (!safeId) return false;
+  try {
+    await apiFetch(`/api/manual-flows/templates/${encodeURIComponent(safeId)}`, {
+      method: "DELETE",
+    });
+    showToast("Template deleted", "success");
+    loadTemplates().catch(() => {});
+    if (selectedTemplate.value?.id === safeId) selectedTemplate.value = null;
+    return true;
+  } catch (err) {
+    showToast("Failed to delete template: " + err.message, "error");
+    return false;
+  }
+}
+
+async function installManualTemplate(templateId) {
+  const safeId = String(templateId || "").trim();
+  if (!safeId) return null;
+  try {
+    const data = await apiFetch("/api/manual-flows/templates/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId: safeId }),
+    });
+    if (data?.template) {
+      showToast("Template installed", "success");
+      loadTemplates().catch(() => {});
+      return data.template;
+    }
+  } catch (err) {
+    showToast("Failed to install template: " + err.message, "error");
+  }
+  return null;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Workflow Launcher API Helpers
  * ═══════════════════════════════════════════════════════════════ */
@@ -109,14 +208,17 @@ async function loadWfTemplates() {
   }
 }
 
-async function launchWorkflowTemplate(templateId, variables) {
+async function launchWorkflowTemplate(templateId, launchConfig = {}) {
   wfLaunching.value = true;
   wfLaunchResult.value = null;
   try {
+    const payload = launchConfig && typeof launchConfig === "object"
+      ? { ...launchConfig, templateId }
+      : { templateId, variables: launchConfig };
     const data = await apiFetch("/api/workflows/launch-template", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ templateId, variables }),
+      body: JSON.stringify(payload),
     });
     wfLaunchResult.value = data;
     showToast(
@@ -143,6 +245,9 @@ const CATEGORY_META = {
   audit: { label: "Audit & Analysis", icon: "search", color: "#3b82f6", bg: "#3b82f615" },
   generate: { label: "Generate & Prepare", icon: "book", color: "#10b981", bg: "#10b98115" },
   transform: { label: "Transform & Refactor", icon: "refresh", color: "#f59e0b", bg: "#f59e0b15" },
+  reliability: { label: "Reliability", icon: "shield", color: "#ef4444", bg: "#ef444415" },
+  security: { label: "Security", icon: "lock", color: "#dc2626", bg: "#dc262615" },
+  research: { label: "Research", icon: "search", color: "#06b6d4", bg: "#06b6d415" },
   custom: { label: "Custom", icon: "settings", color: "#8b5cf6", bg: "#8b5cf615" },
 };
 
@@ -158,6 +263,25 @@ const WF_CATEGORY_META = {
   research:    { label: "Research",     icon: "search",      color: "#06b6d4", bg: "#06b6d415" },
   custom:      { label: "Custom",       icon: "settings",    color: "#6b7280", bg: "#6b728015" },
 };
+
+const WF_CAPABILITY_META = Object.freeze([
+  { key: "branch", label: "Branch", symbol: "⑂" },
+  { key: "join", label: "Join", symbol: "⑃" },
+  { key: "gate", label: "Gate", symbol: "◈" },
+  { key: "universal", label: "Universal", symbol: "U" },
+  { key: "end", label: "End", symbol: "∴" },
+]);
+
+function getTemplateCapabilities(template) {
+  const capabilities = template?.capabilities || {};
+  const counts = template?.capabilityCounts || {};
+  return WF_CAPABILITY_META
+    .filter((entry) => capabilities[entry.key] === true)
+    .map((entry) => ({
+      ...entry,
+      count: Number(counts[entry.key] || 0),
+    }));
+}
 
 function getCategoryMeta(cat) {
   return CATEGORY_META[cat] || CATEGORY_META.custom;
@@ -268,8 +392,14 @@ function FormField({ field, value, onChange }) {
  *  Template Card
  * ═══════════════════════════════════════════════════════════════ */
 
-function TemplateCard({ template, onClick }) {
+function TemplateCard({ template, onClick, onInstall, onEdit, onDelete }) {
   const catMeta = getCategoryMeta(template.category);
+  const isBuiltin = template.builtin === true;
+
+  const stop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
 
   return html`
     <${Card}
@@ -298,7 +428,7 @@ function TemplateCard({ template, onClick }) {
           ${template.description}
         </${Typography}>
 
-        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" useFlexGap>
+        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" useFlexGap sx=${{ mb: 1.25 }}>
           <${Chip}
             label=${catMeta.label}
             size="small"
@@ -314,6 +444,41 @@ function TemplateCard({ template, onClick }) {
           ${(template.tags || []).slice(0, 3).map(
             (tag) => html`<${Chip} key=${tag} label=${tag} size="small" sx=${{ fontSize: "10px", height: "20px" }} variant="outlined" />`,
           )}
+        </${Stack}>
+
+        <${Stack} direction="row" spacing=${0.75} justifyContent="flex-end">
+          ${isBuiltin && html`
+            <${Button}
+              size="small"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onInstall?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("download")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Install
+            </${Button}>
+          `}
+          ${!isBuiltin && html`
+            <${Button}
+              size="small"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onEdit?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("edit")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Edit
+            </${Button}>
+            <${Button}
+              size="small"
+              color="error"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onDelete?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("trash")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Delete
+            </${Button}>
+          `}
         </${Stack}>
       </${CardContent}>
     </${Card}>
@@ -554,8 +719,139 @@ function RunHistoryList({ onBack }) {
  *  Template List View (main view)
  * ═══════════════════════════════════════════════════════════════ */
 
+const TEMPLATE_FIELD_TYPES = ["text", "textarea", "select", "toggle", "number"];
+
+function createTemplateFieldDraft(overrides = {}) {
+  return {
+    id: "",
+    label: "",
+    type: "text",
+    placeholder: "",
+    defaultValue: "",
+    required: false,
+    options: [],
+    helpText: "",
+    ...overrides,
+  };
+}
+
+function parseTemplateSelectOptions(raw = "") {
+  const lines = String(raw || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const options = [];
+  for (const line of lines) {
+    const eq = line.indexOf("=");
+    if (eq > 0) {
+      const value = line.slice(0, eq).trim();
+      const label = line.slice(eq + 1).trim() || value;
+      if (!value) continue;
+      options.push({ value, label });
+      continue;
+    }
+    options.push({ value: line, label: line });
+  }
+  return options;
+}
+
+function formatTemplateSelectOptions(options = []) {
+  if (!Array.isArray(options) || options.length === 0) return "";
+  return options
+    .map((opt) => {
+      const value = String(opt?.value ?? "").trim();
+      const label = String(opt?.label ?? value).trim();
+      if (!value) return "";
+      return label && label !== value ? `${value}=${label}` : value;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeTemplateFieldsForSave(fields = []) {
+  return fields
+    .map((field) => {
+      const type = TEMPLATE_FIELD_TYPES.includes(field?.type) ? field.type : "text";
+      const id = String(field?.id || "").trim();
+      const label = String(field?.label || "").trim();
+      if (!id || !label) return null;
+
+      let defaultValue = field?.defaultValue;
+      if (type === "toggle") {
+        defaultValue = !!defaultValue;
+      } else if (type === "number") {
+        if (defaultValue === "" || defaultValue == null) {
+          defaultValue = undefined;
+        } else {
+          const n = Number(defaultValue);
+          defaultValue = Number.isFinite(n) ? n : undefined;
+        }
+      } else if (defaultValue == null) {
+        defaultValue = "";
+      } else {
+        defaultValue = String(defaultValue);
+      }
+
+      const normalized = {
+        id,
+        label,
+        type,
+        required: field?.required === true,
+      };
+
+      const placeholder = String(field?.placeholder || "").trim();
+      if (placeholder) normalized.placeholder = placeholder;
+
+      if (defaultValue !== undefined) normalized.defaultValue = defaultValue;
+
+      const helpText = String(field?.helpText || "").trim();
+      if (helpText) normalized.helpText = helpText;
+
+      if (type === "select") {
+        const options = Array.isArray(field?.options)
+          ? field.options
+            .map((opt) => ({
+              value: String(opt?.value ?? "").trim(),
+              label: String(opt?.label ?? opt?.value ?? "").trim(),
+            }))
+            .filter((opt) => opt.value)
+          : [];
+        if (options.length === 0 && String(defaultValue || "").trim()) {
+          options.push({ value: String(defaultValue).trim(), label: String(defaultValue).trim() });
+        }
+        normalized.options = options;
+      }
+
+      return normalized;
+    })
+    .filter(Boolean);
+}
+
 function TemplateListView() {
   const tmpls = flowTemplates.value || [];
+
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorMode, setEditorMode] = useState("create");
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [form, setForm] = useState({
+    id: "",
+    name: "",
+    description: "",
+    icon: "settings",
+    category: "custom",
+    tagsText: "",
+    fields: [createTemplateFieldDraft()],
+    actionKind: "task",
+    actionTaskTitle: "",
+    actionTaskDescription: "",
+    actionTaskPriority: "medium",
+    actionTaskLabelsText: "manual-flow, custom",
+    actionInstructions: "",
+  });
 
   // Group by category
   const groups = useMemo(() => {
@@ -565,18 +861,205 @@ function TemplateListView() {
       if (!map[cat]) map[cat] = [];
       map[cat].push(t);
     });
-    const order = ["audit", "generate", "transform", "custom"];
-    return order
+    const order = ["audit", "generate", "transform", "reliability", "security", "research", "custom"];
+    const orderedGroups = order
       .filter((k) => map[k]?.length > 0)
       .map((k) => ({ key: k, meta: getCategoryMeta(k), items: map[k] }));
+    const remaining = Object.keys(map)
+      .filter((k) => !order.includes(k))
+      .sort((a, b) => a.localeCompare(b))
+      .map((k) => ({ key: k, meta: getCategoryMeta(k), items: map[k] }));
+    return [...orderedGroups, ...remaining];
   }, [tmpls]);
+
+  const resetEditorForm = useCallback(() => {
+    setForm({
+      id: "",
+      name: "",
+      description: "",
+      icon: "settings",
+      category: "custom",
+      tagsText: "",
+      fields: [createTemplateFieldDraft()],
+      actionKind: "task",
+      actionTaskTitle: "",
+      actionTaskDescription: "",
+      actionTaskPriority: "medium",
+      actionTaskLabelsText: "manual-flow, custom",
+      actionInstructions: "",
+    });
+    setEditorError("");
+  }, []);
+
+  const openCreate = useCallback(() => {
+    setEditorMode("create");
+    resetEditorForm();
+    setEditorOpen(true);
+  }, [resetEditorForm]);
+
+  const openEdit = useCallback((tpl) => {
+    setEditorMode("edit");
+    setForm({
+      id: String(tpl?.id || ""),
+      name: String(tpl?.name || ""),
+      description: String(tpl?.description || ""),
+      icon: String(tpl?.icon || "settings"),
+      category: String(tpl?.category || "custom"),
+      tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
+      fields: Array.isArray(tpl?.fields) && tpl.fields.length > 0
+        ? tpl.fields.map((field) => createTemplateFieldDraft(field))
+        : [createTemplateFieldDraft()],
+      actionKind: String(tpl?.action?.kind || "task"),
+      actionTaskTitle: String(tpl?.action?.task?.title || ""),
+      actionTaskDescription: String(tpl?.action?.task?.description || ""),
+      actionTaskPriority: String(tpl?.action?.task?.priority || "medium"),
+      actionTaskLabelsText: Array.isArray(tpl?.action?.task?.labels)
+        ? tpl.action.task.labels.join(", ")
+        : "manual-flow, custom",
+      actionInstructions: String(tpl?.action?.instructions || ""),
+    });
+    setEditorError("");
+    setEditorOpen(true);
+  }, []);
+
+  const openInstall = useCallback((tpl) => {
+    setEditorMode("install");
+    setForm({
+      id: String(tpl?.id || "template") + "-custom",
+      name: String(tpl?.name || "Template") + " (Installed)",
+      description: String(tpl?.description || ""),
+      icon: String(tpl?.icon || "settings"),
+      category: String(tpl?.category || "custom"),
+      tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
+      fields: Array.isArray(tpl?.fields) && tpl.fields.length > 0
+        ? tpl.fields.map((field) => createTemplateFieldDraft(field))
+        : [createTemplateFieldDraft()],
+      actionKind: "task",
+      actionTaskTitle: "",
+      actionTaskDescription: "",
+      actionTaskPriority: "medium",
+      actionTaskLabelsText: "manual-flow, custom",
+      actionInstructions: "",
+    });
+    setEditorError("");
+    setEditorOpen(true);
+  }, []);
+
+  const openDelete = useCallback((tpl) => {
+    setDeleteTarget(tpl || null);
+    setDeleteOpen(true);
+  }, []);
+
+  const parseEditorPayload = useCallback(() => {
+    const id = String(form.id || "").trim();
+    const name = String(form.name || "").trim();
+    const description = String(form.description || "").trim();
+    const icon = String(form.icon || "").trim() || "settings";
+    const category = String(form.category || "").trim() || "custom";
+
+    if (!name) throw new Error("Name is required");
+    if ((editorMode === "edit" || editorMode === "install") && !id) {
+      throw new Error("ID is required");
+    }
+
+    const fields = normalizeTemplateFieldsForSave(Array.isArray(form.fields) ? form.fields : []);
+    if (fields.length === 0) throw new Error("Add at least one valid field (id + label)");
+
+    const tags = String(form.tagsText || "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
+    const actionKind = String(form.actionKind || "task");
+    const action = actionKind === "instructions"
+      ? {
+        kind: "instructions",
+        instructions: String(form.actionInstructions || "").trim(),
+      }
+      : {
+        kind: "task",
+        task: {
+          title: String(form.actionTaskTitle || "").trim(),
+          description: String(form.actionTaskDescription || "").trim(),
+          priority: String(form.actionTaskPriority || "medium").trim() || "medium",
+          labels: String(form.actionTaskLabelsText || "")
+            .split(",")
+            .map((label) => label.trim())
+            .filter(Boolean),
+        },
+      };
+
+    return {
+      id: id || undefined,
+      name,
+      description,
+      icon,
+      category,
+      tags,
+      fields,
+      action,
+      builtin: false,
+    };
+  }, [editorMode, form]);
+
+  const saveTemplateFromEditor = useCallback(async () => {
+    setEditorError("");
+    setEditorSaving(true);
+    try {
+      const payload = parseEditorPayload();
+      await saveManualTemplate(payload);
+      setEditorOpen(false);
+      loadTemplates().catch(() => {});
+    } catch (err) {
+      setEditorError(err?.message || "Failed to save template");
+    } finally {
+      setEditorSaving(false);
+    }
+  }, [editorMode, parseEditorPayload]);
+
+  const deleteTemplateFromDialog = useCallback(async () => {
+    const templateId = String(deleteTarget?.id || "").trim();
+    if (!templateId) return;
+    setDeleteBusy(true);
+    try {
+      const deleted = await deleteManualTemplate(templateId);
+      if (!deleted) return;
+      setDeleteOpen(false);
+      setDeleteTarget(null);
+      loadTemplates().catch(() => {});
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteTarget]);
 
   return html`
     <div>
-      <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 3, maxWidth: "600px" }}>
-        One-shot transformations for your codebase. Pick a template, fill the form, and trigger.
-        Each flow runs once — annotate, generate skills, prepare configs, and more.
-      </${Typography}>
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 2 }}>
+        <${Typography} variant="body2" color="text.secondary" sx=${{ maxWidth: "600px" }}>
+          One-shot transformations for your codebase. Pick a template, fill the form, and trigger.
+          Each flow runs once — annotate, generate skills, prepare configs, and more.
+        </${Typography}>
+        <${Stack} direction="row" spacing=${1}>
+          <${Button}
+            variant="contained"
+            size="small"
+            onClick=${openCreate}
+            startIcon=${html`<span class="icon-inline">${resolveIcon("plus")}</span>`}
+            sx=${{ textTransform: "none", flexShrink: 0, ml: 2 }}
+          >
+            Create Template
+          </${Button}>
+          <${Button}
+            variant="outlined"
+            size="small"
+            onClick=${() => { viewMode.value = "runs"; }}
+            startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
+            sx=${{ textTransform: "none", flexShrink: 0 }}
+          >
+            Run History
+          </${Button}>
+        </${Stack}>
+      </${Stack}>
 
       <!-- Template grid grouped by category -->
       ${groups.map(
@@ -598,6 +1081,9 @@ function TemplateListView() {
                   <${TemplateCard}
                     key=${t.id}
                     template=${t}
+                    onInstall=${openInstall}
+                    onEdit=${openEdit}
+                    onDelete=${openDelete}
                     onClick=${() => {
                       selectedTemplate.value = t;
                       viewMode.value = "form";
@@ -620,6 +1106,326 @@ function TemplateListView() {
           </${Typography}>
         </${Paper}>
       `}
+
+      <${Dialog} open=${editorOpen} onClose=${() => !editorSaving && setEditorOpen(false)} maxWidth="md" fullWidth>
+        <${DialogTitle}>
+          ${editorMode === "create" ? "Create Template" : editorMode === "edit" ? "Edit Template" : "Install Template"}
+        </${DialogTitle}>
+        <${DialogContent} dividers>
+          ${editorError && html`<${Alert} severity="error" sx=${{ mb: 2 }}>${editorError}</${Alert}>`}
+
+          <${Stack} spacing=${1.5}>
+            <${TextField}
+              label="Template ID"
+              size="small"
+              value=${form.id}
+              onChange=${(e) => setForm((prev) => ({ ...prev, id: e.target.value }))}
+              helperText="Unique ID for user template."
+              fullWidth
+            />
+            <${TextField}
+              label="Name"
+              size="small"
+              value=${form.name}
+              onChange=${(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              fullWidth
+              required
+            />
+            <${TextField}
+              label="Description"
+              size="small"
+              value=${form.description}
+              onChange=${(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+              fullWidth
+            />
+            <${Stack} direction="row" spacing=${1.5}>
+              <${TextField}
+                label="Icon"
+                size="small"
+                value=${form.icon}
+                onChange=${(e) => setForm((prev) => ({ ...prev, icon: e.target.value }))}
+                sx=${{ flex: 1 }}
+              />
+              <${FormControl} size="small" sx=${{ flex: 1 }}>
+                <${InputLabel}>Category</${InputLabel}>
+                <${Select}
+                  label="Category"
+                  value=${form.category}
+                  onChange=${(e) => setForm((prev) => ({ ...prev, category: e.target.value }))}
+                >
+                  <${MenuItem} value="audit">Audit</${MenuItem}>
+                  <${MenuItem} value="generate">Generate</${MenuItem}>
+                  <${MenuItem} value="transform">Transform</${MenuItem}>
+                  <${MenuItem} value="custom">Custom</${MenuItem}>
+                </${Select}>
+              </${FormControl}>
+            </${Stack}>
+
+            <${TextField}
+              label="Tags (comma-separated)"
+              size="small"
+              value=${form.tagsText}
+              onChange=${(e) => setForm((prev) => ({ ...prev, tagsText: e.target.value }))}
+              fullWidth
+            />
+
+            <${Divider} />
+            <${Stack} direction="row" justifyContent="space-between" alignItems="center">
+              <${Typography} variant="subtitle2">Template Fields</${Typography}>
+              <${Button}
+                size="small"
+                variant="outlined"
+                onClick=${() => setForm((prev) => ({ ...prev, fields: [...(prev.fields || []), createTemplateFieldDraft()] }))}
+                sx=${{ textTransform: "none" }}
+              >
+                Add Field
+              </${Button}>
+            </${Stack}>
+
+            ${(form.fields || []).map((field, index) => html`
+              <${Paper} key=${`field-${index}`} variant="outlined" sx=${{ p: 1.5 }}>
+                <${Stack} direction="row" spacing=${1} sx=${{ mb: 1 }}>
+                  <${TextField}
+                    label="Field ID"
+                    size="small"
+                    value=${field.id || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, id: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  <${TextField}
+                    label="Label"
+                    size="small"
+                    value=${field.label || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, label: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  <${FormControl} size="small" sx=${{ minWidth: 140 }}>
+                    <${InputLabel}>Type</${InputLabel}>
+                    <${Select}
+                      label="Type"
+                      value=${field.type || "text"}
+                      onChange=${(e) => setForm((prev) => ({
+                        ...prev,
+                        fields: (prev.fields || []).map((f, idx) => idx === index
+                          ? {
+                            ...f,
+                            type: e.target.value,
+                            options: e.target.value === "select" ? (Array.isArray(f.options) ? f.options : []) : [],
+                          }
+                          : f),
+                      }))}
+                    >
+                      ${TEMPLATE_FIELD_TYPES.map((type) => html`<${MenuItem} key=${type} value=${type}>${type}</${MenuItem}>`)}
+                    </${Select}>
+                  </${FormControl}>
+                </${Stack}>
+
+                <${Stack} direction="row" spacing=${1} sx=${{ mb: 1 }}>
+                  <${TextField}
+                    label="Placeholder"
+                    size="small"
+                    value=${field.placeholder || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, placeholder: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  ${field.type === "toggle"
+                    ? html`<${FormControlLabel}
+                        control=${html`<${Switch}
+                          checked=${!!field.defaultValue}
+                          onChange=${(e) => setForm((prev) => ({
+                            ...prev,
+                            fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, defaultValue: e.target.checked } : f),
+                          }))}
+                          size="small"
+                        />`}
+                        label="Default On"
+                      />`
+                    : html`<${TextField}
+                        label="Default Value"
+                        size="small"
+                        type=${field.type === "number" ? "number" : "text"}
+                        value=${field.defaultValue == null ? "" : String(field.defaultValue)}
+                        onChange=${(e) => setForm((prev) => ({
+                          ...prev,
+                          fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, defaultValue: e.target.value } : f),
+                        }))}
+                        sx=${{ flex: 1 }}
+                      />`}
+                  <${FormControlLabel}
+                    control=${html`<${Switch}
+                      checked=${field.required === true}
+                      onChange=${(e) => setForm((prev) => ({
+                        ...prev,
+                        fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, required: e.target.checked } : f),
+                      }))}
+                      size="small"
+                    />`}
+                    label="Required"
+                  />
+                </${Stack}>
+
+                <${TextField}
+                  label="Help Text"
+                  size="small"
+                  value=${field.helpText || ""}
+                  onChange=${(e) => setForm((prev) => ({
+                    ...prev,
+                    fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, helpText: e.target.value } : f),
+                  }))}
+                  fullWidth
+                  sx=${{ mb: field.type === "select" ? 1 : 0 }}
+                />
+
+                ${field.type === "select" && html`
+                  <${TextField}
+                    label="Options (one per line: value=Label)"
+                    size="small"
+                    multiline
+                    minRows=${3}
+                    value=${formatTemplateSelectOptions(field.options || [])}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, options: parseTemplateSelectOptions(e.target.value) } : f),
+                    }))}
+                    fullWidth
+                    sx=${{ mt: 1 }}
+                  />
+                `}
+
+                <${Stack} direction="row" justifyContent="flex-end" sx=${{ mt: 1 }}>
+                  <${Button}
+                    size="small"
+                    color="error"
+                    variant="text"
+                    disabled=${(form.fields || []).length <= 1}
+                    onClick=${() => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).filter((_f, idx) => idx !== index),
+                    }))}
+                    sx=${{ textTransform: "none" }}
+                  >
+                    Remove Field
+                  </${Button}>
+                </${Stack}>
+              </${Paper}>
+            `)}
+
+            <${Divider} />
+            <${Typography} variant="subtitle2">Template Action</${Typography}>
+            <${FormControl} size="small" fullWidth>
+              <${InputLabel}>Action Kind</${InputLabel}>
+              <${Select}
+                label="Action Kind"
+                value=${form.actionKind || "task"}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionKind: e.target.value }))}
+              >
+                <${MenuItem} value="task">Dispatch Task</${MenuItem}>
+                <${MenuItem} value="instructions">Instructions-only</${MenuItem}>
+              </${Select}>
+            </${FormControl}>
+
+            ${(form.actionKind || "task") === "task" ? html`
+              <${TextField}
+                label="Task Title Template"
+                size="small"
+                value=${form.actionTaskTitle || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskTitle: e.target.value }))}
+                helperText="Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+              <${TextField}
+                label="Task Description Template"
+                size="small"
+                multiline
+                minRows=${4}
+                value=${form.actionTaskDescription || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskDescription: e.target.value }))}
+                helperText="Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+              <${Stack} direction="row" spacing=${1.5}>
+                <${FormControl} size="small" sx=${{ flex: 1 }}>
+                  <${InputLabel}>Priority</${InputLabel}>
+                  <${Select}
+                    label="Priority"
+                    value=${form.actionTaskPriority || "medium"}
+                    onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskPriority: e.target.value }))}
+                  >
+                    <${MenuItem} value="low">low</${MenuItem}>
+                    <${MenuItem} value="medium">medium</${MenuItem}>
+                    <${MenuItem} value="high">high</${MenuItem}>
+                  </${Select}>
+                </${FormControl}>
+                <${TextField}
+                  label="Task Labels (comma-separated)"
+                  size="small"
+                  value=${form.actionTaskLabelsText || ""}
+                  onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskLabelsText: e.target.value }))}
+                  sx=${{ flex: 2 }}
+                />
+              </${Stack}>
+            ` : html`
+              <${TextField}
+                label="Instructions"
+                size="small"
+                multiline
+                minRows=${4}
+                value=${form.actionInstructions || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionInstructions: e.target.value }))}
+                helperText="Returned when no task is dispatched. Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+            `}
+          </${Stack}>
+        </${DialogContent}>
+        <${DialogActions}>
+          <${Button} onClick=${() => setEditorOpen(false)} disabled=${editorSaving} sx=${{ textTransform: "none" }}>
+            Cancel
+          </${Button}>
+          <${Button}
+            variant="contained"
+            onClick=${saveTemplateFromEditor}
+            disabled=${editorSaving}
+            startIcon=${editorSaving ? html`<${CircularProgress} size=${16} color="inherit" />` : html`<span class="icon-inline">${resolveIcon("save")}</span>`}
+            sx=${{ textTransform: "none" }}
+          >
+            ${editorSaving ? "Saving…" : editorMode === "create" ? "Create" : editorMode === "install" ? "Install" : "Save"}
+          </${Button}>
+        </${DialogActions}>
+      </${Dialog}>
+
+      <${Dialog} open=${deleteOpen} onClose=${() => !deleteBusy && setDeleteOpen(false)} maxWidth="xs" fullWidth>
+        <${DialogTitle}>Delete Template</${DialogTitle}>
+        <${DialogContent} dividers>
+          <${Typography} variant="body2">
+            Delete <strong>${deleteTarget?.name || "this template"}</strong>? This cannot be undone.
+          </${Typography}>
+        </${DialogContent}>
+        <${DialogActions}>
+          <${Button} onClick=${() => setDeleteOpen(false)} disabled=${deleteBusy} sx=${{ textTransform: "none" }}>
+            Cancel
+          </${Button}>
+          <${Button}
+            color="error"
+            variant="contained"
+            onClick=${deleteTemplateFromDialog}
+            disabled=${deleteBusy}
+            startIcon=${deleteBusy ? html`<${CircularProgress} size=${16} color="inherit" />` : html`<span class="icon-inline">${resolveIcon("trash")}</span>`}
+            sx=${{ textTransform: "none" }}
+          >
+            ${deleteBusy ? "Deleting…" : "Delete"}
+          </${Button}>
+        </${DialogActions}>
+      </${Dialog}>
     </div>
   `;
 }
@@ -790,13 +1596,105 @@ function buildVariableDescriptor(variable) {
   };
 }
 
+function getRunStatusBadgeStyles(status) {
+  if (status === "completed") return { bg: "#10b98130", color: "#10b981" };
+  if (status === "failed") return { bg: "#ef444430", color: "#ef4444" };
+  if (status === "running") return { bg: "#3b82f630", color: "#60a5fa" };
+  return { bg: "#6b728030", color: "#9ca3af" };
+}
+
+function getRunActivityAt(run) {
+  const lastLogAt = Number(run?.lastLogAt);
+  const lastProgressAt = Number(run?.lastProgressAt);
+  const startedAt = Number(run?.startedAt);
+  const candidates = [lastLogAt, lastProgressAt, startedAt].filter((value) => Number.isFinite(value) && value > 0);
+  return candidates.length > 0 ? Math.max(...candidates) : null;
+}
+
+function getNodeStatusRank(status) {
+  if (status === "running") return 0;
+  if (status === "failed") return 1;
+  if (status === "waiting") return 2;
+  if (status === "pending") return 3;
+  if (status === "completed") return 4;
+  if (status === "skipped") return 5;
+  return 6;
+}
+
+function buildNodeStatusesFromRunDetail(run) {
+  const detail = run?.detail || {};
+  const statuses = { ...(detail?.nodeStatuses || {}) };
+  const statusEvents = Array.isArray(detail?.nodeStatusEvents) ? detail.nodeStatusEvents : [];
+  const logs = Array.isArray(detail?.logs) ? detail.logs : [];
+
+  for (const event of statusEvents) {
+    const nodeId = String(event?.nodeId || "").trim();
+    const status = String(event?.status || "").trim();
+    if (!nodeId || !status) continue;
+    statuses[nodeId] = status;
+  }
+
+  if (Object.keys(statuses).length === 0) {
+    const fallbackStatus = run?.status === "failed"
+      ? "failed"
+      : run?.status === "completed"
+        ? "completed"
+        : "running";
+    for (const entry of logs) {
+      const nodeId = String(entry?.nodeId || "").trim();
+      if (!nodeId || statuses[nodeId]) continue;
+      statuses[nodeId] = fallbackStatus;
+    }
+  }
+
+  return statuses;
+}
+
+function safePrettyJson(value) {
+  try {
+    const json = JSON.stringify(value, null, 2);
+    const maxChars = 100000;
+    if (json.length <= maxChars) return json;
+    const omitted = json.length - maxChars;
+    return `${json.slice(0, maxChars)}\n\n… [truncated ${omitted} chars]`;
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+async function resolveManualRunForDispatch(result) {
+  const workflowId = String(result?.workflowId || "").trim();
+  if (!workflowId) return null;
+  const dispatchedAt = Date.parse(result?.dispatchedAt || "") || Date.now();
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150));
+      const candidates = (wfManualRuns.value || [])
+        .filter((run) => String(run?.workflowId || "").trim() === workflowId)
+        .filter((run) => {
+          const startedAt = Number(run?.startedAt || 0);
+          if (!Number.isFinite(startedAt) || startedAt <= 0) return true;
+          return startedAt >= dispatchedAt - 5 * 60 * 1000;
+        })
+        .sort((a, b) => Number(b?.startedAt || 0) - Number(a?.startedAt || 0));
+      const match = candidates[0] || null;
+      if (match?.runId) return match;
+    } catch {
+      // ignore and retry
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  return null;
+}
+
 /**
  * Workflow template card for the launcher grid.
  */
 function WfTemplateCard({ template, onClick }) {
   const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
   const varCount = (template.variables || []).length;
-  const hasBackEdges = (template.tags || []).some((t) => t === "back-edge" || t === "convergence");
+  const capabilityChips = getTemplateCapabilities(template);
 
   return html`
     <${Card}
@@ -858,6 +1756,15 @@ function WfTemplateCard({ template, onClick }) {
             sx=${{ fontSize: "10px", height: "20px" }}
             variant="outlined"
           />
+          ${capabilityChips.map((entry) => html`
+            <${Chip}
+              key=${entry.key}
+              label=${`${entry.label} ${entry.symbol}${entry.count > 1 ? ` ×${entry.count}` : ""}`}
+              size="small"
+              sx=${{ fontSize: "10px", height: "20px" }}
+              variant="outlined"
+            />
+          `)}
           ${template.trigger === "trigger.manual" && html`
             <${Chip} label="Manual" size="small" color="primary"
               sx=${{ fontSize: "10px", height: "20px" }} variant="outlined" />
@@ -887,6 +1794,9 @@ function WfLaunchForm({ template, onBack }) {
     return requiredCount > 0 ? "quick" : "advanced";
   });
   const [expanded, setExpanded] = useState(() => descriptors.length <= 5);
+  const [executionOptions, setExecutionOptions] = useState({ waitForCompletion: false });
+  const [payloadOverride, setPayloadOverride] = useState("");
+  const [payloadOverrideDirty, setPayloadOverrideDirty] = useState(false);
 
   const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
 
@@ -966,12 +1876,83 @@ function WfLaunchForm({ template, onBack }) {
     return payload;
   }, [descriptors, formValues]);
 
+  const defaultLaunchRequest = useMemo(() => {
+    let variables = {};
+    try {
+      variables = buildLaunchPayload();
+    } catch {
+      variables = {};
+    }
+    return {
+      variables,
+      waitForCompletion: executionOptions.waitForCompletion === true,
+    };
+  }, [buildLaunchPayload, executionOptions.waitForCompletion]);
+
+  useEffect(() => {
+    if (payloadOverrideDirty) return;
+    setPayloadOverride(safePrettyJson(defaultLaunchRequest));
+  }, [defaultLaunchRequest, payloadOverrideDirty]);
+
+  const payloadOverrideError = useMemo(() => {
+    if (!payloadOverrideDirty || launchMode !== "advanced") return "";
+    const raw = String(payloadOverride || "").trim();
+    if (!raw) return "";
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return "Advanced launch payload must be a JSON object.";
+      }
+      if ("variables" in parsed && (typeof parsed.variables !== "object" || parsed.variables == null || Array.isArray(parsed.variables))) {
+        return "When provided, 'variables' must be a JSON object.";
+      }
+      return "";
+    } catch {
+      return "Advanced launch payload JSON is invalid.";
+    }
+  }, [launchMode, payloadOverride, payloadOverrideDirty]);
+
   const handleLaunch = useCallback(async () => {
     if (!canLaunch) return;
+    if (payloadOverrideError) return;
     haptic();
-    const payload = buildLaunchPayload();
-    await launchWorkflowTemplate(template.id, payload);
-  }, [buildLaunchPayload, canLaunch, template.id]);
+    let launchRequest = {
+      variables: buildLaunchPayload(),
+      waitForCompletion: executionOptions.waitForCompletion === true,
+    };
+
+    if (launchMode === "advanced") {
+      const raw = String(payloadOverride || "").trim();
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          if (parsed.variables && typeof parsed.variables === "object" && !Array.isArray(parsed.variables)) {
+            launchRequest = {
+              ...launchRequest,
+              ...parsed,
+            };
+          } else {
+            launchRequest = {
+              ...launchRequest,
+              variables: parsed,
+            };
+          }
+        }
+      }
+    }
+
+    const launchResult = await launchWorkflowTemplate(template.id, launchRequest);
+    if (launchResult?.accepted) {
+      const matchedRun = await resolveManualRunForDispatch(launchResult);
+      if (matchedRun?.runId) {
+        wfLaunchResult.value = {
+          ...wfLaunchResult.value,
+          runId: matchedRun.runId,
+          startedAt: matchedRun.startedAt,
+        };
+      }
+    }
+  }, [buildLaunchPayload, canLaunch, executionOptions.waitForCompletion, launchMode, payloadOverride, payloadOverrideError, template.id]);
 
   const handleReset = useCallback(() => {
     const defaults = {};
@@ -980,7 +1961,22 @@ function WfLaunchForm({ template, onBack }) {
     }
     setFormValues(defaults);
     setLaunchMode(requiredVars.length > 0 ? "quick" : "advanced");
+    setExecutionOptions({ waitForCompletion: false });
+    setPayloadOverrideDirty(false);
   }, [descriptors, requiredVars.length]);
+
+  const handleOpenRunHistory = useCallback(async (runId = null) => {
+    activeTab.value = 1;
+    viewMode.value = "wf-runs";
+    await loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150));
+    const safeRunId = String(runId || "").trim();
+    if (safeRunId) {
+      await loadManualWorkflowRunDetail(safeRunId);
+    } else {
+      selectedWfRunId.value = null;
+      selectedWfRunDetail.value = null;
+    }
+  }, []);
 
   return html`
     <div>
@@ -1073,6 +2069,11 @@ function WfLaunchForm({ template, onBack }) {
             Invalid JSON in: ${validation.invalid.join(", ")}
           </${Alert}>
         `}
+        ${payloadOverrideError && html`
+          <${Alert} severity="error" sx=${{ mb: 2 }}>
+            ${payloadOverrideError}
+          </${Alert}>
+        `}
 
         ${launchMode === "quick" && html`
           ${quickVars.map((v) => html`
@@ -1160,6 +2161,55 @@ function WfLaunchForm({ template, onBack }) {
               Show ${optionalVars.length} optional parameters...
             </${Button}>
           `}
+
+          <${Divider} sx=${{ my: 2 }} />
+
+          <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+            Runtime execution options
+          </${Typography}>
+          <${FormControlLabel}
+            control=${html`<${Switch}
+              checked=${!!executionOptions.waitForCompletion}
+              onChange=${(e) => {
+                setExecutionOptions((prev) => ({ ...prev, waitForCompletion: e.target.checked }));
+                setPayloadOverrideDirty(false);
+              }}
+              size="small"
+            />`}
+            label="Wait for completion (sync mode)"
+            sx=${{ mb: 1 }}
+          />
+
+          <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+            Advanced launch payload (editable JSON)
+          </${Typography}>
+          <${TextField}
+            fullWidth
+            size="small"
+            multiline
+            minRows=${8}
+            maxRows=${16}
+            value=${payloadOverride}
+            onChange=${(e) => {
+              setPayloadOverride(e.target.value);
+              setPayloadOverrideDirty(true);
+            }}
+            helperText=${payloadOverrideDirty
+              ? "You are editing custom JSON. Must be an object; use { variables: {...}, waitForCompletion: true|false } or provide variables object directly."
+              : "Auto-generated from form values. Edit to fine-tune launch behavior."}
+            sx=${{ mb: 1.5, "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.8rem" } }}
+          />
+          <${Button}
+            size="small"
+            variant="text"
+            sx=${{ textTransform: "none", mb: 1 }}
+            onClick=${() => {
+              setPayloadOverride(safePrettyJson(defaultLaunchRequest));
+              setPayloadOverrideDirty(false);
+            }}
+          >
+            Reset payload to current form values
+          </${Button}>
         `}
 
         <${Divider} sx=${{ my: 2.5 }} />
@@ -1174,7 +2224,7 @@ function WfLaunchForm({ template, onBack }) {
           <${Button}
             variant="contained"
             onClick=${handleLaunch}
-            disabled=${!canLaunch}
+            disabled=${!canLaunch || !!payloadOverrideError}
             startIcon=${wfLaunching.value
               ? html`<${CircularProgress} size=${16} color="inherit" />`
               : html`<span class="icon-inline">${resolveIcon("play")}</span>`}
@@ -1204,12 +2254,23 @@ function WfLaunchForm({ template, onBack }) {
               <${Stack} spacing=${0.5}>
                 <${Typography} variant="body2"><strong>Template:</strong> ${wfLaunchResult.value.templateName}</${Typography}>
                 <${Typography} variant="body2"><strong>Workflow ID:</strong> <code>${wfLaunchResult.value.workflowId}</code></${Typography}>
+                <${Typography} variant="body2"><strong>Run ID:</strong> <code>${wfLaunchResult.value.runId || "resolving..."}</code></${Typography}>
                 <${Typography} variant="body2"><strong>Mode:</strong> ${wfLaunchResult.value.mode}</${Typography}>
                 ${wfLaunchResult.value.dispatchedAt && html`
                   <${Typography} variant="caption" color="text.secondary">
                     Dispatched at ${new Date(wfLaunchResult.value.dispatchedAt).toLocaleString()}
                   </${Typography}>
                 `}
+              </${Stack}>
+              <${Stack} direction="row" spacing=${1} sx=${{ mt: 1.25 }}>
+                <${Button}
+                  variant="outlined"
+                  size="small"
+                  onClick=${() => handleOpenRunHistory(wfLaunchResult.value.runId)}
+                  sx=${{ textTransform: "none" }}
+                >
+                  ${wfLaunchResult.value.runId ? "Open this run" : "Open manual run history"}
+                </${Button}>
               </${Stack}>
               ${wfLaunchResult.value.variables && html`
                 <${Divider} sx=${{ my: 1.5 }} />
@@ -1411,6 +2472,18 @@ function WfLauncherView() {
         Select a workflow, configure its variables, and trigger a run — no need to edit the workflow definition.
       </${Typography}>
 
+      <${Stack} direction="row" spacing=${0.75} flexWrap="wrap" useFlexGap sx=${{ mb: 2 }}>
+        ${WF_CAPABILITY_META.map((entry) => html`
+          <${Chip}
+            key=${entry.key}
+            size="small"
+            variant="outlined"
+            label=${`${entry.label} ${entry.symbol}`}
+            sx=${{ fontSize: "10px", height: "20px" }}
+          />
+        `)}
+      </${Stack}>
+
       <!-- Search + category filter bar -->
       <${Stack} direction="row" spacing=${1.5} alignItems="center" sx=${{ mb: 3 }}>
         <${TextField}
@@ -1494,6 +2567,245 @@ function WfLauncherView() {
   `;
 }
 
+function ManualWorkflowRunHistoryView({ onBack }) {
+  const runs = wfManualRuns.value || [];
+  const selectedRun = selectedWfRunDetail.value;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [nowTick, setNowTick] = useState(Date.now());
+
+  useEffect(() => {
+    loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const hasRunning = runs.some((run) => run?.status === "running");
+    const pollMs = hasRunning ? 3000 : 15000;
+    let cancelled = false;
+
+    const poll = async () => {
+      if (cancelled) return;
+      await loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150)).catch(() => {});
+      if (!cancelled && selectedWfRunId.value && selectedWfRunDetail.value?.status === "running") {
+        await loadManualWorkflowRunDetail(selectedWfRunId.value).catch(() => {});
+      }
+    };
+
+    const timer = setInterval(poll, pollMs);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runs, selectedWfRunId.value, selectedWfRunDetail.value?.status]);
+
+  const filteredRuns = useMemo(() => {
+    const query = String(searchQuery || "").trim().toLowerCase();
+    return runs.filter((run) => {
+      const runStatus = String(run?.status || "unknown").toLowerCase();
+      const workflowName = String(run?.workflowName || run?.workflowId || "").toLowerCase();
+      const runId = String(run?.runId || "").toLowerCase();
+      if (statusFilter !== "all" && runStatus !== statusFilter) return false;
+      if (!query) return true;
+      return workflowName.includes(query) || runId.includes(query);
+    });
+  }, [runs, searchQuery, statusFilter]);
+
+  if (selectedRun) {
+    const logs = Array.isArray(selectedRun?.detail?.logs) ? selectedRun.detail.logs : [];
+    const errors = Array.isArray(selectedRun?.detail?.errors) ? selectedRun.detail.errors : [];
+    const nodeStatuses = buildNodeStatusesFromRunDetail(selectedRun);
+    const nodeOutputs = selectedRun?.detail?.nodeOutputs || {};
+    const nodeIds = Object.keys(nodeStatuses).sort((a, b) => {
+      const rankDiff = getNodeStatusRank(nodeStatuses[a]) - getNodeStatusRank(nodeStatuses[b]);
+      if (rankDiff !== 0) return rankDiff;
+      return String(a).localeCompare(String(b));
+    });
+    const statusStyles = getRunStatusBadgeStyles(selectedRun.status);
+    const finishedAt = selectedRun.status === "running" ? null : selectedRun.endedAt;
+    const liveDuration = selectedRun.status === "running" && selectedRun.startedAt
+      ? Math.max(0, nowTick - selectedRun.startedAt)
+      : selectedRun.duration;
+    const lastActivityAt = getRunActivityAt(selectedRun);
+    const staleMs = selectedRun.status === "running" && lastActivityAt
+      ? Math.max(0, nowTick - lastActivityAt)
+      : 0;
+
+    return html`
+      <div>
+        <${Button}
+          variant="text"
+          size="small"
+          onClick=${() => {
+            selectedWfRunId.value = null;
+            selectedWfRunDetail.value = null;
+          }}
+          sx=${{ mb: 2, textTransform: "none" }}
+          startIcon=${html`<span class="icon-inline">${resolveIcon("chevron-left")}</span>`}
+        >
+          Back to Manual Run History
+        </${Button}>
+
+        <${Paper} variant="outlined" sx=${{ p: 2.25, borderLeft: `4px solid ${statusStyles.color}` }}>
+          <${Stack} direction="row" spacing=${1} alignItems="center" sx=${{ mb: 1 }}>
+            <${Typography} variant="subtitle1" fontWeight=${700}>
+              ${selectedRun.workflowName || selectedRun.workflowId || "Workflow Run"}
+            </${Typography}>
+            <${Chip} label=${selectedRun.status || "unknown"} size="small" sx=${{ background: statusStyles.bg, color: statusStyles.color }} />
+          </${Stack}>
+          <${Stack} spacing=${0.4} sx=${{ fontSize: "0.86rem" }}>
+            <${Typography} variant="body2"><strong>Workflow ID:</strong> <code>${selectedRun.workflowId || "—"}</code></${Typography}>
+            <${Typography} variant="body2"><strong>Run ID:</strong> <code>${selectedRun.runId || "—"}</code></${Typography}>
+            <${Typography} variant="body2"><strong>Started:</strong> ${formatDate(selectedRun.startedAt)} (${formatRelative(selectedRun.startedAt)})</${Typography}>
+            <${Typography} variant="body2"><strong>Finished:</strong> ${finishedAt ? formatDate(finishedAt) : "Running"}</${Typography}>
+            <${Typography} variant="body2"><strong>Duration:</strong> ${formatDuration(liveDuration)}</${Typography}>
+            <${Typography} variant="body2"><strong>Last Activity:</strong> ${lastActivityAt ? `${formatDate(lastActivityAt)} (${formatRelative(lastActivityAt)})` : "—"}</${Typography}>
+            ${selectedRun.status === "running" && html`<${Typography} variant="body2"><strong>No Progress For:</strong> ${formatDuration(staleMs)}</${Typography}>`}
+            <${Typography} variant="body2"><strong>Nodes:</strong> ${selectedRun.nodeCount || 0} · <strong>Logs:</strong> ${selectedRun.logCount || logs.length} · <strong>Errors:</strong> ${selectedRun.errorCount || errors.length}</${Typography}>
+            <${Typography} variant="body2"><strong>Active Nodes:</strong> ${selectedRun.activeNodeCount || 0}</${Typography}>
+          </${Stack}>
+        </${Paper}>
+
+        <${Paper} variant="outlined" sx=${{ p: 2, mt: 1.5 }}>
+          <${Typography} variant="subtitle2" sx=${{ mb: 1 }}>Node Execution</${Typography}>
+          ${nodeIds.length === 0 && html`<${Typography} variant="caption" color="text.secondary">No node execution data recorded.</${Typography}>`}
+          <${Stack} spacing=${0.75}>
+            ${nodeIds.map((nodeId) => {
+              const nodeStatus = nodeStatuses[nodeId];
+              const nodeStatusStyles = getRunStatusBadgeStyles(nodeStatus);
+              return html`
+                <${Stack} key=${nodeId} direction="row" spacing=${1} alignItems="center">
+                  <code style="font-size:12px;">${nodeId}</code>
+                  <${Chip} label=${nodeStatus || "unknown"} size="small" sx=${{ height: 20, fontSize: "10px", background: nodeStatusStyles.bg, color: nodeStatusStyles.color }} />
+                </${Stack}>
+              `;
+            })}
+          </${Stack}>
+        </${Paper}>
+
+        <${Paper} variant="outlined" sx=${{ p: 2, mt: 1.5 }}>
+          <${Typography} variant="subtitle2" sx=${{ mb: 1 }}>Run Logs (${logs.length})</${Typography}>
+          <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;color:#c9d1d9;background:#111827;border-radius:6px;padding:8px;max-height:320px;overflow:auto;">${safePrettyJson(logs)}</pre>
+        </${Paper}>
+
+        <${Paper} variant="outlined" sx=${{ p: 2, mt: 1.5 }}>
+          <${Typography} variant="subtitle2" sx=${{ mb: 1 }}>Errors (${errors.length})</${Typography}>
+          <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;color:#fca5a5;background:#111827;border-radius:6px;padding:8px;max-height:220px;overflow:auto;">${safePrettyJson(errors)}</pre>
+        </${Paper}>
+
+        <${Paper} variant="outlined" sx=${{ p: 2, mt: 1.5 }}>
+          <${Typography} variant="subtitle2" sx=${{ mb: 1 }}>Node Outputs</${Typography}>
+          <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;color:#c9d1d9;background:#111827;border-radius:6px;padding:8px;max-height:280px;overflow:auto;">${safePrettyJson(nodeOutputs)}</pre>
+        </${Paper}>
+      </div>
+    `;
+  }
+
+  return html`
+    <div>
+      <${Button}
+        variant="text"
+        size="small"
+        onClick=${onBack}
+        sx=${{ mb: 2, textTransform: "none" }}
+        startIcon=${html`<span class="icon-inline">${resolveIcon("chevron-left")}</span>`}
+      >
+        Back to Workflows
+      </${Button}>
+
+      <${Typography} variant="h6" fontWeight=${700} sx=${{ mb: 2 }}>
+        Manual Workflow Run History
+      </${Typography}>
+
+      <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 1.5 }}>
+        Shows manually launched workflow runs only. Automated monitor/scheduled runs are excluded.
+      </${Typography}>
+
+      <${Stack} direction="row" spacing=${1} sx=${{ mb: 1.5, flexWrap: "wrap" }}>
+        <${TextField}
+          size="small"
+          value=${searchQuery}
+          onInput=${(e) => setSearchQuery(e.target.value)}
+          placeholder="Search run ID or workflow..."
+          sx=${{ minWidth: 220 }}
+        />
+        <${Select} size="small" value=${statusFilter} onChange=${(e) => setStatusFilter(e.target.value)}>
+          <${MenuItem} value="all">All statuses</${MenuItem}>
+          <${MenuItem} value="running">Running</${MenuItem}>
+          <${MenuItem} value="failed">Failed</${MenuItem}>
+          <${MenuItem} value="completed">Completed</${MenuItem}>
+        </${Select}>
+        <${Button} variant="outlined" size="small" onClick=${() => loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150))} sx=${{ textTransform: "none" }}>
+          Refresh
+        </${Button}>
+      </${Stack}>
+
+      ${wfManualRunsLoading.value && filteredRuns.length === 0 && html`
+        <${Paper} variant="outlined" sx=${{ p: 2 }}>
+          <${Typography} variant="body2" color="text.secondary">Loading manual workflow runs...</${Typography}>
+        </${Paper}>
+      `}
+
+      ${!wfManualRunsLoading.value && filteredRuns.length === 0 && html`
+        <${Paper} variant="outlined" sx=${{ p: 2.5, textAlign: "center" }}>
+          <${Typography} variant="body2" color="text.secondary">No manual workflow runs found.</${Typography}>
+        </${Paper}>
+      `}
+
+      <${Stack} spacing=${1}>
+        ${filteredRuns.map((run) => {
+          const styles = getRunStatusBadgeStyles(run.status);
+          const activityAt = getRunActivityAt(run);
+          const liveDuration = run.status === "running" && run.startedAt
+            ? Math.max(0, nowTick - run.startedAt)
+            : run.duration;
+          return html`
+            <${Button}
+              key=${run.runId}
+              variant="text"
+              onClick=${() => loadManualWorkflowRunDetail(run.runId)}
+              sx=${{
+                textTransform: "none",
+                justifyContent: "flex-start",
+                p: 1.25,
+                border: "1px solid",
+                borderColor: "divider",
+                borderRadius: 1.5,
+                background: "background.paper",
+              }}
+            >
+              <${Box} sx=${{ textAlign: "left", width: "100%" }}>
+                <${Stack} direction="row" spacing=${1} alignItems="center" sx=${{ mb: 0.3 }}>
+                  <${Typography} variant="body2" fontWeight=${600} sx=${{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    ${run.workflowName || run.workflowId || "Workflow"}
+                  </${Typography}>
+                  <${Chip} label=${run.status || "unknown"} size="small" sx=${{ background: styles.bg, color: styles.color, height: 20, fontSize: "10px" }} />
+                </${Stack}>
+                <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block" }}>
+                  Workflow: ${run.workflowId || "—"}
+                </${Typography}>
+                <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block" }}>
+                  Run: ${run.runId || "—"}
+                </${Typography}>
+                <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block" }}>
+                  Started ${formatDate(run.startedAt)} (${formatRelative(run.startedAt)}) · Duration ${formatDuration(liveDuration)}
+                </${Typography}>
+                <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block" }}>
+                  Last activity ${activityAt ? formatRelative(activityAt) : "—"} · Nodes ${run.nodeCount || 0} · Logs ${run.logCount || 0} · Errors ${run.errorCount || 0}
+                </${Typography}>
+              </${Box}>
+            </${Button}>
+          `;
+        })}
+      </${Stack}>
+    </div>
+  `;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Main Tab Export
  * ═══════════════════════════════════════════════════════════════ */
@@ -1553,6 +2865,8 @@ export function ManualFlowsTab() {
     selectedWfTemplate.value = null;
     activeRun.value = null;
     wfLaunchResult.value = null;
+    selectedWfRunId.value = null;
+    selectedWfRunDetail.value = null;
     haptic();
   }, []);
 
@@ -1584,6 +2898,16 @@ export function ManualFlowsTab() {
         }}
       />`;
     }
+    // Manual workflow run history
+    if (mode === "wf-runs") {
+      return html`<${ManualWorkflowRunHistoryView}
+        onBack=${() => {
+          viewMode.value = "wf-launcher";
+          selectedWfRunId.value = null;
+          selectedWfRunDetail.value = null;
+        }}
+      />`;
+    }
     // Workflow launcher grid
     if (mode === "wf-launcher" || tab === 1) {
       return html`<${WfLauncherView} />`;
@@ -1595,49 +2919,91 @@ export function ManualFlowsTab() {
   return html`
     <div style="padding: 12px; max-width: 1200px; margin: 0 auto;">
       <!-- Tab switcher: Manual Flows vs Workflow Launcher -->
-      ${mode !== "form" && mode !== "runs" && mode !== "wf-form" && html`
-        <${Stack} direction="row" alignItems="center" spacing=${2} sx=${{ mb: 3 }}>
-          <${Typography} variant="h5" fontWeight=${700} sx=${{ flex: 0 }}>
-            ${tab === 0 ? "Manual Flows" : "Workflow Launcher"}
-          </${Typography}>
+      ${mode !== "form" && mode !== "runs" && mode !== "wf-form" && mode !== "wf-runs" && html`
+        <${Paper} elevation=${0} sx=${{ mb: 2, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 2, backgroundColor: "background.paper" }}>
+          <${Stack} direction="row" alignItems="center" spacing=${1.5}>
+            <${Typography} variant="subtitle1" fontWeight=${700} sx=${{ flexShrink: 0 }}>
+              ${tab === 0 ? "Manual Flows" : "Workflow Launcher"}
+            </${Typography}>
 
-          <${Tabs}
-            value=${tab}
-            onChange=${handleTabChange}
-            sx=${{
-              minHeight: 36,
-              "& .MuiTab-root": { minHeight: 36, py: 0, textTransform: "none", fontSize: "0.85rem" },
-              "& .MuiTabs-indicator": { height: 2 },
-            }}
-          >
-            <${Tab} label="Manual Flows"
-              icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 4px">${resolveIcon("play")}</span>`}
-              iconPosition="start" />
-            <${Tab}
-              label=${html`
-                <${Stack} direction="row" alignItems="center" spacing=${0.5}>
-                  <span>Workflow Launcher</span>
-                  <${Chip} label=${(wfTemplates.value || []).length} size="small"
-                    sx=${{ fontSize: "10px", height: "18px", minWidth: "24px" }} />
-                </${Stack}>
-              `}
-              icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 4px">${resolveIcon("rocket")}</span>`}
-              iconPosition="start" />
-          </${Tabs}>
-
-          <div style="flex: 1;" />
-
-          ${tab === 0 && html`
-            <${Button}
-              variant="outlined" size="small"
-              onClick=${() => { viewMode.value = "runs"; haptic(); }}
-              startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
-              sx=${{ textTransform: "none" }}
+            <${Tabs}
+              value=${tab}
+              onChange=${handleTabChange}
+              sx=${{
+                minHeight: 34,
+                "& .MuiTab-root": {
+                  minHeight: 34,
+                  px: 1.25,
+                  py: 0,
+                  textTransform: "none",
+                  fontSize: "0.8rem",
+                  color: "text.secondary",
+                },
+                "& .MuiTab-root.Mui-selected": { color: "text.primary", fontWeight: 600 },
+                "& .MuiTabs-indicator": { height: 2.5, borderRadius: 2, backgroundColor: "var(--accent)" },
+              }}
             >
-              Run History
-            </${Button}>
-          `}
-        </${Stack}>
+              <${Tab}
+                label="Manual Flows"
+                icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 2px">${resolveIcon("play")}</span>`}
+                iconPosition="start"
+              />
+              <${Tab}
+                label=${html`
+                  <${Stack} direction="row" alignItems="center" spacing=${0.5}>
+                    <span>Workflow Launcher</span>
+                    <${Chip}
+                      label=${(wfTemplates.value || []).length}
+                      size="small"
+                      color="default"
+                      sx=${{
+                        fontSize: "10px",
+                        height: "18px",
+                        minWidth: "24px",
+                        borderRadius: 999,
+                        backgroundColor: "rgba(218,119,86,0.18)",
+                      }}
+                    />
+                  </${Stack}>
+                `}
+                icon=${html`<span class="icon-inline" style="font-size: 14px; margin-right: 2px">${resolveIcon("rocket")}</span>`}
+                iconPosition="start"
+              />
+            </${Tabs}>
+
+            <div style="flex: 1;" />
+
+            ${tab === 0 && html`
+              <${Button}
+                variant="outlined"
+                size="small"
+                onClick=${() => { viewMode.value = "runs"; haptic(); }}
+                startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
+                sx=${{ textTransform: "none", borderRadius: 999 }}
+              >
+                Run History
+              </${Button}>
+            `}
+
+            ${tab === 1 && html`
+              <${Button}
+                variant="outlined"
+                size="small"
+                onClick=${() => {
+                  viewMode.value = "wf-runs";
+                  selectedWfRunId.value = null;
+                  selectedWfRunDetail.value = null;
+                  loadManualWorkflowRuns(Math.max(MANUAL_WORKFLOW_RUN_PAGE_SIZE, 150)).catch(() => {});
+                  haptic();
+                }}
+                startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
+                sx=${{ textTransform: "none", borderRadius: 999 }}
+              >
+                Manual Run History
+              </${Button}>
+            `}
+          </${Stack}>
+        </${Paper}>
       `}
 
       ${renderContent()}

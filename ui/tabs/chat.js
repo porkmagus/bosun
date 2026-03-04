@@ -38,6 +38,7 @@ class ChatSafeBoundary extends Component {
 
 import {
   SessionList,
+  SESSION_VIEW_FILTER,
   loadSessions,
   selectedSessionId,
   sessionsData,
@@ -49,6 +50,7 @@ import {
 import { routeParams, setRouteParams } from "../modules/router.js";
 import { ChatView } from "../components/chat-view.js";
 import { apiFetch } from "../modules/api.js";
+import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../modules/session-api.js";
 import { showToast } from "../modules/state.js";
 import { VoiceMicButton, requestVoiceModeOpen } from "../modules/voice.js";
 import { iconText, resolveIcon } from "../modules/icon-utils.js";
@@ -134,6 +136,20 @@ function formatAttachmentSize(size) {
   if (raw >= 1024 * 1024) return `${(raw / (1024 * 1024)).toFixed(1)} MB`;
   if (raw >= 1024) return `${Math.round(raw / 1024)} KB`;
   return `${raw} B`;
+}
+
+/** Keep unsent attachments per-session so switching chats doesn't discard uploads. */
+const pendingAttachmentsBySessionId = new Map();
+const DRAFT_SESSION_KEY = "__draft__";
+
+function hasDragFiles(event) {
+  const types = event?.dataTransfer?.types;
+  if (!types) return false;
+  try {
+    return Array.from(types).includes("Files");
+  } catch {
+    return false;
+  }
 }
 
 /* ─── Welcome screen (no session selected) ─── */
@@ -263,6 +279,7 @@ export function ChatTab() {
   }
 
   const [showArchived, setShowArchived] = useState(false);
+  const [sessionView, setSessionView] = useState(SESSION_VIEW_FILTER.all);
   const [inputValue, setInputValue] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
@@ -300,10 +317,27 @@ export function ChatTab() {
   const fileInputRef = useRef(null);
   const sendMenuRef = useRef(null);
   const messageQueueRef = useRef([]);
+  const chatDropDepthRef = useRef(0);
   const [showSendMenu, setShowSendMenu] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const [stoppingAgent, setStoppingAgent] = useState(false);
   const routeSessionId = String(routeParams.value?.sessionId || "").trim();
+
+  const getWorkspaceScopeForView = useCallback((view) => {
+    const normalized = String(view || "").toLowerCase();
+    if (normalized === SESSION_VIEW_FILTER.active) return "active";
+    return "all";
+  }, []);
+
+  const refreshPrimarySessions = useCallback(
+    async (view = sessionView) => {
+      await loadSessions({
+        type: "primary",
+        workspace: getWorkspaceScopeForView(view),
+      });
+    },
+    [getWorkspaceScopeForView, sessionView],
+  );
 
   /* ── Load sessions + agents on mount ── */
   useEffect(() => {
@@ -313,7 +347,7 @@ export function ChatTab() {
     // Loading them sequentially gives each render time to settle.
     (async () => {
       try {
-        await loadSessions({ type: "primary" });
+        await refreshPrimarySessions();
       } catch { /* handled internally */ }
       if (!mounted) return;
       // Small delay before loading agents to let session render settle
@@ -324,7 +358,7 @@ export function ChatTab() {
       } catch { /* handled internally */ }
     })();
     const interval = setInterval(() => {
-      if (mounted) loadSessions({ type: "primary" });
+      if (mounted) refreshPrimarySessions();
     }, 5000);
     // Refresh agent list less frequently
     const agentInterval = setInterval(() => {
@@ -335,18 +369,18 @@ export function ChatTab() {
       clearInterval(interval);
       clearInterval(agentInterval);
     };
-  }, []);
+  }, [refreshPrimarySessions]);
 
   useEffect(() => {
     const onWorkspaceSwitched = () => {
       selectedSessionId.value = null;
-      loadSessions({ type: "primary" }).catch(() => {});
+      refreshPrimarySessions().catch(() => {});
     };
     window.addEventListener("ve:workspace-switched", onWorkspaceSwitched);
     return () => {
       window.removeEventListener("ve:workspace-switched", onWorkspaceSwitched);
     };
-  }, []);
+  }, [refreshPrimarySessions]);
 
   /* ── Track mobile viewport to avoid auto-select loops ── */
   useEffect(() => {
@@ -567,6 +601,7 @@ export function ChatTab() {
     const asModeMessage = Boolean(modeOverride && cmdArgs);
     const outboundContent = asModeMessage ? cmdArgs : content;
     const outboundMode = modeOverride || agentMode.value;
+    let createdSessionId = "";
 
     try {
       if (content.startsWith("/") && !asModeMessage) {
@@ -617,18 +652,22 @@ export function ChatTab() {
         markUserMessageSent(activeAgent.value, sessionId);
 
         // Use sendOrQueue for offline resilience
-          const sendFn = async (sid, msg) => {
-            await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/message`, {
-              method: "POST",
-              body: JSON.stringify({
-                content: msg,
-                mode: outboundMode,
-                yolo: yoloMode.peek(),
-                model: selectedModel.value || undefined,
-                attachments,
-              }),
-            });
-          };
+        const sendFn = async (sid, msg) => {
+          const messagePath = sessionApiPath(sid, "message");
+          if (!messagePath) {
+            throw new Error("Session path unavailable");
+          }
+          await apiFetch(messagePath, {
+            method: "POST",
+            body: JSON.stringify({
+              content: msg,
+              mode: outboundMode,
+              yolo: yoloMode.peek(),
+              model: selectedModel.value || undefined,
+              attachments,
+            }),
+          });
+        };
 
         try {
           await sendOrQueue(sessionId, outboundContent, sendFn);
@@ -651,11 +690,16 @@ export function ChatTab() {
         });
         const newId = res?.session?.id;
         if (newId) {
+          createdSessionId = String(newId);
           const tempId = addPendingMessage(newId, outboundContent, attachments);
           markUserMessageSent(activeAgent.value, newId);
 
           try {
-            await apiFetch(`/api/sessions/${encodeURIComponent(newId)}/message`, {
+            const messagePath = sessionApiPath(newId, "message");
+            if (!messagePath) {
+              throw new Error("Session path unavailable");
+            }
+            await apiFetch(messagePath, {
               method: "POST",
               body: JSON.stringify({
                 content: outboundContent,
@@ -678,7 +722,13 @@ export function ChatTab() {
     } finally {
       if (typeof explicitContent !== "string") setInputValue("");
       setPendingAttachments([]);
+      const currentCacheKey = String(sessionId || DRAFT_SESSION_KEY);
+      pendingAttachmentsBySessionId.delete(currentCacheKey);
+      if (createdSessionId && createdSessionId !== currentCacheKey) {
+        pendingAttachmentsBySessionId.delete(createdSessionId);
+      }
       setDragActive(false);
+      chatDropDepthRef.current = 0;
       setSending(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
@@ -706,7 +756,11 @@ export function ChatTab() {
       };
 
       if (sessionId) {
-        const stopResult = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, {
+        const stopPath = sessionApiPath(sessionId, "stop");
+        if (!stopPath) {
+          throw new Error("Session path unavailable");
+        }
+        const stopResult = await apiFetch(stopPath, {
           method: "POST",
           body: JSON.stringify({}),
         });
@@ -833,11 +887,15 @@ export function ChatTab() {
   /* ── Session rename ── */
   async function saveRename(sid, newTitle) {
     try {
-        await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/rename`, {
-          method: "POST",
-          body: JSON.stringify({ title: newTitle }),
-        });
-      loadSessions();
+      const renamePath = sessionApiPath(sid, "rename");
+      if (!renamePath) {
+        throw new Error("Session path unavailable");
+      }
+      await apiFetch(renamePath, {
+        method: "POST",
+        body: JSON.stringify({ title: newTitle }),
+      });
+      refreshPrimarySessions();
       showToast("Session renamed", "success");
     } catch {
       showToast("Failed to rename session", "error");
@@ -913,16 +971,59 @@ export function ChatTab() {
       return null;
     }
   }, [sessionId]);
+  const resolveWorkspaceForSessionId = useCallback((targetSessionId, fallback = "active") => {
+    const safeTarget = String(targetSessionId || "").trim();
+    if (!safeTarget) return resolveSessionWorkspaceHint(activeSession, fallback);
+    const match = (sessionsData.peek() || []).find((s) => String(s?.id || "") === safeTarget) || null;
+    if (match) return resolveSessionWorkspaceHint(match, fallback);
+    if (safeTarget === String(sessionId || "").trim()) {
+      return resolveSessionWorkspaceHint(activeSession, fallback);
+    }
+    return resolveSessionWorkspaceHint(null, fallback);
+  }, [activeSession, sessionId]);
+  const sessionApiPath = useCallback((targetSessionId, action = "", fallbackWorkspace = "active") => {
+    const safeTarget = String(targetSessionId || "").trim();
+    if (!safeTarget) return "";
+    return buildSessionApiPath(safeTarget, action, {
+      workspace: resolveWorkspaceForSessionId(safeTarget, fallbackWorkspace),
+    });
+  }, [resolveWorkspaceForSessionId]);
   const sessionTitle = activeSession?.title || activeSession?.taskId || "Session";
   const sessionMeta = [activeSession?.type, activeSession?.status]
     .filter(Boolean)
     .join(" · ");
 
   useEffect(() => {
-    setPendingAttachments([]);
+    const key = String(sessionId || DRAFT_SESSION_KEY);
+    const cached = pendingAttachmentsBySessionId.get(key);
+    setPendingAttachments(Array.isArray(cached) ? [...cached] : []);
     setUploadingAttachments(false);
     setDragActive(false);
+    chatDropDepthRef.current = 0;
   }, [sessionId]);
+
+  useEffect(() => {
+    const key = String(sessionId || DRAFT_SESSION_KEY);
+    if (pendingAttachments.length > 0) {
+      pendingAttachmentsBySessionId.set(key, [...pendingAttachments]);
+    } else {
+      pendingAttachmentsBySessionId.delete(key);
+    }
+  }, [sessionId, pendingAttachments]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const clearDragState = () => {
+      chatDropDepthRef.current = 0;
+      setDragActive(false);
+    };
+    window.addEventListener("dragend", clearDragState);
+    window.addEventListener("drop", clearDragState);
+    return () => {
+      window.removeEventListener("dragend", clearDragState);
+      window.removeEventListener("drop", clearDragState);
+    };
+  }, []);
 
   const uploadAttachments = useCallback(async (files) => {
     if (uploadingAttachments) return;
@@ -948,13 +1049,27 @@ export function ChatTab() {
       for (const file of list) {
         form.append("file", file, file.name || "attachment");
       }
-      const targetSafeSessionId = encodeURIComponent(targetSessionId);
-      const res = await apiFetch(`/api/sessions/${targetSafeSessionId}/attachments`, {
+      const attachmentsPath = sessionApiPath(targetSessionId, "attachments");
+      if (!attachmentsPath) {
+        showToast("Attachment upload failed", "error");
+        return;
+      }
+      const res = await apiFetch(attachmentsPath, {
         method: "POST",
         body: form,
       });
       if (Array.isArray(res?.attachments) && res.attachments.length > 0) {
-        setPendingAttachments((prev) => [...prev, ...res.attachments]);
+        const cacheKey = String(targetSessionId || DRAFT_SESSION_KEY);
+        setPendingAttachments((prev) => {
+          const base = prev.length > 0
+            ? prev
+            : Array.isArray(pendingAttachmentsBySessionId.get(cacheKey))
+              ? pendingAttachmentsBySessionId.get(cacheKey)
+              : [];
+          const next = [...base, ...res.attachments];
+          pendingAttachmentsBySessionId.set(cacheKey, next);
+          return next;
+        });
       } else {
         showToast("Attachment upload failed", "error");
       }
@@ -963,7 +1078,7 @@ export function ChatTab() {
     } finally {
       setUploadingAttachments(false);
     }
-  }, [sessionId, uploadingAttachments]);
+  }, [sessionId, uploadingAttachments, sessionApiPath]);
 
   const removeAttachment = useCallback((index) => {
     setPendingAttachments((prev) => prev.filter((_, i) => i !== index));
@@ -985,17 +1100,33 @@ export function ChatTab() {
     }
   }, [uploadAttachments]);
 
-  const handleInputDragOver = useCallback((e) => {
+  const handleChatDragEnter = useCallback((e) => {
+    if (!hasDragFiles(e)) return;
     e.preventDefault();
+    chatDropDepthRef.current += 1;
     if (!dragActive) setDragActive(true);
   }, [dragActive]);
 
-  const handleInputDragLeave = useCallback(() => {
-    if (dragActive) setDragActive(false);
+  const handleChatDragOver = useCallback((e) => {
+    if (!hasDragFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    if (!dragActive) setDragActive(true);
   }, [dragActive]);
 
-  const handleInputDrop = useCallback((e) => {
+  const handleChatDragLeave = useCallback((e) => {
+    if (!dragActive) return;
     e.preventDefault();
+    chatDropDepthRef.current = Math.max(0, chatDropDepthRef.current - 1);
+    if (chatDropDepthRef.current === 0 && dragActive) {
+      setDragActive(false);
+    }
+  }, [dragActive]);
+
+  const handleChatDrop = useCallback((e) => {
+    if (!dragActive && !hasDragFiles(e)) return;
+    e.preventDefault();
+    chatDropDepthRef.current = 0;
     setDragActive(false);
     const files = e.dataTransfer?.files;
     if (files && files.length) {
@@ -1031,6 +1162,11 @@ export function ChatTab() {
             <${SessionList}
               showArchived=${showArchived}
               onToggleArchived=${setShowArchived}
+              sessionView=${sessionView}
+              onSessionViewChange=${(nextView) => {
+                setSessionView(nextView);
+                refreshPrimarySessions(nextView).catch(() => {});
+              }}
               defaultType="primary"
               renamingSessionId=${renamingSessionId}
               onStartRename=${(sid) => setRenamingSessionId(sid)}
@@ -1042,7 +1178,13 @@ export function ChatTab() {
         <//>
 
         <!-- Right panel: Chat area -->
-        <${Box} className="session-detail">
+        <${Box}
+          className="session-detail"
+          onDragEnter=${handleChatDragEnter}
+          onDragOver=${handleChatDragOver}
+          onDragLeave=${handleChatDragLeave}
+          onDrop=${handleChatDrop}
+        >
           ${sessionId &&
           html`
             <${Paper} elevation=${1} className="chat-shell-header" sx=${{ borderRadius: 0 }}>
@@ -1185,9 +1327,6 @@ export function ChatTab() {
                 onInput=${handleInputChange}
                 onKeyDown=${handleKeyDown}
                 onPaste=${handleInputPaste}
-                onDragOver=${handleInputDragOver}
-                onDragLeave=${handleInputDragLeave}
-                onDrop=${handleInputDrop}
                 sx=${{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
               />
               <${VoiceMicButton}
@@ -1249,6 +1388,41 @@ export function ChatTab() {
               `}
             <//>
           <//>
+          ${dragActive && html`
+            <${Box}
+              className="chat-drop-overlay"
+              sx=${{
+                position: "absolute",
+                inset: 0,
+                zIndex: 25,
+                pointerEvents: "none",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <${Paper}
+                elevation=${6}
+                sx=${{
+                  px: 3,
+                  py: 2,
+                  borderRadius: 2,
+                  border: "1px dashed",
+                  borderColor: "primary.main",
+                  bgcolor: "background.paper",
+                  minWidth: 240,
+                  textAlign: "center",
+                }}
+              >
+                <${Typography} variant="subtitle2" sx=${{ mb: 0.5 }}>
+                  Drop files to attach
+                <//>
+                <${Typography} variant="caption" color="text.secondary">
+                  Files can be dropped anywhere in this chat.
+                <//>
+              <//>
+            <//>
+          `}
         <//>
       <//>
       ${focusMode && html`
