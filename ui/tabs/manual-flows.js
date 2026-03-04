@@ -253,9 +253,9 @@ const CATEGORY_META = {
 
 // ── Workflow template category colors ──
 const WF_CATEGORY_META = {
-  github:      { label: "GitHub",       icon: "git-branch",  color: "#6e5494", bg: "#6e549415" },
-  agents:      { label: "Agents",       icon: "robot",       color: "#3b82f6", bg: "#3b82f615" },
-  planning:    { label: "Planning",     icon: "calendar",    color: "#10b981", bg: "#10b98115" },
+  github:      { label: "GitHub",       icon: "git",         color: "#6e5494", bg: "#6e549415" },
+  agents:      { label: "Agents",       icon: "bot",         color: "#3b82f6", bg: "#3b82f615" },
+  planning:    { label: "Planning",     icon: "clipboard",   color: "#10b981", bg: "#10b98115" },
   cicd:        { label: "CI/CD",        icon: "rocket",      color: "#f59e0b", bg: "#f59e0b15" },
   reliability: { label: "Reliability",  icon: "shield",      color: "#ef4444", bg: "#ef444415" },
   security:    { label: "Security",     icon: "lock",        color: "#dc2626", bg: "#dc262615" },
