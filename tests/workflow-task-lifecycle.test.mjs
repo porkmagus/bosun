@@ -366,8 +366,8 @@ describe("action.detect_new_commits", () => {
   beforeEach(() => {
     gitDir = mkdtempSync(join(tmpdir(), "wf-detect-commits-"));
     execSync("git init", { cwd: gitDir, stdio: "ignore" });
-    execSync("git config user.email test@test.com", { cwd: gitDir, stdio: "ignore" });
-    execSync("git config user.name Test", { cwd: gitDir, stdio: "ignore" });
+    execSync("git config --local user.email test@test.com", { cwd: gitDir, stdio: "ignore" });
+    execSync("git config --local user.name Test", { cwd: gitDir, stdio: "ignore" });
     writeFileSync(join(gitDir, "README.md"), "init");
     execSync("git add . && git commit -m init", { cwd: gitDir, stdio: "ignore" });
   });
