@@ -5243,10 +5243,13 @@ registerNodeType("action.mcp_tool_call", {
     const resolved = await registry.resolveMcpServersForAgent(rootDir, [serverId]);
 
     if (!resolved || !resolved.length) {
-      throw new Error(
-        `action.mcp_tool_call: MCP server "${serverId}" not found. ` +
-        `Install it first via the library: installMcpServer("${serverId}")`,
-      );
+      ctx.log(node.id, `MCP server "${serverId}" not found — skipping tool call`);
+      return {
+        success: false,
+        error: `action.mcp_tool_call: MCP server "${serverId}" not found. Install it first via the library: installMcpServer("${serverId}")`,
+        server: serverId,
+        tool: toolName,
+      };
     }
 
     const server = resolved[0];
@@ -5352,7 +5355,8 @@ registerNodeType("action.mcp_list_tools", {
     const resolved = await registry.resolveMcpServersForAgent(rootDir, [serverId]);
 
     if (!resolved || !resolved.length) {
-      throw new Error(`action.mcp_list_tools: MCP server "${serverId}" not found`);
+      ctx.log(node.id, `MCP server "${serverId}" not found — skipping list-tools`);
+      return { success: false, error: `action.mcp_list_tools: MCP server "${serverId}" not found`, server: serverId, tools: [] };
     }
 
     const server = resolved[0];

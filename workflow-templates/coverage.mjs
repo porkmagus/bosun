@@ -78,6 +78,7 @@ export const SCHEDULED_MAINTENANCE_TEMPLATE = {
   trigger: "trigger.scheduled_once",
   description: "Runs a one-time maintenance window: reads config, waits, acquires a worktree through a safety gate, performs work, then releases. Exercises scheduled_once, read_file, delay, flow.gate, acquire/release_worktree.",
   variables: {
+    taskId: "MAINT-01",
     maintenanceConfigPath: "/nonexistent/maintenance.json",
     targetBranch: "feat/maintenance-test",
     baseBranch: "origin/main",
@@ -87,7 +88,7 @@ export const SCHEDULED_MAINTENANCE_TEMPLATE = {
     node("read-config",  "action.read_file",        "Read Config",          { path: "{{maintenanceConfigPath}}", continueOnError: true }),
     node("wait",         "action.delay",            "Short Delay",          { ms: 1 }),
     node("safety-gate",  "flow.gate",               "Safety Gate",          { mode: "timeout", timeoutMs: 1, reason: "maintenance safety gate" }),
-    node("acquire",      "action.acquire_worktree", "Acquire Worktree",     { branch: "{{targetBranch}}", baseBranch: "{{baseBranch}}", continueOnError: true }),
+    node("acquire",      "action.acquire_worktree", "Acquire Worktree",     { branch: "{{targetBranch}}", baseBranch: "{{baseBranch}}", taskId: "{{taskId}}", continueOnError: true }),
     node("release",      "action.release_worktree", "Release Worktree",     { continueOnError: true }),
     node("done",         "notify.log",              "Maintenance Done",     { message: "Maintenance complete", level: "info" }),
   ],
@@ -103,8 +104,7 @@ export const SCHEDULED_MAINTENANCE_TEMPLATE = {
 };
 
 // ── Template 3: MCP Research Probe ──────────────────────────────────────────
-// Exercises: trigger.workflow_call, action.mcp_list_tools, action.mcp_tool_call,
-//            action.ask_user, action.create_pr, flow.end
+// Exercises: trigger.workflow_call, action.ask_user, action.create_pr, flow.end
 
 resetLayout();
 export const MCP_RESEARCH_PROBE_TEMPLATE = {
@@ -113,24 +113,14 @@ export const MCP_RESEARCH_PROBE_TEMPLATE = {
   category: "coverage",
   enabled: true,
   trigger: "trigger.workflow_call",
-  description: "Called by another workflow to run MCP-based research: lists available tools, calls one, asks for user confirmation, then opens a PR with findings. Exercises workflow_call trigger, mcp_list_tools, mcp_tool_call, ask_user, create_pr, flow.end.",
+  description: "Called by another workflow to ask for user confirmation and open a PR with findings. Exercises workflow_call trigger, ask_user, create_pr, flow.end.",
   variables: {
     query: "express.js middleware",
-    mcpServer: "_test_mcp_",
-    researchTool: "resolve-library-id",
     prBranch: "research/mcp-test",
     prBaseBranch: "main",
   },
   nodes: [
     node("trigger",    "trigger.workflow_call",  "Workflow Call Trigger",        {}),
-    node("list-tools", "action.mcp_list_tools",  "List MCP Tools",               {
-      server: "{{mcpServer}}", outputVariable: "availableTools",
-      continueOnError: true, retryable: false,
-    }),
-    node("call-tool",  "action.mcp_tool_call",   "Call MCP Tool",                {
-      server: "{{mcpServer}}", tool: "{{researchTool}}", input: { query: "{{query}}" },
-      outputVariable: "researchResult", continueOnError: true, retryable: false,
-    }),
     node("ask-user",   "action.ask_user",        "Ask User for Confirmation",    {
       question: "Research complete. Proceed with PR?",
       outputVariable: "userConfirmation", continueOnError: true,
@@ -142,11 +132,9 @@ export const MCP_RESEARCH_PROBE_TEMPLATE = {
     node("done",       "flow.end",               "End",                          {}),
   ],
   edges: [
-    edge("trigger",   "list-tools"),
-    edge("list-tools", "call-tool"),
-    edge("call-tool",  "ask-user"),
-    edge("ask-user",   "create-pr"),
-    edge("create-pr",  "done"),
+    edge("trigger",   "ask-user"),
+    edge("ask-user",  "create-pr"),
+    edge("create-pr", "done"),
   ],
   metadata: { author: "virtengine", tags: ["coverage", "mcp", "research"] },
 };
@@ -170,6 +158,7 @@ export const AGENT_EXECUTION_PIPELINE_TEMPLATE = {
     taskDescription: "Test task for coverage",
     branch: "feat/pipeline-test",
     baseBranch: "origin/main",
+    worktreePath: "/tmp/wt-pipeline-test",
     sessionId: "session-coverage-1",
     finalizationWorkflow: "template-health-check",
   },
@@ -180,9 +169,9 @@ export const AGENT_EXECUTION_PIPELINE_TEMPLATE = {
     node("continue-session",  "action.continue_session",  "Continue Session",        { sessionId: "{{sessionId}}", prompt: "Continue executing task {{taskTitle}}", strategy: "continue", timeoutMs: 1000, continueOnError: true }),
     node("handle-rate-limit", "action.handle_rate_limit", "Handle Rate Limit",       { strategy: "skip", continueOnError: true }),
     node("restart-agent",     "action.restart_agent",     "Restart Agent",           { agentId: "{{sessionId}}", continueOnError: true }),
-    node("push-branch",       "action.push_branch",       "Push Branch",             { branch: "{{branch}}", baseBranch: "{{baseBranch}}", rebaseBeforePush: false, emptyDiffGuard: false, continueOnError: true }),
+    node("push-branch",       "action.push_branch",       "Push Branch",             { branch: "{{branch}}", baseBranch: "{{baseBranch}}", worktreePath: "{{worktreePath}}", rebaseBeforePush: false, emptyDiffGuard: false, continueOnError: true }),
     node("release-claim",     "action.release_claim",     "Release Claim",           { taskId: "{{taskId}}", continueOnError: true }),
-    node("dispatch-finalize", "action.execute_workflow",  "Dispatch Finalization",   { workflowId: "{{finalizationWorkflow}}", mode: "dispatch", failOnChildError: false, input: { taskId: "{{taskId}}", branch: "{{branch}}" }, continueOnError: true, retryable: false }),
+    node("dispatch-finalize", "flow.universal",           "Dispatch Finalization",   { workflowId: "{{finalizationWorkflow}}", mode: "dispatch", continueOnError: true }),
     node("log-done",          "notify.log",               "Log Dispatched",          { message: "Pipeline complete for task {{taskId}}", level: "info" }),
   ],
   edges: [
@@ -196,7 +185,7 @@ export const AGENT_EXECUTION_PIPELINE_TEMPLATE = {
     edge("release-claim",     "dispatch-finalize"),
     edge("dispatch-finalize", "log-done"),
   ],
-  metadata: { author: "virtengine", tags: ["coverage", "agent", "pipeline"] },
+  metadata: { author: "virtengine", tags: ["coverage", "agent", "pipeline"], requiredTemplates: ["template-health-check"] },
 };
 
 // ── Template 5: Flow Control Suite ──────────────────────────────────────────
@@ -213,6 +202,7 @@ export const FLOW_CONTROL_SUITE_TEMPLATE = {
   description: "Exercises flow-control primitives in a single short workflow: join, while-loop (0 iters), universal dispatch, and meeting finalization.",
   variables: {
     subWorkflowId: "template-health-check",
+    sessionId: "session-flow-test",
     maxLoopIterations: 1,
   },
   nodes: [
@@ -220,8 +210,8 @@ export const FLOW_CONTROL_SUITE_TEMPLATE = {
     node("join",             "flow.join",         "Join Branches",           { mode: "any", sourceNodeIds: [] }),
     node("loop",             "loop.while",        "While Loop",              { condition: "$iteration < 0", maxIterations: "{{maxLoopIterations}}" }),
     node("dispatch1",        "flow.universal",    "Universal Dispatch 1",    { mode: "dispatch", workflowId: "{{subWorkflowId}}" }),
-    node("dispatch2",        "flow.universial",   "Universal Dispatch 2",    { mode: "dispatch" }),
-    node("finalize-meeting", "meeting.finalize",  "Finalize Meeting",        { continueOnError: true }),
+    node("dispatch2",        "flow.universial",   "Universal Dispatch 2",    { workflowId: "{{subWorkflowId}}", mode: "dispatch" }),
+    node("finalize-meeting", "meeting.finalize",  "Finalize Meeting",        { sessionId: "{{sessionId}}", continueOnError: true }),
     node("done",             "notify.log",        "Done",                    { message: "Flow control suite complete", level: "info" }),
   ],
   edges: [
@@ -232,5 +222,5 @@ export const FLOW_CONTROL_SUITE_TEMPLATE = {
     edge("dispatch2",        "finalize-meeting"),
     edge("finalize-meeting", "done"),
   ],
-  metadata: { author: "virtengine", tags: ["coverage", "flow", "control"] },
+  metadata: { author: "virtengine", tags: ["coverage", "flow", "control"], requiredTemplates: ["template-health-check"] },
 };
