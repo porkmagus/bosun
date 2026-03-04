@@ -395,6 +395,363 @@ export const BUILTIN_FLOW_TEMPLATES = [
       },
     ],
   },
+  {
+    id: "release-notes-draft",
+    name: "Release Notes Draft",
+    description:
+      "Create structured release notes from recent commits/PRs with optional audience-specific tone and risk highlights.",
+    icon: "book",
+    category: "generate",
+    tags: ["release", "notes", "changelog", "documentation"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "baseRef",
+        label: "Base Ref",
+        type: "text",
+        placeholder: "e.g. main or v1.2.0",
+        defaultValue: "main",
+        required: true,
+      },
+      {
+        id: "targetRef",
+        label: "Target Ref",
+        type: "text",
+        placeholder: "e.g. HEAD or release branch",
+        defaultValue: "HEAD",
+        required: true,
+      },
+      {
+        id: "audience",
+        label: "Audience",
+        type: "select",
+        defaultValue: "engineering",
+        options: [
+          { label: "Engineering", value: "engineering" },
+          { label: "Product", value: "product" },
+          { label: "Customer-facing", value: "customer" },
+        ],
+        required: true,
+      },
+      {
+        id: "includeRiskSection",
+        label: "Include Risk/Breaking Changes",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
+  {
+    id: "pre-pr-readiness",
+    name: "Pre-PR Readiness Check",
+    description:
+      "Prepare a change for PR by validating scope, tests, docs impact, and reviewer-facing summary.",
+    icon: "check",
+    category: "transform",
+    tags: ["pr", "review", "quality", "delivery"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "changeSummary",
+        label: "Change Summary",
+        type: "textarea",
+        placeholder: "What changed and why",
+        defaultValue: "",
+        required: true,
+      },
+      {
+        id: "runTests",
+        label: "Run Targeted Tests",
+        type: "toggle",
+        defaultValue: true,
+      },
+      {
+        id: "runBuild",
+        label: "Run Build",
+        type: "toggle",
+        defaultValue: true,
+      },
+      {
+        id: "includeChecklist",
+        label: "Include Reviewer Checklist",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
+  {
+    id: "bug-repro-investigation",
+    name: "Bug Repro & Investigation",
+    description:
+      "Build a focused investigation task for reproducing an issue, narrowing root cause, and proposing a safe fix path.",
+    icon: "bug",
+    category: "audit",
+    tags: ["bug", "debug", "investigation", "root-cause"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "issueDescription",
+        label: "Issue Description",
+        type: "textarea",
+        placeholder: "Observed behavior, expected behavior, scope",
+        defaultValue: "",
+        required: true,
+      },
+      {
+        id: "affectedArea",
+        label: "Affected Area",
+        type: "text",
+        placeholder: "e.g. ui/tabs/manual-flows.js",
+        defaultValue: "",
+        required: false,
+      },
+      {
+        id: "severity",
+        label: "Severity",
+        type: "select",
+        defaultValue: "medium",
+        options: [
+          { label: "Low", value: "low" },
+          { label: "Medium", value: "medium" },
+          { label: "High", value: "high" },
+          { label: "Critical", value: "critical" },
+        ],
+        required: true,
+      },
+    ],
+  },
+  {
+    id: "test-hardening-pass",
+    name: "Test Hardening Pass",
+    description:
+      "Identify fragile test areas and prepare a deterministic hardening plan with targeted improvements.",
+    icon: "shield",
+    category: "reliability",
+    tags: ["tests", "reliability", "deterministic", "quality"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "testTarget",
+        label: "Test Target",
+        type: "text",
+        placeholder: "e.g. tests/manual-flows.test.mjs or tests/**",
+        defaultValue: "tests/**",
+        required: true,
+      },
+      {
+        id: "focus",
+        label: "Hardening Focus",
+        type: "select",
+        defaultValue: "flakiness",
+        options: [
+          { label: "Flakiness", value: "flakiness" },
+          { label: "Coverage gaps", value: "coverage" },
+          { label: "Fixture cleanup", value: "fixtures" },
+          { label: "All", value: "all" },
+        ],
+        required: true,
+      },
+      {
+        id: "enforceDeterminism",
+        label: "Enforce Determinism",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
+  {
+    id: "dependency-upgrade-plan",
+    name: "Dependency Upgrade Plan",
+    description:
+      "Generate an upgrade plan with compatibility risks, migration tasks, and rollback strategy.",
+    icon: "refresh",
+    category: "transform",
+    tags: ["dependencies", "upgrade", "migration", "risk"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "packageScope",
+        label: "Package Scope",
+        type: "text",
+        placeholder: "e.g. preact, @mui/*, vitest",
+        defaultValue: "",
+        required: true,
+      },
+      {
+        id: "targetVersion",
+        label: "Target Version",
+        type: "text",
+        placeholder: "e.g. latest, ^5, 1.2.3",
+        defaultValue: "latest",
+        required: true,
+      },
+      {
+        id: "includeRollback",
+        label: "Include Rollback Plan",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
+  {
+    id: "security-secret-audit",
+    name: "Security Secret Audit",
+    description:
+      "Audit for potential secret exposure patterns, risky config defaults, and missing safeguards.",
+    icon: "lock",
+    category: "security",
+    tags: ["security", "secrets", "audit", "compliance"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "scanScope",
+        label: "Scan Scope",
+        type: "text",
+        placeholder: "e.g. ., src/, config/",
+        defaultValue: ".",
+        required: true,
+      },
+      {
+        id: "includeHistoryHints",
+        label: "Include Git History Hints",
+        type: "toggle",
+        defaultValue: false,
+      },
+      {
+        id: "outputFormat",
+        label: "Output Format",
+        type: "select",
+        defaultValue: "markdown",
+        options: [
+          { label: "Markdown", value: "markdown" },
+          { label: "JSON", value: "json" },
+          { label: "Both", value: "both" },
+        ],
+        required: true,
+      },
+    ],
+  },
+  {
+    id: "incident-postmortem-pack",
+    name: "Incident Postmortem Pack",
+    description:
+      "Create a postmortem-ready package: timeline, impact summary, contributing factors, and follow-up actions.",
+    icon: "alert",
+    category: "reliability",
+    tags: ["incident", "postmortem", "reliability", "operations"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "incidentTitle",
+        label: "Incident Title",
+        type: "text",
+        placeholder: "Short incident title",
+        defaultValue: "",
+        required: true,
+      },
+      {
+        id: "impactSummary",
+        label: "Impact Summary",
+        type: "textarea",
+        placeholder: "Who was impacted and how",
+        defaultValue: "",
+        required: true,
+      },
+      {
+        id: "includeActionItems",
+        label: "Include Action Items",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
+  {
+    id: "docs-gap-analysis",
+    name: "Docs Gap Analysis",
+    description:
+      "Identify documentation blind spots between implementation and docs, then prepare prioritized updates.",
+    icon: "search",
+    category: "audit",
+    tags: ["docs", "analysis", "coverage", "onboarding"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "docsPath",
+        label: "Docs Path",
+        type: "text",
+        placeholder: "e.g. docs/, README.md",
+        defaultValue: "docs/",
+        required: false,
+      },
+      {
+        id: "codeScope",
+        label: "Code Scope",
+        type: "text",
+        placeholder: "e.g. src/, bosun/",
+        defaultValue: "",
+        required: false,
+      },
+      {
+        id: "outputStyle",
+        label: "Output Style",
+        type: "select",
+        defaultValue: "prioritized-list",
+        options: [
+          { label: "Prioritized list", value: "prioritized-list" },
+          { label: "Checklist", value: "checklist" },
+          { label: "Action plan", value: "action-plan" },
+        ],
+        required: true,
+      },
+    ],
+  },
+  {
+    id: "onboarding-quickstart-pack",
+    name: "Onboarding Quickstart Pack",
+    description:
+      "Generate an onboarding pack covering setup, architecture hotspots, first-task path, and common pitfalls.",
+    icon: "book",
+    category: "generate",
+    tags: ["onboarding", "developer-experience", "documentation", "handoff"],
+    builtin: true,
+    version: "1.0.0",
+    fields: [
+      {
+        id: "targetPersona",
+        label: "Target Persona",
+        type: "select",
+        defaultValue: "engineer",
+        options: [
+          { label: "Engineer", value: "engineer" },
+          { label: "QA", value: "qa" },
+          { label: "SRE/DevOps", value: "sre" },
+          { label: "Product/PM", value: "pm" },
+        ],
+        required: true,
+      },
+      {
+        id: "timeBudgetHours",
+        label: "Onboarding Time Budget (hours)",
+        type: "number",
+        defaultValue: 4,
+        required: false,
+      },
+      {
+        id: "includeFirstTaskGuide",
+        label: "Include First Task Guide",
+        type: "toggle",
+        defaultValue: true,
+      },
+    ],
+  },
 ];
 
 // ── Template Registry ────────────────────────────────────────────────────────
@@ -945,22 +1302,83 @@ async function executeContextIndexFull(formValues, rootDir, _context = {}) {
 
 /** Executor for user-created custom templates. */
 async function executeCustomFlow(template, formValues, rootDir, context) {
+  const templateValues = {
+    ...(formValues || {}),
+    templateName: template?.name || "",
+    templateId: template?.id || "",
+    category: template?.category || "custom",
+  };
+
+  const action = template?.action && typeof template.action === "object"
+    ? template.action
+    : { kind: "task" };
+  const actionKind = String(action?.kind || "task").trim().toLowerCase();
+
   if (context.taskManager && typeof context.taskManager.createTask === "function") {
+    const taskAction = actionKind === "task" && action?.task && typeof action.task === "object"
+      ? action.task
+      : {};
+    const taskTitleTemplate = String(taskAction?.title || "").trim();
+    const taskDescriptionTemplate = String(taskAction?.description || "").trim();
+    const taskPriority = String(taskAction?.priority || "medium").trim() || "medium";
+    const taskLabels = Array.isArray(taskAction?.labels)
+      ? taskAction.labels.map((label) => String(label || "").trim()).filter(Boolean)
+      : [];
+
+    const renderedTitle = renderTemplateString(taskTitleTemplate, templateValues);
+    const renderedDescription = renderTemplateString(taskDescriptionTemplate, templateValues);
+
     const task = await context.taskManager.createTask({
-      title: `run(${template.category || "custom"}): ${template.name}`,
-      description: `Manual flow execution: ${template.description || template.name}\n\nForm values:\n${JSON.stringify(formValues, null, 2)}`,
-      priority: "medium",
-      labels: ["manual-flow", template.category || "custom"],
+      title: renderedTitle || `run(${template.category || "custom"}): ${template.name}`,
+      description: renderedDescription || `Manual flow execution: ${template.description || template.name}\n\nForm values:\n${JSON.stringify(formValues, null, 2)}`,
+      priority: taskPriority,
+      labels: taskLabels.length > 0
+        ? taskLabels.map((label) => renderTemplateString(label, templateValues)).filter(Boolean)
+        : ["manual-flow", template.category || "custom"],
     });
-    return { mode: "task-dispatched", taskId: task.id || task._id };
+    return {
+      mode: "task-dispatched",
+      taskId: task.id || task._id,
+      action: actionKind,
+    };
+  }
+
+  if (actionKind === "instructions") {
+    const instructionsTemplate = String(action?.instructions || "").trim();
+    const renderedInstructions = renderTemplateString(instructionsTemplate, templateValues);
+    return {
+      mode: "instructions",
+      template: template.id,
+      formValues,
+      action: actionKind,
+      instructions: renderedInstructions || `Create a task to execute the "${template.name}" flow with the submitted form values.`,
+    };
   }
 
   return {
     mode: "instructions",
     template: template.id,
     formValues,
+    action: actionKind,
     instructions: `Create a task to execute the "${template.name}" flow with the submitted form values.`,
   };
+}
+
+function renderTemplateString(templateText = "", values = {}) {
+  const raw = String(templateText || "");
+  if (!raw) return "";
+  return raw.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_all, key) => {
+    const val = values[key];
+    if (val == null) return "";
+    if (typeof val === "object") {
+      try {
+        return JSON.stringify(val);
+      } catch {
+        return "";
+      }
+    }
+    return String(val);
+  });
 }
 
 // ── Persistence helpers ──────────────────────────────────────────────────────

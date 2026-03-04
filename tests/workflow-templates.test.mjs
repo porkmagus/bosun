@@ -411,6 +411,27 @@ describe("template API functions", () => {
     }
   });
 
+  it("listTemplates exposes capability booleans and counts", () => {
+    const list = listTemplates();
+    const keys = ["branch", "join", "gate", "universal", "end"];
+
+    for (const item of list) {
+      expect(item.capabilities).toBeDefined();
+      expect(item.capabilityCounts).toBeDefined();
+      for (const key of keys) {
+        expect(typeof item.capabilities[key]).toBe("boolean");
+        expect(typeof item.capabilityCounts[key]).toBe("number");
+        expect(item.capabilityCounts[key]).toBeGreaterThanOrEqual(0);
+        if (!item.capabilities[key]) {
+          expect(item.capabilityCounts[key]).toBe(0);
+        }
+      }
+    }
+
+    const hasAnyCapability = list.some((item) => keys.some((key) => item.capabilities[key]));
+    expect(hasAnyCapability).toBe(true);
+  });
+
   it("listTemplates exposes variables array with key/defaultValue/type", () => {
     const list = listTemplates();
     // At least some templates should have variables

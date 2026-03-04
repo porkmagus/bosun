@@ -208,14 +208,17 @@ async function loadWfTemplates() {
   }
 }
 
-async function launchWorkflowTemplate(templateId, variables) {
+async function launchWorkflowTemplate(templateId, launchConfig = {}) {
   wfLaunching.value = true;
   wfLaunchResult.value = null;
   try {
+    const payload = launchConfig && typeof launchConfig === "object"
+      ? { ...launchConfig, templateId }
+      : { templateId, variables: launchConfig };
     const data = await apiFetch("/api/workflows/launch-template", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ templateId, variables }),
+      body: JSON.stringify(payload),
     });
     wfLaunchResult.value = data;
     showToast(
@@ -242,6 +245,9 @@ const CATEGORY_META = {
   audit: { label: "Audit & Analysis", icon: "search", color: "#3b82f6", bg: "#3b82f615" },
   generate: { label: "Generate & Prepare", icon: "book", color: "#10b981", bg: "#10b98115" },
   transform: { label: "Transform & Refactor", icon: "refresh", color: "#f59e0b", bg: "#f59e0b15" },
+  reliability: { label: "Reliability", icon: "shield", color: "#ef4444", bg: "#ef444415" },
+  security: { label: "Security", icon: "lock", color: "#dc2626", bg: "#dc262615" },
+  research: { label: "Research", icon: "search", color: "#06b6d4", bg: "#06b6d415" },
   custom: { label: "Custom", icon: "settings", color: "#8b5cf6", bg: "#8b5cf615" },
 };
 
@@ -257,6 +263,25 @@ const WF_CATEGORY_META = {
   research:    { label: "Research",     icon: "search",      color: "#06b6d4", bg: "#06b6d415" },
   custom:      { label: "Custom",       icon: "settings",    color: "#6b7280", bg: "#6b728015" },
 };
+
+const WF_CAPABILITY_META = Object.freeze([
+  { key: "branch", label: "Branch", symbol: "⑂" },
+  { key: "join", label: "Join", symbol: "⑃" },
+  { key: "gate", label: "Gate", symbol: "◈" },
+  { key: "universal", label: "Universal", symbol: "U" },
+  { key: "end", label: "End", symbol: "∴" },
+]);
+
+function getTemplateCapabilities(template) {
+  const capabilities = template?.capabilities || {};
+  const counts = template?.capabilityCounts || {};
+  return WF_CAPABILITY_META
+    .filter((entry) => capabilities[entry.key] === true)
+    .map((entry) => ({
+      ...entry,
+      count: Number(counts[entry.key] || 0),
+    }));
+}
 
 function getCategoryMeta(cat) {
   return CATEGORY_META[cat] || CATEGORY_META.custom;
@@ -694,6 +719,114 @@ function RunHistoryList({ onBack }) {
  *  Template List View (main view)
  * ═══════════════════════════════════════════════════════════════ */
 
+const TEMPLATE_FIELD_TYPES = ["text", "textarea", "select", "toggle", "number"];
+
+function createTemplateFieldDraft(overrides = {}) {
+  return {
+    id: "",
+    label: "",
+    type: "text",
+    placeholder: "",
+    defaultValue: "",
+    required: false,
+    options: [],
+    helpText: "",
+    ...overrides,
+  };
+}
+
+function parseTemplateSelectOptions(raw = "") {
+  const lines = String(raw || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const options = [];
+  for (const line of lines) {
+    const eq = line.indexOf("=");
+    if (eq > 0) {
+      const value = line.slice(0, eq).trim();
+      const label = line.slice(eq + 1).trim() || value;
+      if (!value) continue;
+      options.push({ value, label });
+      continue;
+    }
+    options.push({ value: line, label: line });
+  }
+  return options;
+}
+
+function formatTemplateSelectOptions(options = []) {
+  if (!Array.isArray(options) || options.length === 0) return "";
+  return options
+    .map((opt) => {
+      const value = String(opt?.value ?? "").trim();
+      const label = String(opt?.label ?? value).trim();
+      if (!value) return "";
+      return label && label !== value ? `${value}=${label}` : value;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeTemplateFieldsForSave(fields = []) {
+  return fields
+    .map((field) => {
+      const type = TEMPLATE_FIELD_TYPES.includes(field?.type) ? field.type : "text";
+      const id = String(field?.id || "").trim();
+      const label = String(field?.label || "").trim();
+      if (!id || !label) return null;
+
+      let defaultValue = field?.defaultValue;
+      if (type === "toggle") {
+        defaultValue = !!defaultValue;
+      } else if (type === "number") {
+        if (defaultValue === "" || defaultValue == null) {
+          defaultValue = undefined;
+        } else {
+          const n = Number(defaultValue);
+          defaultValue = Number.isFinite(n) ? n : undefined;
+        }
+      } else if (defaultValue == null) {
+        defaultValue = "";
+      } else {
+        defaultValue = String(defaultValue);
+      }
+
+      const normalized = {
+        id,
+        label,
+        type,
+        required: field?.required === true,
+      };
+
+      const placeholder = String(field?.placeholder || "").trim();
+      if (placeholder) normalized.placeholder = placeholder;
+
+      if (defaultValue !== undefined) normalized.defaultValue = defaultValue;
+
+      const helpText = String(field?.helpText || "").trim();
+      if (helpText) normalized.helpText = helpText;
+
+      if (type === "select") {
+        const options = Array.isArray(field?.options)
+          ? field.options
+            .map((opt) => ({
+              value: String(opt?.value ?? "").trim(),
+              label: String(opt?.label ?? opt?.value ?? "").trim(),
+            }))
+            .filter((opt) => opt.value)
+          : [];
+        if (options.length === 0 && String(defaultValue || "").trim()) {
+          options.push({ value: String(defaultValue).trim(), label: String(defaultValue).trim() });
+        }
+        normalized.options = options;
+      }
+
+      return normalized;
+    })
+    .filter(Boolean);
+}
+
 function TemplateListView() {
   const tmpls = flowTemplates.value || [];
 
@@ -711,7 +844,13 @@ function TemplateListView() {
     icon: "settings",
     category: "custom",
     tagsText: "",
-    fieldsText: "[]",
+    fields: [createTemplateFieldDraft()],
+    actionKind: "task",
+    actionTaskTitle: "",
+    actionTaskDescription: "",
+    actionTaskPriority: "medium",
+    actionTaskLabelsText: "manual-flow, custom",
+    actionInstructions: "",
   });
 
   // Group by category
@@ -722,10 +861,15 @@ function TemplateListView() {
       if (!map[cat]) map[cat] = [];
       map[cat].push(t);
     });
-    const order = ["audit", "generate", "transform", "custom"];
-    return order
+    const order = ["audit", "generate", "transform", "reliability", "security", "research", "custom"];
+    const orderedGroups = order
       .filter((k) => map[k]?.length > 0)
       .map((k) => ({ key: k, meta: getCategoryMeta(k), items: map[k] }));
+    const remaining = Object.keys(map)
+      .filter((k) => !order.includes(k))
+      .sort((a, b) => a.localeCompare(b))
+      .map((k) => ({ key: k, meta: getCategoryMeta(k), items: map[k] }));
+    return [...orderedGroups, ...remaining];
   }, [tmpls]);
 
   const resetEditorForm = useCallback(() => {
@@ -736,7 +880,13 @@ function TemplateListView() {
       icon: "settings",
       category: "custom",
       tagsText: "",
-      fieldsText: "[]",
+      fields: [createTemplateFieldDraft()],
+      actionKind: "task",
+      actionTaskTitle: "",
+      actionTaskDescription: "",
+      actionTaskPriority: "medium",
+      actionTaskLabelsText: "manual-flow, custom",
+      actionInstructions: "",
     });
     setEditorError("");
   }, []);
@@ -756,7 +906,17 @@ function TemplateListView() {
       icon: String(tpl?.icon || "settings"),
       category: String(tpl?.category || "custom"),
       tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
-      fieldsText: JSON.stringify(Array.isArray(tpl?.fields) ? tpl.fields : [], null, 2),
+      fields: Array.isArray(tpl?.fields) && tpl.fields.length > 0
+        ? tpl.fields.map((field) => createTemplateFieldDraft(field))
+        : [createTemplateFieldDraft()],
+      actionKind: String(tpl?.action?.kind || "task"),
+      actionTaskTitle: String(tpl?.action?.task?.title || ""),
+      actionTaskDescription: String(tpl?.action?.task?.description || ""),
+      actionTaskPriority: String(tpl?.action?.task?.priority || "medium"),
+      actionTaskLabelsText: Array.isArray(tpl?.action?.task?.labels)
+        ? tpl.action.task.labels.join(", ")
+        : "manual-flow, custom",
+      actionInstructions: String(tpl?.action?.instructions || ""),
     });
     setEditorError("");
     setEditorOpen(true);
@@ -771,7 +931,15 @@ function TemplateListView() {
       icon: String(tpl?.icon || "settings"),
       category: String(tpl?.category || "custom"),
       tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
-      fieldsText: JSON.stringify(Array.isArray(tpl?.fields) ? tpl.fields : [], null, 2),
+      fields: Array.isArray(tpl?.fields) && tpl.fields.length > 0
+        ? tpl.fields.map((field) => createTemplateFieldDraft(field))
+        : [createTemplateFieldDraft()],
+      actionKind: "task",
+      actionTaskTitle: "",
+      actionTaskDescription: "",
+      actionTaskPriority: "medium",
+      actionTaskLabelsText: "manual-flow, custom",
+      actionInstructions: "",
     });
     setEditorError("");
     setEditorOpen(true);
@@ -794,18 +962,32 @@ function TemplateListView() {
       throw new Error("ID is required");
     }
 
-    let fields;
-    try {
-      fields = JSON.parse(String(form.fieldsText || "[]"));
-    } catch {
-      throw new Error("Fields JSON is invalid");
-    }
-    if (!Array.isArray(fields)) throw new Error("Fields must be a JSON array");
+    const fields = normalizeTemplateFieldsForSave(Array.isArray(form.fields) ? form.fields : []);
+    if (fields.length === 0) throw new Error("Add at least one valid field (id + label)");
 
     const tags = String(form.tagsText || "")
       .split(",")
       .map((tag) => tag.trim())
       .filter(Boolean);
+
+    const actionKind = String(form.actionKind || "task");
+    const action = actionKind === "instructions"
+      ? {
+        kind: "instructions",
+        instructions: String(form.actionInstructions || "").trim(),
+      }
+      : {
+        kind: "task",
+        task: {
+          title: String(form.actionTaskTitle || "").trim(),
+          description: String(form.actionTaskDescription || "").trim(),
+          priority: String(form.actionTaskPriority || "medium").trim() || "medium",
+          labels: String(form.actionTaskLabelsText || "")
+            .split(",")
+            .map((label) => label.trim())
+            .filter(Boolean),
+        },
+      };
 
     return {
       id: id || undefined,
@@ -815,6 +997,7 @@ function TemplateListView() {
       category,
       tags,
       fields,
+      action,
       builtin: false,
     };
   }, [editorMode, form]);
@@ -824,14 +1007,7 @@ function TemplateListView() {
     setEditorSaving(true);
     try {
       const payload = parseEditorPayload();
-      if (editorMode === "install") {
-        const installed = await installManualTemplate(payload.id || payload.name);
-        if (!installed) {
-          await saveManualTemplate(payload);
-        }
-      } else {
-        await saveManualTemplate(payload);
-      }
+      await saveManualTemplate(payload);
       setEditorOpen(false);
       loadTemplates().catch(() => {});
     } catch (err) {
@@ -993,17 +1169,222 @@ function TemplateListView() {
               fullWidth
             />
 
-            <${TextField}
-              label="Fields (JSON array)"
-              size="small"
-              value=${form.fieldsText}
-              onChange=${(e) => setForm((prev) => ({ ...prev, fieldsText: e.target.value }))}
-              fullWidth
-              multiline
-              minRows=${8}
-              maxRows=${16}
-              sx=${{ "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.82rem" } }}
-            />
+            <${Divider} />
+            <${Stack} direction="row" justifyContent="space-between" alignItems="center">
+              <${Typography} variant="subtitle2">Template Fields</${Typography}>
+              <${Button}
+                size="small"
+                variant="outlined"
+                onClick=${() => setForm((prev) => ({ ...prev, fields: [...(prev.fields || []), createTemplateFieldDraft()] }))}
+                sx=${{ textTransform: "none" }}
+              >
+                Add Field
+              </${Button}>
+            </${Stack}>
+
+            ${(form.fields || []).map((field, index) => html`
+              <${Paper} key=${`field-${index}`} variant="outlined" sx=${{ p: 1.5 }}>
+                <${Stack} direction="row" spacing=${1} sx=${{ mb: 1 }}>
+                  <${TextField}
+                    label="Field ID"
+                    size="small"
+                    value=${field.id || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, id: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  <${TextField}
+                    label="Label"
+                    size="small"
+                    value=${field.label || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, label: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  <${FormControl} size="small" sx=${{ minWidth: 140 }}>
+                    <${InputLabel}>Type</${InputLabel}>
+                    <${Select}
+                      label="Type"
+                      value=${field.type || "text"}
+                      onChange=${(e) => setForm((prev) => ({
+                        ...prev,
+                        fields: (prev.fields || []).map((f, idx) => idx === index
+                          ? {
+                            ...f,
+                            type: e.target.value,
+                            options: e.target.value === "select" ? (Array.isArray(f.options) ? f.options : []) : [],
+                          }
+                          : f),
+                      }))}
+                    >
+                      ${TEMPLATE_FIELD_TYPES.map((type) => html`<${MenuItem} key=${type} value=${type}>${type}</${MenuItem}>`)}
+                    </${Select}>
+                  </${FormControl}>
+                </${Stack}>
+
+                <${Stack} direction="row" spacing=${1} sx=${{ mb: 1 }}>
+                  <${TextField}
+                    label="Placeholder"
+                    size="small"
+                    value=${field.placeholder || ""}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, placeholder: e.target.value } : f),
+                    }))}
+                    sx=${{ flex: 1 }}
+                  />
+                  ${field.type === "toggle"
+                    ? html`<${FormControlLabel}
+                        control=${html`<${Switch}
+                          checked=${!!field.defaultValue}
+                          onChange=${(e) => setForm((prev) => ({
+                            ...prev,
+                            fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, defaultValue: e.target.checked } : f),
+                          }))}
+                          size="small"
+                        />`}
+                        label="Default On"
+                      />`
+                    : html`<${TextField}
+                        label="Default Value"
+                        size="small"
+                        type=${field.type === "number" ? "number" : "text"}
+                        value=${field.defaultValue == null ? "" : String(field.defaultValue)}
+                        onChange=${(e) => setForm((prev) => ({
+                          ...prev,
+                          fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, defaultValue: e.target.value } : f),
+                        }))}
+                        sx=${{ flex: 1 }}
+                      />`}
+                  <${FormControlLabel}
+                    control=${html`<${Switch}
+                      checked=${field.required === true}
+                      onChange=${(e) => setForm((prev) => ({
+                        ...prev,
+                        fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, required: e.target.checked } : f),
+                      }))}
+                      size="small"
+                    />`}
+                    label="Required"
+                  />
+                </${Stack}>
+
+                <${TextField}
+                  label="Help Text"
+                  size="small"
+                  value=${field.helpText || ""}
+                  onChange=${(e) => setForm((prev) => ({
+                    ...prev,
+                    fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, helpText: e.target.value } : f),
+                  }))}
+                  fullWidth
+                  sx=${{ mb: field.type === "select" ? 1 : 0 }}
+                />
+
+                ${field.type === "select" && html`
+                  <${TextField}
+                    label="Options (one per line: value=Label)"
+                    size="small"
+                    multiline
+                    minRows=${3}
+                    value=${formatTemplateSelectOptions(field.options || [])}
+                    onChange=${(e) => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).map((f, idx) => idx === index ? { ...f, options: parseTemplateSelectOptions(e.target.value) } : f),
+                    }))}
+                    fullWidth
+                    sx=${{ mt: 1 }}
+                  />
+                `}
+
+                <${Stack} direction="row" justifyContent="flex-end" sx=${{ mt: 1 }}>
+                  <${Button}
+                    size="small"
+                    color="error"
+                    variant="text"
+                    disabled=${(form.fields || []).length <= 1}
+                    onClick=${() => setForm((prev) => ({
+                      ...prev,
+                      fields: (prev.fields || []).filter((_f, idx) => idx !== index),
+                    }))}
+                    sx=${{ textTransform: "none" }}
+                  >
+                    Remove Field
+                  </${Button}>
+                </${Stack}>
+              </${Paper}>
+            `)}
+
+            <${Divider} />
+            <${Typography} variant="subtitle2">Template Action</${Typography}>
+            <${FormControl} size="small" fullWidth>
+              <${InputLabel}>Action Kind</${InputLabel}>
+              <${Select}
+                label="Action Kind"
+                value=${form.actionKind || "task"}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionKind: e.target.value }))}
+              >
+                <${MenuItem} value="task">Dispatch Task</${MenuItem}>
+                <${MenuItem} value="instructions">Instructions-only</${MenuItem}>
+              </${Select}>
+            </${FormControl}>
+
+            ${(form.actionKind || "task") === "task" ? html`
+              <${TextField}
+                label="Task Title Template"
+                size="small"
+                value=${form.actionTaskTitle || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskTitle: e.target.value }))}
+                helperText="Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+              <${TextField}
+                label="Task Description Template"
+                size="small"
+                multiline
+                minRows=${4}
+                value=${form.actionTaskDescription || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskDescription: e.target.value }))}
+                helperText="Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+              <${Stack} direction="row" spacing=${1.5}>
+                <${FormControl} size="small" sx=${{ flex: 1 }}>
+                  <${InputLabel}>Priority</${InputLabel}>
+                  <${Select}
+                    label="Priority"
+                    value=${form.actionTaskPriority || "medium"}
+                    onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskPriority: e.target.value }))}
+                  >
+                    <${MenuItem} value="low">low</${MenuItem}>
+                    <${MenuItem} value="medium">medium</${MenuItem}>
+                    <${MenuItem} value="high">high</${MenuItem}>
+                  </${Select}>
+                </${FormControl}>
+                <${TextField}
+                  label="Task Labels (comma-separated)"
+                  size="small"
+                  value=${form.actionTaskLabelsText || ""}
+                  onChange=${(e) => setForm((prev) => ({ ...prev, actionTaskLabelsText: e.target.value }))}
+                  sx=${{ flex: 2 }}
+                />
+              </${Stack}>
+            ` : html`
+              <${TextField}
+                label="Instructions"
+                size="small"
+                multiline
+                minRows=${4}
+                value=${form.actionInstructions || ""}
+                onChange=${(e) => setForm((prev) => ({ ...prev, actionInstructions: e.target.value }))}
+                helperText="Returned when no task is dispatched. Supports placeholders like {{fieldId}}"
+                fullWidth
+              />
+            `}
           </${Stack}>
         </${DialogContent}>
         <${DialogActions}>
@@ -1313,7 +1694,7 @@ async function resolveManualRunForDispatch(result) {
 function WfTemplateCard({ template, onClick }) {
   const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
   const varCount = (template.variables || []).length;
-  const hasBackEdges = (template.tags || []).some((t) => t === "back-edge" || t === "convergence");
+  const capabilityChips = getTemplateCapabilities(template);
 
   return html`
     <${Card}
@@ -1375,6 +1756,15 @@ function WfTemplateCard({ template, onClick }) {
             sx=${{ fontSize: "10px", height: "20px" }}
             variant="outlined"
           />
+          ${capabilityChips.map((entry) => html`
+            <${Chip}
+              key=${entry.key}
+              label=${`${entry.label} ${entry.symbol}${entry.count > 1 ? ` ×${entry.count}` : ""}`}
+              size="small"
+              sx=${{ fontSize: "10px", height: "20px" }}
+              variant="outlined"
+            />
+          `)}
           ${template.trigger === "trigger.manual" && html`
             <${Chip} label="Manual" size="small" color="primary"
               sx=${{ fontSize: "10px", height: "20px" }} variant="outlined" />
@@ -1404,6 +1794,9 @@ function WfLaunchForm({ template, onBack }) {
     return requiredCount > 0 ? "quick" : "advanced";
   });
   const [expanded, setExpanded] = useState(() => descriptors.length <= 5);
+  const [executionOptions, setExecutionOptions] = useState({ waitForCompletion: false });
+  const [payloadOverride, setPayloadOverride] = useState("");
+  const [payloadOverrideDirty, setPayloadOverrideDirty] = useState(false);
 
   const catMeta = WF_CATEGORY_META[template.category] || WF_CATEGORY_META.custom;
 
@@ -1483,11 +1876,72 @@ function WfLaunchForm({ template, onBack }) {
     return payload;
   }, [descriptors, formValues]);
 
+  const defaultLaunchRequest = useMemo(() => {
+    let variables = {};
+    try {
+      variables = buildLaunchPayload();
+    } catch {
+      variables = {};
+    }
+    return {
+      variables,
+      waitForCompletion: executionOptions.waitForCompletion === true,
+    };
+  }, [buildLaunchPayload, executionOptions.waitForCompletion]);
+
+  useEffect(() => {
+    if (payloadOverrideDirty) return;
+    setPayloadOverride(safePrettyJson(defaultLaunchRequest));
+  }, [defaultLaunchRequest, payloadOverrideDirty]);
+
+  const payloadOverrideError = useMemo(() => {
+    if (!payloadOverrideDirty || launchMode !== "advanced") return "";
+    const raw = String(payloadOverride || "").trim();
+    if (!raw) return "";
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return "Advanced launch payload must be a JSON object.";
+      }
+      if ("variables" in parsed && (typeof parsed.variables !== "object" || parsed.variables == null || Array.isArray(parsed.variables))) {
+        return "When provided, 'variables' must be a JSON object.";
+      }
+      return "";
+    } catch {
+      return "Advanced launch payload JSON is invalid.";
+    }
+  }, [launchMode, payloadOverride, payloadOverrideDirty]);
+
   const handleLaunch = useCallback(async () => {
     if (!canLaunch) return;
+    if (payloadOverrideError) return;
     haptic();
-    const payload = buildLaunchPayload();
-    const launchResult = await launchWorkflowTemplate(template.id, payload);
+    let launchRequest = {
+      variables: buildLaunchPayload(),
+      waitForCompletion: executionOptions.waitForCompletion === true,
+    };
+
+    if (launchMode === "advanced") {
+      const raw = String(payloadOverride || "").trim();
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          if (parsed.variables && typeof parsed.variables === "object" && !Array.isArray(parsed.variables)) {
+            launchRequest = {
+              ...launchRequest,
+              ...parsed,
+            };
+          } else {
+            launchRequest = {
+              ...launchRequest,
+              variables: parsed,
+            };
+          }
+        }
+      }
+    }
+
+    const launchResult = await launchWorkflowTemplate(template.id, launchRequest);
     if (launchResult?.accepted) {
       const matchedRun = await resolveManualRunForDispatch(launchResult);
       if (matchedRun?.runId) {
@@ -1498,7 +1952,7 @@ function WfLaunchForm({ template, onBack }) {
         };
       }
     }
-  }, [buildLaunchPayload, canLaunch, template.id]);
+  }, [buildLaunchPayload, canLaunch, executionOptions.waitForCompletion, launchMode, payloadOverride, payloadOverrideError, template.id]);
 
   const handleReset = useCallback(() => {
     const defaults = {};
@@ -1507,6 +1961,8 @@ function WfLaunchForm({ template, onBack }) {
     }
     setFormValues(defaults);
     setLaunchMode(requiredVars.length > 0 ? "quick" : "advanced");
+    setExecutionOptions({ waitForCompletion: false });
+    setPayloadOverrideDirty(false);
   }, [descriptors, requiredVars.length]);
 
   const handleOpenRunHistory = useCallback(async (runId = null) => {
@@ -1613,6 +2069,11 @@ function WfLaunchForm({ template, onBack }) {
             Invalid JSON in: ${validation.invalid.join(", ")}
           </${Alert}>
         `}
+        ${payloadOverrideError && html`
+          <${Alert} severity="error" sx=${{ mb: 2 }}>
+            ${payloadOverrideError}
+          </${Alert}>
+        `}
 
         ${launchMode === "quick" && html`
           ${quickVars.map((v) => html`
@@ -1700,6 +2161,55 @@ function WfLaunchForm({ template, onBack }) {
               Show ${optionalVars.length} optional parameters...
             </${Button}>
           `}
+
+          <${Divider} sx=${{ my: 2 }} />
+
+          <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+            Runtime execution options
+          </${Typography}>
+          <${FormControlLabel}
+            control=${html`<${Switch}
+              checked=${!!executionOptions.waitForCompletion}
+              onChange=${(e) => {
+                setExecutionOptions((prev) => ({ ...prev, waitForCompletion: e.target.checked }));
+                setPayloadOverrideDirty(false);
+              }}
+              size="small"
+            />`}
+            label="Wait for completion (sync mode)"
+            sx=${{ mb: 1 }}
+          />
+
+          <${Typography} variant="caption" color="text.secondary" sx=${{ display: "block", mb: 1 }}>
+            Advanced launch payload (editable JSON)
+          </${Typography}>
+          <${TextField}
+            fullWidth
+            size="small"
+            multiline
+            minRows=${8}
+            maxRows=${16}
+            value=${payloadOverride}
+            onChange=${(e) => {
+              setPayloadOverride(e.target.value);
+              setPayloadOverrideDirty(true);
+            }}
+            helperText=${payloadOverrideDirty
+              ? "You are editing custom JSON. Must be an object; use { variables: {...}, waitForCompletion: true|false } or provide variables object directly."
+              : "Auto-generated from form values. Edit to fine-tune launch behavior."}
+            sx=${{ mb: 1.5, "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.8rem" } }}
+          />
+          <${Button}
+            size="small"
+            variant="text"
+            sx=${{ textTransform: "none", mb: 1 }}
+            onClick=${() => {
+              setPayloadOverride(safePrettyJson(defaultLaunchRequest));
+              setPayloadOverrideDirty(false);
+            }}
+          >
+            Reset payload to current form values
+          </${Button}>
         `}
 
         <${Divider} sx=${{ my: 2.5 }} />
@@ -1714,7 +2224,7 @@ function WfLaunchForm({ template, onBack }) {
           <${Button}
             variant="contained"
             onClick=${handleLaunch}
-            disabled=${!canLaunch}
+            disabled=${!canLaunch || !!payloadOverrideError}
             startIcon=${wfLaunching.value
               ? html`<${CircularProgress} size=${16} color="inherit" />`
               : html`<span class="icon-inline">${resolveIcon("play")}</span>`}
@@ -1961,6 +2471,18 @@ function WfLauncherView() {
         Launch any automatic workflow with custom parameters.
         Select a workflow, configure its variables, and trigger a run — no need to edit the workflow definition.
       </${Typography}>
+
+      <${Stack} direction="row" spacing=${0.75} flexWrap="wrap" useFlexGap sx=${{ mb: 2 }}>
+        ${WF_CAPABILITY_META.map((entry) => html`
+          <${Chip}
+            key=${entry.key}
+            size="small"
+            variant="outlined"
+            label=${`${entry.label} ${entry.symbol}`}
+            sx=${{ fontSize: "10px", height: "20px" }}
+          />
+        `)}
+      </${Stack}>
 
       <!-- Search + category filter bar -->
       <${Stack} direction="row" spacing=${1.5} alignItems="center" sx=${{ mb: 3 }}>
