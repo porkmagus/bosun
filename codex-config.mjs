@@ -1693,17 +1693,36 @@ function formatTomlArrayEscaped(values) {
 }
 
 function toWindowsNamespacePath(pathValue) {
-  if (process.platform !== "win32") return null;
   const value = String(pathValue || "").trim();
   if (!value) return null;
   if (value.startsWith("\\\\?\\")) return value;
-  if (/^[a-zA-Z]:\\/.test(value)) return `\\\\?\\${value}`;
+  const drivePath = toWindowsDrivePath(value);
+  if (drivePath) return `\\\\?\\${drivePath}`;
+  return null;
+}
+
+function toWindowsDrivePath(pathValue) {
+  const raw = String(pathValue || "").trim();
+  if (!raw) return null;
+  let value = raw.replace(/\//g, "\\");
+  if (value.startsWith("\\\\?\\")) value = value.slice(4);
+  if (/^[a-zA-Z]:\\/.test(value)) return value;
+  const wslMatch = raw.match(/^\/mnt\/([a-zA-Z])\/(.+)$/);
+  if (wslMatch) {
+    const drive = wslMatch[1].toUpperCase();
+    const rest = wslMatch[2].replace(/\//g, "\\");
+    return `${drive}:\\${rest}`;
+  }
   return null;
 }
 
 function normalizeTrustedPathForCompare(pathValue) {
   const raw = String(pathValue || "").trim();
   if (!raw) return "";
+  const windowsDrivePath = toWindowsDrivePath(raw);
+  if (windowsDrivePath) {
+    return windowsDrivePath.replace(/[\\/]+$/, "").toLowerCase();
+  }
   if (process.platform === "win32") {
     let normalized = raw.replace(/\//g, "\\");
     if (normalized.startsWith("\\\\?\\UNC\\")) {
