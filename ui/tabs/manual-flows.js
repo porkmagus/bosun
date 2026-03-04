@@ -140,6 +140,61 @@ async function executeFlow(templateId, formValues) {
   }
 }
 
+async function saveManualTemplate(template) {
+  try {
+    const data = await apiFetch("/api/manual-flows/templates/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(template),
+    });
+    if (data?.template) {
+      showToast("Template saved", "success");
+      loadTemplates().catch(() => {});
+      return data.template;
+    }
+  } catch (err) {
+    showToast("Failed to save template: " + err.message, "error");
+  }
+  return null;
+}
+
+async function deleteManualTemplate(templateId) {
+  const safeId = String(templateId || "").trim();
+  if (!safeId) return false;
+  try {
+    await apiFetch(`/api/manual-flows/templates/${encodeURIComponent(safeId)}`, {
+      method: "DELETE",
+    });
+    showToast("Template deleted", "success");
+    loadTemplates().catch(() => {});
+    if (selectedTemplate.value?.id === safeId) selectedTemplate.value = null;
+    return true;
+  } catch (err) {
+    showToast("Failed to delete template: " + err.message, "error");
+    return false;
+  }
+}
+
+async function installManualTemplate(templateId) {
+  const safeId = String(templateId || "").trim();
+  if (!safeId) return null;
+  try {
+    const data = await apiFetch("/api/manual-flows/templates/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId: safeId }),
+    });
+    if (data?.template) {
+      showToast("Template installed", "success");
+      loadTemplates().catch(() => {});
+      return data.template;
+    }
+  } catch (err) {
+    showToast("Failed to install template: " + err.message, "error");
+  }
+  return null;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Workflow Launcher API Helpers
  * ═══════════════════════════════════════════════════════════════ */
@@ -312,8 +367,14 @@ function FormField({ field, value, onChange }) {
  *  Template Card
  * ═══════════════════════════════════════════════════════════════ */
 
-function TemplateCard({ template, onClick }) {
+function TemplateCard({ template, onClick, onInstall, onEdit, onDelete }) {
   const catMeta = getCategoryMeta(template.category);
+  const isBuiltin = template.builtin === true;
+
+  const stop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
 
   return html`
     <${Card}
@@ -342,7 +403,7 @@ function TemplateCard({ template, onClick }) {
           ${template.description}
         </${Typography}>
 
-        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" useFlexGap>
+        <${Stack} direction="row" spacing=${0.5} flexWrap="wrap" useFlexGap sx=${{ mb: 1.25 }}>
           <${Chip}
             label=${catMeta.label}
             size="small"
@@ -358,6 +419,41 @@ function TemplateCard({ template, onClick }) {
           ${(template.tags || []).slice(0, 3).map(
             (tag) => html`<${Chip} key=${tag} label=${tag} size="small" sx=${{ fontSize: "10px", height: "20px" }} variant="outlined" />`,
           )}
+        </${Stack}>
+
+        <${Stack} direction="row" spacing=${0.75} justifyContent="flex-end">
+          ${isBuiltin && html`
+            <${Button}
+              size="small"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onInstall?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("download")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Install
+            </${Button}>
+          `}
+          ${!isBuiltin && html`
+            <${Button}
+              size="small"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onEdit?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("edit")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Edit
+            </${Button}>
+            <${Button}
+              size="small"
+              color="error"
+              variant="outlined"
+              onClick=${(e) => { stop(e); onDelete?.(template); }}
+              startIcon=${html`<span class="icon-inline">${resolveIcon("trash")}</span>`}
+              sx=${{ textTransform: "none", minWidth: 0, px: 1 }}
+            >
+              Delete
+            </${Button}>
+          `}
         </${Stack}>
       </${CardContent}>
     </${Card}>
@@ -601,6 +697,23 @@ function RunHistoryList({ onBack }) {
 function TemplateListView() {
   const tmpls = flowTemplates.value || [];
 
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorMode, setEditorMode] = useState("create");
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [form, setForm] = useState({
+    id: "",
+    name: "",
+    description: "",
+    icon: "settings",
+    category: "custom",
+    tagsText: "",
+    fieldsText: "[]",
+  });
+
   // Group by category
   const groups = useMemo(() => {
     const map = {};
@@ -615,12 +728,162 @@ function TemplateListView() {
       .map((k) => ({ key: k, meta: getCategoryMeta(k), items: map[k] }));
   }, [tmpls]);
 
+  const resetEditorForm = useCallback(() => {
+    setForm({
+      id: "",
+      name: "",
+      description: "",
+      icon: "settings",
+      category: "custom",
+      tagsText: "",
+      fieldsText: "[]",
+    });
+    setEditorError("");
+  }, []);
+
+  const openCreate = useCallback(() => {
+    setEditorMode("create");
+    resetEditorForm();
+    setEditorOpen(true);
+  }, [resetEditorForm]);
+
+  const openEdit = useCallback((tpl) => {
+    setEditorMode("edit");
+    setForm({
+      id: String(tpl?.id || ""),
+      name: String(tpl?.name || ""),
+      description: String(tpl?.description || ""),
+      icon: String(tpl?.icon || "settings"),
+      category: String(tpl?.category || "custom"),
+      tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
+      fieldsText: JSON.stringify(Array.isArray(tpl?.fields) ? tpl.fields : [], null, 2),
+    });
+    setEditorError("");
+    setEditorOpen(true);
+  }, []);
+
+  const openInstall = useCallback((tpl) => {
+    setEditorMode("install");
+    setForm({
+      id: String(tpl?.id || "template") + "-custom",
+      name: String(tpl?.name || "Template") + " (Installed)",
+      description: String(tpl?.description || ""),
+      icon: String(tpl?.icon || "settings"),
+      category: String(tpl?.category || "custom"),
+      tagsText: Array.isArray(tpl?.tags) ? tpl.tags.join(", ") : "",
+      fieldsText: JSON.stringify(Array.isArray(tpl?.fields) ? tpl.fields : [], null, 2),
+    });
+    setEditorError("");
+    setEditorOpen(true);
+  }, []);
+
+  const openDelete = useCallback((tpl) => {
+    setDeleteTarget(tpl || null);
+    setDeleteOpen(true);
+  }, []);
+
+  const parseEditorPayload = useCallback(() => {
+    const id = String(form.id || "").trim();
+    const name = String(form.name || "").trim();
+    const description = String(form.description || "").trim();
+    const icon = String(form.icon || "").trim() || "settings";
+    const category = String(form.category || "").trim() || "custom";
+
+    if (!name) throw new Error("Name is required");
+    if ((editorMode === "edit" || editorMode === "install") && !id) {
+      throw new Error("ID is required");
+    }
+
+    let fields;
+    try {
+      fields = JSON.parse(String(form.fieldsText || "[]"));
+    } catch {
+      throw new Error("Fields JSON is invalid");
+    }
+    if (!Array.isArray(fields)) throw new Error("Fields must be a JSON array");
+
+    const tags = String(form.tagsText || "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
+    return {
+      id: id || undefined,
+      name,
+      description,
+      icon,
+      category,
+      tags,
+      fields,
+      builtin: false,
+    };
+  }, [editorMode, form]);
+
+  const saveTemplateFromEditor = useCallback(async () => {
+    setEditorError("");
+    setEditorSaving(true);
+    try {
+      const payload = parseEditorPayload();
+      if (editorMode === "install") {
+        const installed = await installManualTemplate(payload.id || payload.name);
+        if (!installed) {
+          await saveManualTemplate(payload);
+        }
+      } else {
+        await saveManualTemplate(payload);
+      }
+      setEditorOpen(false);
+      loadTemplates().catch(() => {});
+    } catch (err) {
+      setEditorError(err?.message || "Failed to save template");
+    } finally {
+      setEditorSaving(false);
+    }
+  }, [editorMode, parseEditorPayload]);
+
+  const deleteTemplateFromDialog = useCallback(async () => {
+    const templateId = String(deleteTarget?.id || "").trim();
+    if (!templateId) return;
+    setDeleteBusy(true);
+    try {
+      const deleted = await deleteManualTemplate(templateId);
+      if (!deleted) return;
+      setDeleteOpen(false);
+      setDeleteTarget(null);
+      loadTemplates().catch(() => {});
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteTarget]);
+
   return html`
     <div>
-      <${Typography} variant="body2" color="text.secondary" sx=${{ mb: 3, maxWidth: "600px" }}>
-        One-shot transformations for your codebase. Pick a template, fill the form, and trigger.
-        Each flow runs once — annotate, generate skills, prepare configs, and more.
-      </${Typography}>
+      <${Stack} direction="row" justifyContent="space-between" alignItems="center" sx=${{ mb: 2 }}>
+        <${Typography} variant="body2" color="text.secondary" sx=${{ maxWidth: "600px" }}>
+          One-shot transformations for your codebase. Pick a template, fill the form, and trigger.
+          Each flow runs once — annotate, generate skills, prepare configs, and more.
+        </${Typography}>
+        <${Stack} direction="row" spacing=${1}>
+          <${Button}
+            variant="contained"
+            size="small"
+            onClick=${openCreate}
+            startIcon=${html`<span class="icon-inline">${resolveIcon("plus")}</span>`}
+            sx=${{ textTransform: "none", flexShrink: 0, ml: 2 }}
+          >
+            Create Template
+          </${Button}>
+          <${Button}
+            variant="outlined"
+            size="small"
+            onClick=${() => { viewMode.value = "runs"; }}
+            startIcon=${html`<span class="icon-inline">${resolveIcon("chart")}</span>`}
+            sx=${{ textTransform: "none", flexShrink: 0 }}
+          >
+            Run History
+          </${Button}>
+        </${Stack}>
+      </${Stack}>
 
       <!-- Template grid grouped by category -->
       ${groups.map(
@@ -642,6 +905,9 @@ function TemplateListView() {
                   <${TemplateCard}
                     key=${t.id}
                     template=${t}
+                    onInstall=${openInstall}
+                    onEdit=${openEdit}
+                    onDelete=${openDelete}
                     onClick=${() => {
                       selectedTemplate.value = t;
                       viewMode.value = "form";
@@ -664,6 +930,121 @@ function TemplateListView() {
           </${Typography}>
         </${Paper}>
       `}
+
+      <${Dialog} open=${editorOpen} onClose=${() => !editorSaving && setEditorOpen(false)} maxWidth="md" fullWidth>
+        <${DialogTitle}>
+          ${editorMode === "create" ? "Create Template" : editorMode === "edit" ? "Edit Template" : "Install Template"}
+        </${DialogTitle}>
+        <${DialogContent} dividers>
+          ${editorError && html`<${Alert} severity="error" sx=${{ mb: 2 }}>${editorError}</${Alert}>`}
+
+          <${Stack} spacing=${1.5}>
+            <${TextField}
+              label="Template ID"
+              size="small"
+              value=${form.id}
+              onChange=${(e) => setForm((prev) => ({ ...prev, id: e.target.value }))}
+              helperText="Unique ID for user template."
+              fullWidth
+            />
+            <${TextField}
+              label="Name"
+              size="small"
+              value=${form.name}
+              onChange=${(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              fullWidth
+              required
+            />
+            <${TextField}
+              label="Description"
+              size="small"
+              value=${form.description}
+              onChange=${(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+              fullWidth
+            />
+            <${Stack} direction="row" spacing=${1.5}>
+              <${TextField}
+                label="Icon"
+                size="small"
+                value=${form.icon}
+                onChange=${(e) => setForm((prev) => ({ ...prev, icon: e.target.value }))}
+                sx=${{ flex: 1 }}
+              />
+              <${FormControl} size="small" sx=${{ flex: 1 }}>
+                <${InputLabel}>Category</${InputLabel}>
+                <${Select}
+                  label="Category"
+                  value=${form.category}
+                  onChange=${(e) => setForm((prev) => ({ ...prev, category: e.target.value }))}
+                >
+                  <${MenuItem} value="audit">Audit</${MenuItem}>
+                  <${MenuItem} value="generate">Generate</${MenuItem}>
+                  <${MenuItem} value="transform">Transform</${MenuItem}>
+                  <${MenuItem} value="custom">Custom</${MenuItem}>
+                </${Select}>
+              </${FormControl}>
+            </${Stack}>
+
+            <${TextField}
+              label="Tags (comma-separated)"
+              size="small"
+              value=${form.tagsText}
+              onChange=${(e) => setForm((prev) => ({ ...prev, tagsText: e.target.value }))}
+              fullWidth
+            />
+
+            <${TextField}
+              label="Fields (JSON array)"
+              size="small"
+              value=${form.fieldsText}
+              onChange=${(e) => setForm((prev) => ({ ...prev, fieldsText: e.target.value }))}
+              fullWidth
+              multiline
+              minRows=${8}
+              maxRows=${16}
+              sx=${{ "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: "0.82rem" } }}
+            />
+          </${Stack}>
+        </${DialogContent}>
+        <${DialogActions}>
+          <${Button} onClick=${() => setEditorOpen(false)} disabled=${editorSaving} sx=${{ textTransform: "none" }}>
+            Cancel
+          </${Button}>
+          <${Button}
+            variant="contained"
+            onClick=${saveTemplateFromEditor}
+            disabled=${editorSaving}
+            startIcon=${editorSaving ? html`<${CircularProgress} size=${16} color="inherit" />` : html`<span class="icon-inline">${resolveIcon("save")}</span>`}
+            sx=${{ textTransform: "none" }}
+          >
+            ${editorSaving ? "Saving…" : editorMode === "create" ? "Create" : editorMode === "install" ? "Install" : "Save"}
+          </${Button}>
+        </${DialogActions}>
+      </${Dialog}>
+
+      <${Dialog} open=${deleteOpen} onClose=${() => !deleteBusy && setDeleteOpen(false)} maxWidth="xs" fullWidth>
+        <${DialogTitle}>Delete Template</${DialogTitle}>
+        <${DialogContent} dividers>
+          <${Typography} variant="body2">
+            Delete <strong>${deleteTarget?.name || "this template"}</strong>? This cannot be undone.
+          </${Typography}>
+        </${DialogContent}>
+        <${DialogActions}>
+          <${Button} onClick=${() => setDeleteOpen(false)} disabled=${deleteBusy} sx=${{ textTransform: "none" }}>
+            Cancel
+          </${Button}>
+          <${Button}
+            color="error"
+            variant="contained"
+            onClick=${deleteTemplateFromDialog}
+            disabled=${deleteBusy}
+            startIcon=${deleteBusy ? html`<${CircularProgress} size=${16} color="inherit" />` : html`<span class="icon-inline">${resolveIcon("trash")}</span>`}
+            sx=${{ textTransform: "none" }}
+          >
+            ${deleteBusy ? "Deleting…" : "Delete"}
+          </${Button}>
+        </${DialogActions}>
+      </${Dialog}>
     </div>
   `;
 }

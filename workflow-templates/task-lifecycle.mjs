@@ -251,6 +251,12 @@ export const TASK_LIFECYCLE_TEMPLATE = {
       taskTitle: "{{taskTitle}}",
     }, { x: 400, y: 1870 }),
 
+    node("join-outcomes", "flow.join", "Join Outcome Paths", {
+      mode: "all",
+      sourceNodeIds: ["log-success", "set-todo-push-failed", "set-todo-cooldown", "set-todo-stolen"],
+      includeSkipped: true,
+    }, { x: 200, y: 2560 }),
+
     // ── CLEANUP: Release worktree (all paths converge) ───────────────────
     node("release-worktree", "action.release_worktree", "Release Worktree", {
       worktreePath: "{{worktreePath}}",
@@ -322,23 +328,24 @@ export const TASK_LIFECYCLE_TEMPLATE = {
     edge("push-ok", "create-pr", { condition: "$output?.result === true", port: "yes" }),
     edge("create-pr", "set-inreview"),
     edge("set-inreview", "log-success"),
-    edge("log-success", "release-worktree"),
+    edge("log-success", "join-outcomes"),
 
     // Push failed path
     edge("push-ok", "set-todo-push-failed", { condition: "$output?.result !== true", port: "no" }),
-    edge("set-todo-push-failed", "release-worktree"),
+    edge("set-todo-push-failed", "join-outcomes"),
 
     // No-commits path
     edge("has-commits", "log-no-commits", { condition: "$output?.result !== true", port: "no" }),
     edge("log-no-commits", "set-todo-cooldown"),
-    edge("set-todo-cooldown", "release-worktree"),
+    edge("set-todo-cooldown", "join-outcomes"),
 
     // Claim stolen path
     edge("claim-stolen", "log-claim-stolen", { condition: "$output?.result === true", port: "yes" }),
     edge("log-claim-stolen", "set-todo-stolen"),
-    edge("set-todo-stolen", "release-worktree"),
+    edge("set-todo-stolen", "join-outcomes"),
 
     // Shared cleanup (all outcome paths converge here)
+    edge("join-outcomes", "release-worktree"),
     edge("release-worktree", "release-claim"),
     edge("release-claim", "release-slot"),
 
@@ -516,6 +523,12 @@ export const VE_ORCHESTRATOR_LITE_TEMPLATE = {
       status: "todo",
     }, { x: 480, y: 1740 }),
 
+    node("join-outcomes", "flow.join", "Join Outcome Paths", {
+      mode: "all",
+      sourceNodeIds: ["set-inreview", "set-todo"],
+      includeSkipped: true,
+    }, { x: 300, y: 2040 }),
+
     // ── Cleanup: release worktree ────────────────────────────────────────
     node("release-worktree", "action.release_worktree", "Release WT", {
       worktreePath: "{{worktreePath}}",
@@ -562,13 +575,14 @@ export const VE_ORCHESTRATOR_LITE_TEMPLATE = {
     edge("has-commits", "push", { condition: "$output?.result === true", port: "yes" }),
     edge("push", "pr"),
     edge("pr", "set-inreview"),
-    edge("set-inreview", "release-worktree"),
+    edge("set-inreview", "join-outcomes"),
 
     // No commits path
     edge("has-commits", "set-todo", { condition: "$output?.result !== true", port: "no" }),
-    edge("set-todo", "release-worktree"),
+    edge("set-todo", "join-outcomes"),
 
     // Shared cleanup
+    edge("join-outcomes", "release-worktree"),
     edge("release-worktree", "release-claim"),
     edge("release-claim", "release-slot"),
 

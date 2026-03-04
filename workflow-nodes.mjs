@@ -4100,6 +4100,145 @@ registerNodeType("flow.gate", {
   },
 });
 
+registerNodeType("flow.join", {
+  describe: () => "Explicitly join multiple branches before continuing",
+  schema: {
+    type: "object",
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["all", "any", "quorum"],
+        default: "all",
+        description: "Join condition. 'all' waits for all listed sources, 'any' waits for one, 'quorum' waits for N",
+      },
+      sourceNodeIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional explicit source node IDs to evaluate at join time",
+      },
+      quorum: {
+        type: "number",
+        description: "Required count when mode='quorum'",
+      },
+      includeSkipped: {
+        type: "boolean",
+        default: true,
+        description: "Whether skipped sources count as arrived",
+      },
+      failOnUnmet: {
+        type: "boolean",
+        default: false,
+        description: "Throw when join criteria are not met",
+      },
+    },
+  },
+  async execute(node, ctx) {
+    const mode = String(ctx.resolve(node.config?.mode || "all") || "all").toLowerCase();
+    const includeSkipped = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.includeSkipped ?? true, ctx),
+      true,
+    );
+    const failOnUnmet = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.failOnUnmet ?? false, ctx),
+      false,
+    );
+
+    const configuredSourceIds = Array.isArray(node.config?.sourceNodeIds)
+      ? node.config.sourceNodeIds
+      : [];
+    const sourceNodeIds = configuredSourceIds
+      .map((value) => String(resolveWorkflowNodeValue(value, ctx) || "").trim())
+      .filter(Boolean);
+
+    const statuses = sourceNodeIds.map((sourceNodeId) => {
+      const status = typeof ctx.getNodeStatus === "function"
+        ? String(ctx.getNodeStatus(sourceNodeId) || "pending").toLowerCase()
+        : "pending";
+      return { sourceNodeId, status };
+    });
+
+    const arrivedStates = includeSkipped
+      ? new Set(["completed", "failed", "skipped"])
+      : new Set(["completed", "failed"]);
+    const arrived = statuses.filter((entry) => arrivedStates.has(entry.status));
+    const pendingSources = statuses
+      .filter((entry) => !arrivedStates.has(entry.status))
+      .map((entry) => entry.sourceNodeId);
+
+    const resolvedQuorumRaw = Number(ctx.resolve(node.config?.quorum ?? 0));
+    const resolvedQuorum = Number.isFinite(resolvedQuorumRaw)
+      ? Math.max(1, Math.trunc(resolvedQuorumRaw))
+      : Math.max(1, sourceNodeIds.length || 1);
+
+    let joined = true;
+    if (sourceNodeIds.length > 0) {
+      if (mode === "any") {
+        joined = arrived.length > 0;
+      } else if (mode === "quorum") {
+        joined = arrived.length >= Math.min(resolvedQuorum, sourceNodeIds.length);
+      } else {
+        joined = pendingSources.length === 0;
+      }
+    }
+
+    if (!joined && failOnUnmet) {
+      throw new Error(
+        `Join criteria not met for node ${node.id}: mode=${mode}, pending=${pendingSources.join(",") || "none"}`,
+      );
+    }
+
+    return {
+      joined,
+      mode,
+      sourceCount: sourceNodeIds.length,
+      arrivedCount: arrived.length,
+      pendingSources,
+      quorum: mode === "quorum" ? resolvedQuorum : undefined,
+      includeSkipped,
+    };
+  },
+});
+
+registerNodeType("flow.end", {
+  describe: () => "End the workflow immediately with explicit terminal status",
+  schema: {
+    type: "object",
+    properties: {
+      status: {
+        type: "string",
+        enum: ["completed", "failed"],
+        default: "completed",
+      },
+      message: { type: "string", description: "Terminal reason or summary" },
+      output: {
+        description: "Optional structured output persisted on workflow terminal metadata",
+      },
+    },
+  },
+  async execute(node, ctx) {
+    const rawStatus = String(ctx.resolve(node.config?.status || "completed") || "completed")
+      .trim()
+      .toLowerCase();
+    const status = rawStatus === "failed" ? "failed" : "completed";
+    const message = String(ctx.resolve(node.config?.message || "") || "").trim();
+    const output = resolveWorkflowNodeValue(node.config?.output, ctx);
+
+    if (message) {
+      const level = status === "failed" ? "warn" : "info";
+      ctx.log(node.id, `Workflow end requested (${status}): ${message}`, level);
+    }
+
+    return {
+      _workflowEnd: true,
+      status,
+      message,
+      output,
+      nodeId: node.id,
+      timestamp: Date.now(),
+    };
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  LOOP / ITERATION
 // ═══════════════════════════════════════════════════════════════════════════

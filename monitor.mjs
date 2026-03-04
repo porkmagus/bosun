@@ -377,6 +377,7 @@ let workflowAutomationReadyLogged = false;
 let workflowAutomationUnavailableLogged = false;
 let workflowConflictResolverPausedLogged = false;
 let workflowTaskReconcilePausedLogged = false;
+let workflowMaintenanceSweepPausedLogged = false;
 
 /**
  * Cache of module names that have an enabled workflow replacement.
@@ -11936,9 +11937,6 @@ process.on("SIGINT", async () => {
     vkLogStream.stop();
     vkLogStream = null;
   }
-  if (prCleanupDaemon) {
-    prCleanupDaemon.stop();
-  }
   stopAutoUpdateLoop();
   stopAgentAlertTailer();
   stopAgentWorkAnalyzer();
@@ -12307,9 +12305,18 @@ try {
 }
 
 // ── Startup sweep: kill stale processes, prune worktrees ──
-runGuarded("startup-maintenance-sweep", () =>
-  runMaintenanceSweep({ repoRoot }),
-);
+runGuarded("startup-maintenance-sweep", () => {
+  if (isWorkflowReplacingModule("maintenance.mjs")) {
+    if (!workflowMaintenanceSweepPausedLogged) {
+      console.log(
+        "[monitor] skipping legacy maintenance sweep — handled by workflow replacement",
+      );
+      workflowMaintenanceSweepPausedLogged = true;
+    }
+    return;
+  }
+  return runMaintenanceSweep({ repoRoot });
+});
 
 safeSetInterval("flush-error-queue", () => flushErrorQueue(), 60 * 1000);
 
@@ -12318,7 +12325,15 @@ safeSetInterval("flush-error-queue", () => flushErrorQueue(), 60 * 1000);
 // the workflow engine handle it via trigger.schedule evaluation.
 const maintenanceIntervalMs = 5 * 60 * 1000;
 safeSetInterval("maintenance-sweep", () => {
-  if (isWorkflowReplacingModule("maintenance.mjs")) return;
+  if (isWorkflowReplacingModule("maintenance.mjs")) {
+    if (!workflowMaintenanceSweepPausedLogged) {
+      console.log(
+        "[monitor] skipping legacy maintenance sweep — handled by workflow replacement",
+      );
+      workflowMaintenanceSweepPausedLogged = true;
+    }
+    return;
+  }
   const childPid = currentChild ? currentChild.pid : undefined;
   return runMaintenanceSweep({ repoRoot, childPid });
 }, maintenanceIntervalMs);
@@ -13293,7 +13308,6 @@ injectMonitorFunctions({
   getReviewAgentEnabled: () => isReviewAgentEnabled(),
   getSyncEngine: () => syncEngine,
   getErrorDetector: () => errorDetector,
-  getPrCleanupDaemon: () => null,
   getWorkspaceMonitor: () => workspaceMonitor,
   getTaskStoreStats: () => {
     try {
