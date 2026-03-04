@@ -1,6 +1,6 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
 import * as nodeCrypto from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, chmodSync, createWriteStream, createReadStream, writeFileSync, unlinkSync, watchFile, unwatchFile } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, chmodSync, createWriteStream, createReadStream, writeFileSync, unlinkSync, watchFile, unwatchFile, readdirSync } from "node:fs";
 import { open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { get as httpsGet } from "node:https";
@@ -321,20 +321,69 @@ function ensureLibraryInitialized(rootDir = repoRoot) {
   try {
     const manifestPath = getManifestPath(normalizedRoot);
     const manifest = loadManifest(normalizedRoot);
+    let rebuilt = false;
     if (!existsSync(manifestPath) || !Array.isArray(manifest?.entries) || manifest.entries.length === 0) {
       const result = initLibrary(normalizedRoot);
       const count = result?.manifest?.entries?.length ?? 0;
       if (count > 0) {
         console.log(`[ui] Library initialized (${count} entries) at ${normalizedRoot}.`);
       }
+      rebuilt = true;
     }
-    const scaffoldResult = scaffoldAgentProfiles(normalizedRoot);
-    if (Array.isArray(scaffoldResult?.written) && scaffoldResult.written.length > 0) {
-      rebuildManifest(normalizedRoot);
+    if (!rebuilt) {
+      const scaffoldResult = scaffoldAgentProfiles(normalizedRoot);
+      if (Array.isArray(scaffoldResult?.written) && scaffoldResult.written.length > 0) {
+        rebuildManifest(normalizedRoot);
+        rebuilt = true;
+      }
+    }
+    if (!rebuilt) {
+      const latestManifest = loadManifest(normalizedRoot);
+      if (libraryManifestHasFilesystemDrift(normalizedRoot, latestManifest)) {
+        const rebuiltManifest = rebuildManifest(normalizedRoot);
+        const count = rebuiltManifest?.entries?.length ?? 0;
+        console.log(`[ui] Library manifest auto-synced (${count} entries) at ${normalizedRoot}.`);
+      }
     }
   } catch (err) {
     console.warn(`[ui] Library init failed for ${normalizedRoot}: ${err.message}`);
   }
+}
+
+const LIBRARY_FILE_LAYOUT = Object.freeze([
+  { type: "prompt", dir: ".bosun/agents", ext: ".md" },
+  { type: "skill", dir: ".bosun/skills", ext: ".md" },
+  { type: "agent", dir: ".bosun/profiles", ext: ".json" },
+  { type: "mcp", dir: ".bosun/mcp-servers", ext: ".json" },
+]);
+
+function listLibraryFilesByType(rootDir, relDir, ext) {
+  const dir = resolve(rootDir, relDir);
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir)
+      .filter((name) => typeof name === "string" && name.endsWith(ext));
+  } catch {
+    return [];
+  }
+}
+
+function libraryManifestHasFilesystemDrift(rootDir, manifest) {
+  const entries = Array.isArray(manifest?.entries) ? manifest.entries : [];
+  for (const layout of LIBRARY_FILE_LAYOUT) {
+    const manifestFiles = new Set(
+      entries
+        .filter((entry) => entry?.type === layout.type)
+        .map((entry) => String(entry?.filename || "").trim())
+        .filter(Boolean),
+    );
+    const diskFiles = listLibraryFilesByType(rootDir, layout.dir, layout.ext);
+    if (diskFiles.length !== manifestFiles.size) return true;
+    for (const name of diskFiles) {
+      if (!manifestFiles.has(name)) return true;
+    }
+  }
+  return false;
 }
 
 const LIBRARY_STORAGE_SCOPES = Object.freeze(["repo", "workspace", "global"]);
