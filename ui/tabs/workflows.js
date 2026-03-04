@@ -167,9 +167,9 @@ async function executeWorkflow(id, customVars = {}) {
  */
 async function openExecuteDialog(workflowId) {
   try {
-    const [detail, wsData] = await Promise.all([
+    const [detail, reposData] = await Promise.all([
       apiFetch(`/api/workflows/${workflowId}`),
-      apiFetch("/api/workspaces").catch(() => null),
+      apiFetch("/api/workspaces/active/repos").catch(() => null),
     ]);
     const wf = detail?.workflow;
     if (!wf) { showToast("Workflow not found", "error"); return; }
@@ -181,10 +181,7 @@ async function openExecuteDialog(workflowId) {
     executeDialogWaitSync.value = false;
 
     // Extract repos from active workspace
-    const workspaces = Array.isArray(wsData?.data) ? wsData.data : [];
-    const activeId = wsData?.activeId || "";
-    const activeWs = workspaces.find((ws) => ws.id === activeId) || workspaces[0];
-    const repos = Array.isArray(activeWs?.repos) ? activeWs.repos : [];
+    const repos = Array.isArray(reposData?.repos) ? reposData.repos : [];
     executeDialogRepos.value = repos;
     // Pre-select primary repo or first repo
     const primary = repos.find((r) => r.primary);
