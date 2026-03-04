@@ -26,10 +26,6 @@ import {
 } from "./stream-resilience.mjs";
 import {
   discoverProviders,
-  getConnectedProviders,
-  getProviderModels,
-  isProviderConnected,
-  invalidateCache as invalidateProviderCache,
 } from "./opencode-providers.mjs";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -958,4 +954,9 @@ export async function discoverOpencodeProviders(opts = {}) {
 /**
  * Get connected (credential-configured) providers.
  */
-export { getConnectedProviders, getProviderModels, isProviderConnected, invalidateProviderCache };
+export {
+  getConnectedProviders,
+  getProviderModels,
+  isProviderConnected,
+  invalidateCache as invalidateProviderCache,
+} from "./opencode-providers.mjs";
