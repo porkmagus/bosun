@@ -722,13 +722,15 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
     session?.status === "active" || session?.status === "running";
   const resumeLabel =
     session?.status === "archived" ? "Unarchive" : "Resume Session";
-  const sessionWorkspace = resolveSessionWorkspaceHint(session, "active");
   const sessionPath = useCallback(
-    (action = "") =>
-      buildSessionApiPath(sessionId, action, {
-        workspace: sessionWorkspace,
-      }),
-    [sessionId, sessionWorkspace],
+    (action = "") => {
+      const currentSession =
+        (sessionsData.peek() || []).find((entry) => entry?.id === sessionId) || session;
+      return buildSessionApiPath(sessionId, action, {
+        workspace: resolveSessionWorkspaceHint(currentSession, "active"),
+      });
+    },
+    [sessionId, session],
   );
 
   /* Memoize the filter key list so filteredMessages memoization works properly.
@@ -1707,4 +1709,3 @@ export function ChatView({ sessionId, readOnly = false, embedded = false }) {
     </${Box}>
   `;
 }
-
