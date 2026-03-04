@@ -9631,6 +9631,42 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (path === "/api/manual-flows/templates/install" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const templateId = String(body?.templateId || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const source = mf.getFlowTemplate(templateId, ctx.workspaceDir);
+      if (!source) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      if (source.builtin !== true) {
+        jsonResponse(res, 409, { ok: false, error: "Template is already user-installed" });
+        return;
+      }
+
+      const saved = mf.saveFlowTemplate(
+        {
+          ...source,
+          id: String(body?.targetId || `${templateId}-custom`).trim() || undefined,
+          name: String(body?.name || source.name || "").trim() || source.name,
+        },
+        ctx.workspaceDir,
+      );
+      jsonResponse(res, 201, { ok: true, template: saved });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
   if (path === "/api/manual-flows/execute" && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
@@ -9659,6 +9695,38 @@ async function handleApi(req, res, url) {
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const runs = mf.listRuns(ctx.workspaceDir, { templateId, status, limit });
       jsonResponse(res, 200, { ok: true, runs });
+    } catch (err) {
+      jsonResponse(res, 500, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (path.startsWith("/api/manual-flows/templates/") && req.method === "DELETE") {
+    try {
+      const templateId = decodeURIComponent(path.replace("/api/manual-flows/templates/", "").split("/")[0] || "").trim();
+      if (!templateId) {
+        jsonResponse(res, 400, { ok: false, error: "templateId is required" });
+        return;
+      }
+
+      const mf = await import("./manual-flows.mjs");
+      const ctx = resolveActiveWorkspaceExecutionContext();
+      const existing = mf.getFlowTemplate(templateId, ctx.workspaceDir);
+      if (!existing) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      if (existing.builtin === true) {
+        jsonResponse(res, 403, { ok: false, error: "Built-in templates cannot be deleted" });
+        return;
+      }
+
+      const deleted = mf.deleteFlowTemplate(templateId, ctx.workspaceDir);
+      if (!deleted) {
+        jsonResponse(res, 404, { ok: false, error: "Template not found" });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, deleted: templateId });
     } catch (err) {
       jsonResponse(res, 500, { ok: false, error: err.message });
     }

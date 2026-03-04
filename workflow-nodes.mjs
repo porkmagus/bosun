@@ -4239,6 +4239,120 @@ registerNodeType("flow.end", {
   },
 });
 
+const UNIVERSAL_FLOW_NODE = {
+  describe: () => "Run a universal reusable subworkflow (alias of execute-workflow pattern)",
+  schema: {
+    type: "object",
+    properties: {
+      workflowId: { type: "string", description: "Shared subworkflow to run" },
+      mode: { type: "string", enum: ["sync", "dispatch"], default: "sync" },
+      input: { type: "object", additionalProperties: true },
+      inheritContext: { type: "boolean", default: true },
+      outputVariable: { type: "string" },
+      allowRecursive: { type: "boolean", default: false },
+    },
+    required: ["workflowId"],
+  },
+  async execute(node, ctx, engine) {
+    const workflowId = String(ctx.resolve(node.config?.workflowId || "") || "").trim();
+    const mode = String(ctx.resolve(node.config?.mode || "sync") || "sync")
+      .trim()
+      .toLowerCase();
+    const outputVariable = String(ctx.resolve(node.config?.outputVariable || "") || "").trim();
+    const inheritContext = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.inheritContext ?? true, ctx),
+      true,
+    );
+    const allowRecursive = parseBooleanSetting(
+      resolveWorkflowNodeValue(node.config?.allowRecursive ?? false, ctx),
+      false,
+    );
+
+    if (!workflowId) {
+      throw new Error("flow.universal: 'workflowId' is required");
+    }
+    if (!engine || typeof engine.execute !== "function") {
+      throw new Error("flow.universal: workflow engine is not available");
+    }
+    if (mode !== "sync" && mode !== "dispatch") {
+      throw new Error(`flow.universal: invalid mode \"${mode}\"`);
+    }
+
+    const resolvedInputConfig = resolveWorkflowNodeValue(node.config?.input ?? {}, ctx);
+    if (
+      resolvedInputConfig != null &&
+      (typeof resolvedInputConfig !== "object" || Array.isArray(resolvedInputConfig))
+    ) {
+      throw new Error("flow.universal: 'input' must resolve to an object");
+    }
+    const configuredInput = resolvedInputConfig && typeof resolvedInputConfig === "object"
+      ? resolvedInputConfig
+      : {};
+
+    const sourceData = ctx.data && typeof ctx.data === "object" ? ctx.data : {};
+    const inheritedInput = inheritContext ? { ...sourceData } : {};
+
+    const parentWorkflowId = String(ctx.data?._workflowId || "").trim();
+    const workflowStack = normalizeWorkflowStack(ctx.data?._workflowStack);
+    if (parentWorkflowId && workflowStack[workflowStack.length - 1] !== parentWorkflowId) {
+      workflowStack.push(parentWorkflowId);
+    }
+    if (!allowRecursive && workflowStack.includes(workflowId)) {
+      const cyclePath = [...workflowStack, workflowId].join(" -> ");
+      throw new Error(
+        `flow.universal: recursive workflow call blocked (${cyclePath}). Set allowRecursive=true to override.`,
+      );
+    }
+
+    const childInput = {
+      ...inheritedInput,
+      ...configuredInput,
+      _workflowStack: [...workflowStack, workflowId],
+    };
+
+    if (mode === "dispatch") {
+      ctx.log(node.id, `Dispatching universal workflow \"${workflowId}\"`);
+      const dispatched = engine.execute(workflowId, childInput);
+      dispatched
+        .then((childCtx) => {
+          const status = childCtx?.errors?.length ? "failed" : "completed";
+          ctx.log(node.id, `Dispatched universal workflow \"${workflowId}\" finished with status=${status}`);
+        })
+        .catch((err) => {
+          ctx.log(node.id, `Dispatched universal workflow \"${workflowId}\" failed: ${err.message}`, "error");
+        });
+
+      const output = {
+        success: true,
+        queued: true,
+        mode: "dispatch",
+        workflowId,
+        parentRunId: ctx.id,
+      };
+      if (outputVariable) ctx.data[outputVariable] = output;
+      return output;
+    }
+
+    ctx.log(node.id, `Executing universal workflow \"${workflowId}\" (sync)`);
+    const childCtx = await engine.execute(workflowId, childInput);
+    const errorCount = Array.isArray(childCtx?.errors) ? childCtx.errors.length : 0;
+    const output = {
+      success: errorCount === 0,
+      queued: false,
+      mode: "sync",
+      workflowId,
+      runId: childCtx?.id || null,
+      status: errorCount > 0 ? "failed" : "completed",
+      errorCount,
+    };
+    if (outputVariable) ctx.data[outputVariable] = output;
+    return output;
+  },
+};
+
+registerNodeType("flow.universal", UNIVERSAL_FLOW_NODE);
+registerNodeType("flow.universial", UNIVERSAL_FLOW_NODE);
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  LOOP / ITERATION
 // ═══════════════════════════════════════════════════════════════════════════

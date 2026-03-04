@@ -372,7 +372,7 @@ describe("workflow chaining", () => {
 
     const chainNode = t.nodes.find((n) => n.id === "chain-archiver");
     expect(chainNode, "Finalization Guard should have a chain-archiver node").toBeDefined();
-    expect(chainNode.type).toBe("action.execute_workflow");
+    expect(chainNode.type).toBe("flow.universal");
     expect(chainNode.config.workflowId).toBe("template-task-archiver");
     expect(chainNode.config.mode).toBe("dispatch");
 
@@ -406,7 +406,10 @@ describe("workflow chaining", () => {
     const chainingNodes = [];
     for (const t of WORKFLOW_TEMPLATES) {
       for (const n of t.nodes) {
-        if (n.type === "action.execute_workflow" && n.config?.workflowId) {
+        if (
+          ["action.execute_workflow", "flow.universal"].includes(n.type)
+          && n.config?.workflowId
+        ) {
           chainingNodes.push({ templateId: t.id, nodeId: n.id, target: n.config.workflowId });
         }
       }

@@ -735,6 +735,108 @@ describe("New node types", () => {
     expect(result.gateOpened).toBe(true);
     expect(result.waited).toBe(50);
   });
+
+  it("flow.join reports joined=true when all listed sources are completed/skipped", async () => {
+    const handler = getNodeType("flow.join");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({});
+    ctx.setNodeStatus("branch-a", NodeStatus.COMPLETED);
+    ctx.setNodeStatus("branch-b", NodeStatus.SKIPPED);
+    const node = {
+      id: "join-1",
+      type: "flow.join",
+      config: {
+        mode: "all",
+        sourceNodeIds: ["branch-a", "branch-b"],
+      },
+    };
+    const result = await handler.execute(node, ctx);
+    expect(result.joined).toBe(true);
+    expect(result.arrivedCount).toBe(2);
+    expect(result.pendingSources).toEqual([]);
+  });
+
+  it("flow.end returns explicit terminal signal", async () => {
+    const handler = getNodeType("flow.end");
+    expect(handler).toBeDefined();
+
+    const ctx = new WorkflowContext({ taskId: "TASK-1" });
+    const node = {
+      id: "end-1",
+      type: "flow.end",
+      config: {
+        status: "failed",
+        message: "Stop now",
+        output: { taskId: "{{taskId}}" },
+      },
+    };
+    const result = await handler.execute(node, ctx);
+    expect(result._workflowEnd).toBe(true);
+    expect(result.status).toBe("failed");
+    expect(result.output).toEqual({ taskId: "TASK-1" });
+  });
+
+  it("flow.universal and flow.universial dispatch to child workflows", async () => {
+    const canonical = getNodeType("flow.universal");
+    const typoAlias = getNodeType("flow.universial");
+    expect(canonical).toBeDefined();
+    expect(typoAlias).toBeDefined();
+
+    const ctx = new WorkflowContext({ _workflowId: "parent-wf", taskId: "TASK-42" });
+    const mockEngine = {
+      execute: vi.fn(async () => new WorkflowContext({ ok: true })),
+      get: vi.fn(() => ({ id: "template-task-archiver" })),
+    };
+
+    const node = {
+      id: "universal-1",
+      type: "flow.universial",
+      config: {
+        workflowId: "template-task-archiver",
+        mode: "sync",
+        inheritContext: true,
+      },
+    };
+
+    const result = await typoAlias.execute(node, ctx, mockEngine);
+    expect(result.success).toBe(true);
+    expect(result.mode).toBe("sync");
+    expect(result.workflowId).toBe("template-task-archiver");
+    expect(mockEngine.execute).toHaveBeenCalledWith(
+      "template-task-archiver",
+      expect.objectContaining({
+        taskId: "TASK-42",
+        _workflowStack: ["parent-wf", "template-task-archiver"],
+      }),
+    );
+    expect(canonical).toBe(typoAlias);
+  });
+
+  it("flow.end hard-stops remaining nodes and marks run as failed", async () => {
+    const testEngine = makeTmpEngine();
+    const wf = makeSimpleWorkflow(
+      [
+        { id: "trigger", type: "trigger.manual", label: "Start", config: {} },
+        { id: "end-fail", type: "flow.end", label: "End", config: { status: "failed", message: "fail fast" } },
+        { id: "after-end", type: "notify.log", label: "Should Skip", config: { message: "must not run" } },
+      ],
+      [
+        { id: "e1", source: "trigger", target: "end-fail" },
+        { id: "e2", source: "end-fail", target: "after-end" },
+      ],
+      { id: "wf-end-hard-stop", name: "WF End Hard Stop" },
+    );
+
+    testEngine.save(wf);
+    const ctx = await testEngine.execute(wf.id, {});
+    expect(ctx.getNodeStatus("end-fail")).toBe(NodeStatus.COMPLETED);
+    expect(ctx.getNodeStatus("after-end")).toBe(NodeStatus.SKIPPED);
+    expect(ctx.data._workflowTerminalStatus).toBe(WorkflowStatus.FAILED);
+
+    const detail = testEngine.getRunDetail(ctx.id);
+    expect(detail?.status).toBe(WorkflowStatus.FAILED);
+  });
 });
 
 describe("action.execute_workflow", () => {

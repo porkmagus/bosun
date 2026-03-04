@@ -857,7 +857,7 @@ describe("workflow-templates E2E execution", () => {
       const tpl = getTemplate("template-task-finalization-guard");
       const chainNode = tpl.nodes.find((n) => n.id === "chain-archiver");
       expect(chainNode).toBeDefined();
-      expect(chainNode.type).toBe("action.execute_workflow");
+      expect(chainNode.type).toBe("flow.universal");
       expect(chainNode.config.workflowId).toBe("template-task-archiver");
     });
   });
@@ -1017,7 +1017,7 @@ describe("workflow-templates E2E execution", () => {
 
     it("task-finalization-guard chains to task-archiver (dispatch mode)", () => {
       const tpl = getTemplate("template-task-finalization-guard");
-      const chainNode = tpl.nodes.find((n) => n.type === "action.execute_workflow");
+      const chainNode = tpl.nodes.find((n) => n.id === "chain-archiver");
       expect(chainNode).toBeDefined();
       expect(chainNode.config.workflowId).toBe("template-task-archiver");
       expect(chainNode.config.mode).toBe("dispatch");
@@ -1043,7 +1043,7 @@ describe("workflow-templates E2E execution", () => {
       const chainTargets = new Set();
       for (const tpl of WORKFLOW_TEMPLATES) {
         for (const node of tpl.nodes) {
-          if (node.type === "action.execute_workflow") {
+          if (["action.execute_workflow", "flow.universal"].includes(node.type)) {
             const target = node.config?.workflowId;
             if (target && !target.includes("{{")) {
               chainTargets.add(target);

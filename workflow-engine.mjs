@@ -1098,9 +1098,14 @@ export class WorkflowEngine extends EventEmitter {
         });
         return { ...summary, ...recomputed, detail };
       }
-      const status = Array.isArray(detail?.errors) && detail.errors.length > 0
+      const terminalRaw = String(detail?.data?._workflowTerminalStatus || "")
+        .trim()
+        .toLowerCase();
+      const status = terminalRaw === WorkflowStatus.FAILED || terminalRaw === "error"
         ? WorkflowStatus.FAILED
-        : WorkflowStatus.COMPLETED;
+        : (Array.isArray(detail?.errors) && detail.errors.length > 0
+            ? WorkflowStatus.FAILED
+            : WorkflowStatus.COMPLETED);
       const computed = this._buildSummaryFromDetail({
         runId: normalizedRunId,
         workflowId: detail?.data?._workflowId || null,
@@ -2089,7 +2094,7 @@ export class WorkflowEngine extends EventEmitter {
         runId,
         workflowId,
         workflowName: workflow?.name || ctx.data?._workflowName || workflowId,
-        status: ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED,
+        status: this._resolveWorkflowStatus(ctx),
         detail,
       });
 

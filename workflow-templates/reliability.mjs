@@ -490,7 +490,7 @@ export const TASK_FINALIZATION_GUARD_TEMPLATE = {
       level: "info",
     }, { x: 240, y: 1040 }),
 
-    node("chain-archiver", "action.execute_workflow", "Queue Archival", {
+    node("chain-archiver", "flow.universal", "Queue Archival", {
       workflowId: "template-task-archiver",
       mode: "dispatch",
       input: "({taskId: $data?.taskId, taskTitle: $data?.taskTitle, completedAt: new Date().toISOString(), taskJson: JSON.stringify($data?.task || {id: $data?.taskId, title: $data?.taskTitle})})",
