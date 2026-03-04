@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { signal, computed } from "@preact/signals";
 import { apiFetch, onWsMessage } from "../modules/api.js";
+import { buildSessionApiPath, resolveSessionWorkspaceHint } from "../modules/session-api.js";
 import { formatRelative, truncate } from "../modules/utils.js";
 import { resolveIcon } from "../modules/icon-utils.js";
 import {
@@ -36,9 +37,12 @@ let _wsListenerReady = false;
 let _lastLoadFilter = {};
 
 function sessionPath(id, action = "") {
-  const safeId = encodeURIComponent(String(id || "").trim());
-  if (!safeId) return "";
-  return action ? `/api/sessions/${safeId}/${action}` : `/api/sessions/${safeId}`;
+  const session = (sessionsData.peek() || []).find((entry) => entry?.id === id) || null;
+  const workspace = resolveSessionWorkspaceHint(
+    session,
+    String(_lastLoadFilter?.workspace || "").trim() || "active",
+  );
+  return buildSessionApiPath(id, action, { workspace });
 }
 
 /* ─── Data loaders ─── */
@@ -66,18 +70,30 @@ export async function loadSessions(filter = {}) {
 
 export async function loadSessionMessages(id, opts = {}) {
   try {
-    let url = sessionPath(id);
-    if (!url) return { ok: false, error: "invalid" };
+    const baseUrl = sessionPath(id);
+    if (!baseUrl) return { ok: false, error: "invalid" };
     const requestedLimit = opts.limit != null ? Number(opts.limit) : DEFAULT_SESSION_PAGE_SIZE;
     const limit =
       Number.isFinite(requestedLimit) && requestedLimit > 0
         ? Math.min(Math.floor(requestedLimit), MAX_SESSION_PAGE_SIZE)
         : DEFAULT_SESSION_PAGE_SIZE;
-    const params = new URLSearchParams();
-    params.set("limit", String(limit));
-    if (opts.offset != null) params.set("offset", String(opts.offset));
-    const qs = params.toString();
-    if (qs) url += `?${qs}`;
+    const url = (() => {
+      try {
+        const parsed = new URL(baseUrl, globalThis.location?.origin || "http://localhost");
+        parsed.searchParams.set("limit", String(limit));
+        if (opts.offset != null) {
+          parsed.searchParams.set("offset", String(opts.offset));
+        }
+        return `${parsed.pathname}${parsed.search}`;
+      } catch {
+        const join = baseUrl.includes("?") ? "&" : "?";
+        const parts = [`limit=${encodeURIComponent(String(limit))}`];
+        if (opts.offset != null) {
+          parts.push(`offset=${encodeURIComponent(String(opts.offset))}`);
+        }
+        return `${baseUrl}${join}${parts.join("&")}`;
+      }
+    })();
     const res = await apiFetch(url, { _silent: true });
     if (res?.session) {
       const normalized = dedupeMessages(res.session.messages || []);
@@ -438,7 +454,7 @@ const STATUS_COLOR_MAP = {
   archived: "var(--text-hint)",
 };
 
-const SESSION_VIEW_FILTER = Object.freeze({
+export const SESSION_VIEW_FILTER = Object.freeze({
   all: "all",
   active: "active",
   historic: "historic",
@@ -476,6 +492,7 @@ function SwipeableSessionItem({
   onArchive,
   onDelete,
   onResume,
+  onContextMenu,
   showActions,
   onToggleActions,
 }) {
@@ -561,6 +578,12 @@ function SwipeableSessionItem({
     setOffset(0);
   }
 
+  function handleRename(e) {
+    e.stopPropagation();
+    if (onStartRename) onStartRename(s.id);
+    setOffset(0);
+  }
+
   return html`
     <${Box}
       key=${s.id}
@@ -589,6 +612,15 @@ function SwipeableSessionItem({
               </${Tooltip}>
             `
           : html`
+              <${Tooltip} title="Edit title">
+                <${IconButton}
+                  size="small"
+                  color="default"
+                  onClick=${handleRename}
+                >
+                  ${resolveIcon(":edit:")}
+                </${IconButton}>
+              </${Tooltip}>
               <${Tooltip} title="Archive session">
                 <${IconButton}
                   size="small"
@@ -631,6 +663,13 @@ function SwipeableSessionItem({
             if (Math.abs(offset) > 10) return;
             if (showActions === s.id) { onToggleActions(null); setOffset(0); return; }
             onSelect(s.id);
+          }}
+          onContextMenu=${(e) => {
+            if (typeof onContextMenu === "function") {
+              e.preventDefault();
+              e.stopPropagation();
+              onContextMenu(s.id, e);
+            }
           }}
           sx=${{
             borderRadius: 1, opacity: isArchived ? 0.6 : 1,
@@ -708,7 +747,7 @@ function SwipeableSessionItem({
                 }}
                 sx=${{ p: 0.25 }}
               >
-                ⋯
+                ${resolveIcon(":menu:")}
               </${IconButton}>
             </${Tooltip}>
           </${Stack}>
@@ -733,6 +772,7 @@ export function SessionList({
 }) {
   const [search, setSearch] = useState("");
   const [revealedActions, setRevealedActions] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
   const [uncontrolledSessionView, setUncontrolledSessionView] = useState(
     normalizeSessionViewFilter(sessionView),
   );
@@ -817,6 +857,7 @@ export function SessionList({
     (id) => {
       selectedSessionId.value = id;
       setRevealedActions(null);
+      setContextMenu(null);
       if (onSelect) onSelect(id);
     },
     [onSelect],
@@ -836,23 +877,91 @@ export function SessionList({
 
   const handleArchive = useCallback(async (id) => {
     setRevealedActions(null);
+    setContextMenu(null);
     await archiveSession(id);
   }, []);
 
   const handleDelete = useCallback(async (id) => {
     setRevealedActions(null);
+    setContextMenu(null);
     await deleteSession(id);
   }, []);
 
   const handleResume = useCallback(async (id) => {
     setRevealedActions(null);
+    setContextMenu(null);
     await resumeSession(id);
   }, []);
+
+  const handleContextMenu = useCallback((id, event) => {
+    setRevealedActions(null);
+    setContextMenu({
+      id,
+      mouseX: event.clientX + 2,
+      mouseY: event.clientY - 6,
+    });
+  }, []);
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const handleContextAction = useCallback(async (action) => {
+    const targetId = contextMenu?.id;
+    if (!targetId) {
+      closeContextMenu();
+      return;
+    }
+    const currentSession = (sessionsData.value || []).find((item) => item.id === targetId);
+    if (action === "open") {
+      handleSelect(targetId);
+      closeContextMenu();
+      return;
+    }
+    if (action === "rename") {
+      closeContextMenu();
+      if (typeof onStartRename === "function") onStartRename(targetId);
+      return;
+    }
+    if (action === "archive") {
+      closeContextMenu();
+      if (currentSession?.status === "archived") {
+        await handleResume(targetId);
+      } else {
+        await handleArchive(targetId);
+      }
+      return;
+    }
+    if (action === "delete") {
+      closeContextMenu();
+      await handleDelete(targetId);
+      return;
+    }
+    if (action === "copy-id") {
+      closeContextMenu();
+      try {
+        await navigator.clipboard.writeText(String(targetId));
+      } catch {
+        /* ignore clipboard errors */
+      }
+      return;
+    }
+    closeContextMenu();
+  }, [
+    closeContextMenu,
+    contextMenu?.id,
+    handleArchive,
+    handleDelete,
+    handleResume,
+    handleSelect,
+    onStartRename,
+  ]);
 
   // Close revealed actions when clicking the list background
   const handleListClick = useCallback((e) => {
     if (e.target.closest(".session-item-wrapper")) return;
     setRevealedActions(null);
+    setContextMenu(null);
   }, []);
 
   const emptyTitle = hasSearch
@@ -885,6 +994,7 @@ export function SessionList({
         onArchive=${handleArchive}
         onDelete=${handleDelete}
         onResume=${handleResume}
+        onContextMenu=${handleContextMenu}
         showActions=${revealedActions}
         onToggleActions=${setRevealedActions}
       />
@@ -1074,6 +1184,29 @@ export function SessionList({
           </${Typography}>
         </${Box}>
       `}
+
+      <${Menu}
+        open=${Boolean(contextMenu)}
+        onClose=${closeContextMenu}
+        anchorReference="anchorPosition"
+        anchorPosition=${contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
+      >
+        <${MenuItem} onClick=${() => handleContextAction("open")}>${resolveIcon(":chat:")} Open</${MenuItem}>
+        <${MenuItem} onClick=${() => handleContextAction("rename")}>${resolveIcon(":edit:")} Edit title</${MenuItem}>
+        <${MenuItem} onClick=${() => handleContextAction("archive")}>
+          ${(() => {
+            const target = (sessionsData.value || []).find((item) => item.id === contextMenu?.id);
+            return target?.status === "archived"
+              ? html`${resolveIcon(":workflow:")} Unarchive`
+              : html`${resolveIcon(":box:")} Archive`;
+          })()}
+        </${MenuItem}>
+        <${MenuItem} onClick=${() => handleContextAction("copy-id")}>${resolveIcon(":copy:")} Copy ID</${MenuItem}>
+        <${Divider} />
+        <${MenuItem} onClick=${() => handleContextAction("delete")} sx=${{ color: "error.main" }}>
+          ${resolveIcon(":trash:")} Delete
+        </${MenuItem}>
+      </${Menu}>
     </${Paper}>
   `;
 }

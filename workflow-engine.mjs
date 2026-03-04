@@ -337,13 +337,13 @@ export class WorkflowContext {
 
     // If template is exactly one placeholder, preserve raw value type.
     // This allows numbers/booleans/objects to flow into node configs.
-    const exactMatch = template.match(/^\{\{(\w[\w.]*)\}\}$/);
+    const exactMatch = template.match(/^\{\{([A-Za-z0-9_][A-Za-z0-9_.-]*)\}\}$/);
     if (exactMatch) {
       const raw = resolvePathValue(exactMatch[1]);
       return raw != null ? raw : template;
     }
 
-    return template.replace(/\{\{(\w[\w.]*)\}\}/g, (match, path) => {
+    return template.replace(/\{\{([A-Za-z0-9_][A-Za-z0-9_.-]*)\}\}/g, (match, path) => {
       const value = resolvePathValue(path);
       return value != null ? String(value) : match;
     });
@@ -632,7 +632,7 @@ export class WorkflowEngine extends EventEmitter {
       // Execute the DAG
       await this._executeDag(def, entryNodes, adjacency, ctx, opts);
 
-      const status = ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED;
+      const status = this._resolveWorkflowStatus(ctx);
       this._activeRuns.get(runId).status = status;
       this.emit("run:end", { runId, workflowId, status, duration: Date.now() - ctx.startedAt });
     } catch (err) {
@@ -650,7 +650,7 @@ export class WorkflowEngine extends EventEmitter {
     // If the workflow failed and auto-retry is enabled, kick off the
     // escalating retry strategy asynchronously. The caller still receives the
     // original (failed) context immediately so we never block the event loop.
-    const finalStatus = ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED;
+    const finalStatus = this._resolveWorkflowStatus(ctx);
     if (finalStatus === WorkflowStatus.FAILED && !opts._isRetry) {
       const retryConfig = this._resolveAutoRetryConfig(def);
       if (retryConfig.enabled) {
@@ -765,7 +765,7 @@ export class WorkflowEngine extends EventEmitter {
       // they were pre-seeded above, so it resumes from the failed point.
       await this._executeDag(def, entryNodes, adjacency, ctx, { ...retryOpts, _isRetry: true });
 
-      const status = ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED;
+      const status = this._resolveWorkflowStatus(ctx);
       this._activeRuns.get(retryRunId).status = status;
       this.emit("run:end", {
         runId: retryRunId,
@@ -806,6 +806,22 @@ export class WorkflowEngine extends EventEmitter {
       ? Math.max(0, Math.trunc(Number(raw.cooldownMs)))
       : DEFAULT_AUTO_RETRY_COOLDOWN_MS;
     return { enabled: enabled && maxAttempts > 0, maxAttempts, cooldownMs };
+  }
+
+  _resolveWorkflowStatus(ctx) {
+    const terminalRaw = String(ctx?.data?._workflowTerminalStatus || "")
+      .trim()
+      .toLowerCase();
+    if (terminalRaw === WorkflowStatus.FAILED || terminalRaw === "error") {
+      return WorkflowStatus.FAILED;
+    }
+    if (terminalRaw === WorkflowStatus.CANCELLED) {
+      return WorkflowStatus.CANCELLED;
+    }
+    if (terminalRaw === WorkflowStatus.COMPLETED || terminalRaw === "success") {
+      return WorkflowStatus.COMPLETED;
+    }
+    return ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED;
   }
 
   /**
@@ -1082,9 +1098,14 @@ export class WorkflowEngine extends EventEmitter {
         });
         return { ...summary, ...recomputed, detail };
       }
-      const status = Array.isArray(detail?.errors) && detail.errors.length > 0
+      const terminalRaw = String(detail?.data?._workflowTerminalStatus || "")
+        .trim()
+        .toLowerCase();
+      const status = terminalRaw === WorkflowStatus.FAILED || terminalRaw === "error"
         ? WorkflowStatus.FAILED
-        : WorkflowStatus.COMPLETED;
+        : (Array.isArray(detail?.errors) && detail.errors.length > 0
+            ? WorkflowStatus.FAILED
+            : WorkflowStatus.COMPLETED);
       const computed = this._buildSummaryFromDetail({
         runId: normalizedRunId,
         workflowId: detail?.data?._workflowId || null,
@@ -1288,6 +1309,37 @@ export class WorkflowEngine extends EventEmitter {
           }
           return;
         }
+      }
+
+      // Check for explicit terminal node requests (e.g. flow.end)
+      let terminalSignal = null;
+      for (const r of results) {
+        if (r.status !== "fulfilled") continue;
+        const signal = r.value?.result;
+        if (signal && signal._workflowEnd === true) {
+          terminalSignal = signal;
+          break;
+        }
+      }
+      if (terminalSignal) {
+        const terminalStatus = String(terminalSignal.status || WorkflowStatus.COMPLETED)
+          .trim()
+          .toLowerCase();
+        ctx.data._workflowTerminalStatus = terminalStatus === WorkflowStatus.FAILED
+          ? WorkflowStatus.FAILED
+          : WorkflowStatus.COMPLETED;
+        if (terminalSignal.message) ctx.data._workflowTerminalMessage = String(terminalSignal.message);
+        if (terminalSignal.output !== undefined) ctx.data._workflowTerminalOutput = terminalSignal.output;
+        if (terminalSignal.nodeId) ctx.data._workflowTerminalNodeId = terminalSignal.nodeId;
+        ctx.data._workflowTerminalAt = Date.now();
+
+        for (const [nid] of nodeMap) {
+          if (!executed.has(nid)) {
+            ctx.setNodeStatus(nid, NodeStatus.SKIPPED);
+            executed.add(nid);
+          }
+        }
+        return;
       }
 
       // Find newly ready nodes (all incoming edges satisfied)
@@ -2042,7 +2094,7 @@ export class WorkflowEngine extends EventEmitter {
         runId,
         workflowId,
         workflowName: workflow?.name || ctx.data?._workflowName || workflowId,
-        status: ctx.errors.length > 0 ? WorkflowStatus.FAILED : WorkflowStatus.COMPLETED,
+        status: this._resolveWorkflowStatus(ctx),
         detail,
       });
 

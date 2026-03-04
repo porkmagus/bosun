@@ -53,13 +53,17 @@ describe("manual-flows", () => {
 
   describe("BUILTIN_FLOW_TEMPLATES", () => {
     it("has expected templates", () => {
-      expect(BUILTIN_FLOW_TEMPLATES.length).toBeGreaterThanOrEqual(4);
+      expect(BUILTIN_FLOW_TEMPLATES.length).toBeGreaterThanOrEqual(12);
       const ids = BUILTIN_FLOW_TEMPLATES.map((t) => t.id);
       expect(ids).toContain("codebase-annotation-audit");
       expect(ids).toContain("generate-skills");
       expect(ids).toContain("prepare-agents-md");
       expect(ids).toContain("codebase-health-check");
       expect(ids).toContain("context-index-full");
+      expect(ids).toContain("release-notes-draft");
+      expect(ids).toContain("pre-pr-readiness");
+      expect(ids).toContain("security-secret-audit");
+      expect(ids).toContain("incident-postmortem-pack");
     });
 
     it("every template has required structure", () => {
@@ -486,6 +490,86 @@ describe("manual-flows", () => {
       expect(run.status).toBe("completed");
       expect(run.result.mode).toBe("indexed");
       expect(run.result.indexedFiles).toBeGreaterThan(0);
+    });
+
+    it("executes custom template with task action placeholders", async () => {
+      saveFlowTemplate(
+        {
+          id: "custom-action-task",
+          name: "Custom Action Task",
+          description: "Custom task dispatch with templated fields",
+          category: "custom",
+          fields: [
+            { id: "scope", label: "Scope", type: "text", required: true, defaultValue: "ui" },
+          ],
+          tags: ["custom"],
+          action: {
+            kind: "task",
+            task: {
+              title: "Investigate {{scope}} in {{templateName}}",
+              description: "Template {{templateId}} requested for {{scope}}",
+              priority: "high",
+              labels: ["manual-flow", "{{scope}}"],
+            },
+          },
+        },
+        testRoot,
+      );
+
+      let createdTask = null;
+      const mockTaskManager = {
+        createTask: async (spec) => {
+          createdTask = spec;
+          return { id: "task-custom-1" };
+        },
+      };
+
+      const run = await executeFlow(
+        "custom-action-task",
+        { scope: "manual-flows" },
+        testRoot,
+        { taskManager: mockTaskManager },
+      );
+
+      expect(run.status).toBe("completed");
+      expect(run.result.mode).toBe("task-dispatched");
+      expect(run.result.action).toBe("task");
+      expect(createdTask.title).toContain("manual-flows");
+      expect(createdTask.description).toContain("custom-action-task");
+      expect(createdTask.priority).toBe("high");
+      expect(createdTask.labels).toContain("manual-flows");
+    });
+
+    it("executes custom template with instructions action", async () => {
+      saveFlowTemplate(
+        {
+          id: "custom-action-instructions",
+          name: "Custom Action Instructions",
+          description: "Custom instructions action",
+          category: "custom",
+          fields: [
+            { id: "target", label: "Target", type: "text", required: true, defaultValue: "repo" },
+          ],
+          tags: ["custom"],
+          action: {
+            kind: "instructions",
+            instructions: "Review {{target}} and summarize for {{templateName}}",
+          },
+        },
+        testRoot,
+      );
+
+      const run = await executeFlow(
+        "custom-action-instructions",
+        { target: "docs" },
+        testRoot,
+      );
+
+      expect(run.status).toBe("completed");
+      expect(run.result.mode).toBe("instructions");
+      expect(run.result.action).toBe("instructions");
+      expect(run.result.instructions).toContain("docs");
+      expect(run.result.instructions).toContain("Custom Action Instructions");
     });
   });
 });

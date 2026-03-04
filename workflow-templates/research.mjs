@@ -148,6 +148,15 @@ After the verdict, provide detailed feedback explaining your reasoning.`,
       level: "info",
     }, { x: 100, y: 680 }),
 
+    node("end-success", "flow.end", "End Research (Success)", {
+      status: "completed",
+      message: "Research workflow converged to a verified solution",
+      output: {
+        verdict: "correct",
+        problem: "{{problem}}",
+      },
+    }, { x: 100, y: 810 }),
+
     // ── MINOR → revise and re-verify ──────────────────────────────────
     node("reviser", "action.continue_session", "Revise Solution", {
       prompt: `The verifier found minor issues with your solution:
@@ -183,6 +192,8 @@ Provide the corrected solution in the same format.`,
     edge("parse-verdict", "output-result", { port: "correct" }),
     edge("parse-verdict", "reviser", { port: "minor" }),
     edge("parse-verdict", "critical-log", { port: "critical" }),
+
+    edge("output-result", "end-success"),
 
     // Back-edges for convergence loops
     // Minor revision → back to verifier (check the revised solution)
@@ -247,12 +258,22 @@ export const RESEARCH_LOOP_TEMPLATE = {
       message: "Research loop completed after {{iterate.iterations}} iteration(s). Converged: {{iterate.converged}}",
       level: "info",
     }, { x: 400, y: 400 }),
+
+    node("end", "flow.end", "End Loop", {
+      status: "completed",
+      message: "Research loop workflow completed",
+      output: {
+        converged: "{{iterate.converged}}",
+        iterations: "{{iterate.iterations}}",
+      },
+    }, { x: 400, y: 520 }),
   ],
 
   edges: [
     edge("trigger", "search"),
     edge("search", "iterate"),
     edge("iterate", "output"),
+    edge("output", "end"),
   ],
 
   metadata: {

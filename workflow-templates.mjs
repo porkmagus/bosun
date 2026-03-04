@@ -700,10 +700,49 @@ function inferVariableDescription(key, defaultValue) {
   return "";
 }
 
+const TEMPLATE_CAPABILITY_NODE_TYPES = Object.freeze({
+  branch: Object.freeze(["flow.branch"]),
+  join: Object.freeze(["flow.join"]),
+  gate: Object.freeze(["flow.gate"]),
+  universal: Object.freeze(["flow.universal", "flow.universial"]),
+  end: Object.freeze(["flow.end"]),
+});
+
+function collectTemplateCapabilities(template) {
+  const counts = {
+    branch: 0,
+    join: 0,
+    gate: 0,
+    universal: 0,
+    end: 0,
+  };
+
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+  for (const node of nodes) {
+    const nodeType = String(node?.type || "").trim().toLowerCase();
+    if (!nodeType) continue;
+    for (const [capability, types] of Object.entries(TEMPLATE_CAPABILITY_NODE_TYPES)) {
+      if (types.includes(nodeType)) counts[capability] += 1;
+    }
+  }
+
+  return {
+    capabilities: {
+      branch: counts.branch > 0,
+      join: counts.join > 0,
+      gate: counts.gate > 0,
+      universal: counts.universal > 0,
+      end: counts.end > 0,
+    },
+    capabilityCounts: counts,
+  };
+}
+
 export function listTemplates() {
   return WORKFLOW_TEMPLATES.map((t) => {
     const cat = TEMPLATE_CATEGORIES[t.category] || TEMPLATE_CATEGORIES.custom;
     const fingerprint = computeWorkflowFingerprint(t);
+    const capabilitySummary = collectTemplateCapabilities(t);
     return {
       id: t.id,
       name: t.name,
@@ -721,6 +760,8 @@ export function listTemplates() {
       recommended: t.recommended === true,
       enabled: t.enabled !== false,
       trigger: t.trigger || null,
+      capabilities: capabilitySummary.capabilities,
+      capabilityCounts: capabilitySummary.capabilityCounts,
       variables: t.variables && typeof t.variables === "object"
         ? Object.entries(t.variables).map(([key, defaultValue]) => {
             const required = defaultValue === "" || defaultValue == null;

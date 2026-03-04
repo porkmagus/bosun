@@ -591,14 +591,13 @@ describe("template-task-lifecycle", () => {
 
   it("all outcome paths converge to release-worktree → release-claim → release-slot", () => {
     const t = getTemplate("template-task-lifecycle");
-    // log-success → release-worktree
-    expect(t.edges.find((e) => e.source === "log-success" && e.target === "release-worktree")).toBeDefined();
-    // set-todo-cooldown → release-worktree
-    expect(t.edges.find((e) => e.source === "set-todo-cooldown" && e.target === "release-worktree")).toBeDefined();
-    // set-todo-stolen → release-worktree
-    expect(t.edges.find((e) => e.source === "set-todo-stolen" && e.target === "release-worktree")).toBeDefined();
-    // set-todo-push-failed → release-worktree
-    expect(t.edges.find((e) => e.source === "set-todo-push-failed" && e.target === "release-worktree")).toBeDefined();
+    // outcomes → join-outcomes
+    expect(t.edges.find((e) => e.source === "log-success" && e.target === "join-outcomes")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-todo-cooldown" && e.target === "join-outcomes")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-todo-stolen" && e.target === "join-outcomes")).toBeDefined();
+    expect(t.edges.find((e) => e.source === "set-todo-push-failed" && e.target === "join-outcomes")).toBeDefined();
+    // join-outcomes → release-worktree
+    expect(t.edges.find((e) => e.source === "join-outcomes" && e.target === "release-worktree")).toBeDefined();
     // release-worktree → release-claim → release-slot
     expect(t.edges.find((e) => e.source === "release-worktree" && e.target === "release-claim")).toBeDefined();
     expect(t.edges.find((e) => e.source === "release-claim" && e.target === "release-slot")).toBeDefined();

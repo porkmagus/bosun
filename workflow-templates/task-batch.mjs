@@ -90,6 +90,12 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
       workflowId: "{{subWorkflow}}",
     }, { x: 400, y: 440 }),
 
+    node("join-dispatch", "flow.join", "Join Dispatch Branches", {
+      mode: "all",
+      sourceNodeIds: ["dispatch-tasks"],
+      includeSkipped: true,
+    }, { x: 400, y: 505 }),
+
     // ── Record batch results ─────────────────────────────────────────────
     node("record-results", "action.set_variable", "Record Results", {
       key: "batchResult",
@@ -106,7 +112,8 @@ export const TASK_BATCH_PROCESSOR_TEMPLATE = {
     edge("trigger", "check-coordinator"),
     edge("check-coordinator", "query-tasks", { condition: "result.result === true" }),
     edge("query-tasks", "dispatch-tasks"),
-    edge("dispatch-tasks", "record-results"),
+    edge("dispatch-tasks", "join-dispatch"),
+    edge("join-dispatch", "record-results"),
     edge("record-results", "notify-complete"),
   ],
   metadata: {
@@ -219,6 +226,12 @@ export const TASK_BATCH_PR_TEMPLATE = {
       status: "inreview",
     }, { x: 400, y: 1090 }),
 
+    node("join-batch-outcomes", "flow.join", "Join Batch Outcomes", {
+      mode: "all",
+      sourceNodeIds: ["detect-commits", "set-inreview"],
+      includeSkipped: true,
+    }, { x: 400, y: 1160 }),
+
     // ── Batch complete notification ──────────────────────────────────────
     node("notify", "notify.telegram", "Batch Complete", {
       channel: "{{notifyChannel}}",
@@ -234,8 +247,9 @@ export const TASK_BATCH_PR_TEMPLATE = {
     edge("detect-commits", "push-branch", { condition: "result.hasNewCommits === true" }),
     edge("push-branch", "create-pr"),
     edge("create-pr", "set-inreview"),
-    edge("detect-commits", "notify", { condition: "result.hasNewCommits !== true" }),
-    edge("set-inreview", "notify"),
+    edge("detect-commits", "join-batch-outcomes", { condition: "result.hasNewCommits !== true" }),
+    edge("set-inreview", "join-batch-outcomes"),
+    edge("join-batch-outcomes", "notify"),
   ],
   metadata: {
     author: "bosun",

@@ -17,8 +17,8 @@ describe("monitor exception resilience guards", () => {
 
   it("uses guarded scheduler wrappers for monitor-level periodic tasks", () => {
     expect(source).toContain('safeSetInterval("flush-error-queue"');
-    expect(source).toContain('safeSetInterval("maintenance-sweep"');
-    expect(source).toContain('safeSetInterval("merged-pr-check"');
+    expect(source).not.toContain('safeSetInterval("maintenance-sweep"');
+    expect(source).not.toContain('safeSetInterval("merged-pr-check"');
     expect(source).toContain('safeSetInterval("epic-merge-check"');
     expect(source).toContain('safeSetInterval("fleet-sync"');
   });

@@ -5,6 +5,7 @@ import {
   ensureAgentMaxThreads,
   ensureFeatureFlags,
   ensureSandboxWorkspaceWrite,
+  ensureTrustedProjects,
   ensureTopLevelSandboxPermissions,
 } from "../codex-config.mjs";
 
@@ -148,5 +149,12 @@ describe("codex-config defaults", () => {
     const result = ensureTopLevelSandboxPermissions("[features]\nchild_agents_md = true\n", "disk-full-write-access");
     expect(result.changed).toBe(true);
     expect(result.toml).toContain('sandbox_mode = "workspace-write"');
+  });
+
+  it("adds Windows namespace trusted path variants for WSL-style paths", () => {
+    const uniquePath = `/mnt/c/Users/jON/Documents/source/repos/virtengine-gh/bosun/.tmp-trust-${Date.now()}`;
+    const result = ensureTrustedProjects([uniquePath], { dryRun: true });
+    const allEntries = [...result.added, ...result.already];
+    expect(allEntries.some((entry) => entry.includes("\\\\?\\C:\\"))).toBe(true);
   });
 });
