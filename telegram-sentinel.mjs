@@ -67,6 +67,9 @@ const cacheDir = resolve(repoRoot, ".cache");
 const MONITOR_PID_FILE = resolve(cacheDir, "bosun.pid");
 const MONITOR_PID_FILE_LEGACY = resolve(__dirname, ".cache", "bosun.pid");
 const MONITOR_PID_FILE_CWD = resolve(process.cwd(), ".cache", "bosun.pid");
+const DAEMON_PID_FILE = resolve(cacheDir, "bosun-daemon.pid");
+const DAEMON_PID_FILE_LEGACY = resolve(__dirname, ".cache", "bosun-daemon.pid");
+const DAEMON_PID_FILE_CWD = resolve(process.cwd(), ".cache", "bosun-daemon.pid");
 const SENTINEL_PID_FILE = resolve(cacheDir, "telegram-sentinel.pid");
 const SENTINEL_HEARTBEAT_FILE = resolve(cacheDir, "sentinel-heartbeat.json");
 const SENTINEL_LOCK_FILE = resolve(cacheDir, "telegram-sentinel.lock");
@@ -687,6 +690,14 @@ function readMonitorPid() {
     readAlivePid(MONITOR_PID_FILE) ||
     readAlivePid(MONITOR_PID_FILE_LEGACY) ||
     readAlivePid(MONITOR_PID_FILE_CWD)
+  );
+}
+
+function readDaemonPid() {
+  return (
+    readAlivePid(DAEMON_PID_FILE) ||
+    readAlivePid(DAEMON_PID_FILE_LEGACY) ||
+    readAlivePid(DAEMON_PID_FILE_CWD)
   );
 }
 
@@ -1456,6 +1467,7 @@ async function startAndWaitForMonitor(reason) {
 
   // Wait for the monitor to become healthy (PID file written + process alive)
   const deadline = Date.now() + MONITOR_START_TIMEOUT_MS;
+  let startupHandoffLogged = false;
   while (Date.now() < deadline) {
     await sleep(MONITOR_HEALTH_POLL_MS);
 
@@ -1471,6 +1483,17 @@ async function startAndWaitForMonitor(reason) {
 
     // Check if spawned process died prematurely
     if (!isProcessAlive(spawnedPid)) {
+      const daemonPid = readDaemonPid();
+      if (daemonPid && daemonPid !== spawnedPid) {
+        if (!startupHandoffLogged) {
+          startupHandoffLogged = true;
+          log(
+            "info",
+            `startup handoff detected — bootstrap PID ${spawnedPid} exited while daemon PID ${daemonPid} is alive; continuing health wait`,
+          );
+        }
+        continue;
+      }
       throw new Error(
         `bosun process died during startup (PID ${spawnedPid})`,
       );
