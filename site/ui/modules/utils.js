@@ -332,12 +332,6 @@ export function createSubscriptionHolder() {
     },
   };
 }
-  for (const row of rows) {
-    lines.push(row.map(csvEscape).join(","));
-  }
-  const csv = "\uFEFF" + lines.join("\r\n");
-  downloadFile(csv, filename, "text/csv;charset=utf-8");
-}
 
 /* ─── Virtual Scrolling Utilities ─── */
 

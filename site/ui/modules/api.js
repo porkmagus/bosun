@@ -447,48 +447,13 @@ function _flushWsBatch() {
     wsSendImmediate(messages[0]);
   } else {
     // Multiple messages — batch them
-<<<<<<< HEAD
     wsSendImmediate({ type: "batch", messages });
-=======
-    wsSendImmediate({ type: \"batch\", messages });
->>>>>>> feat
   }
 }
 
 function wsSendImmediate(data) {
   if (ws?.readyState === WebSocket.OPEN) {
-<<<<<<< HEAD
     ws.send(typeof data === "string" ? data : JSON.stringify(data));
-=======
-    ws.send(typeof data === \"string\" ? data : JSON.stringify(data));
-  }
-}
-
-/**
- * Send a raw JSON message over the open WebSocket.
- * Messages are batched to reduce bandwidth and overhead.
- * @param {any} data
- * @param {{batch?: boolean}} opts
- */
-export function wsSend(data, opts = {}) {
-  if (opts.batch === false) {
-    // Explicit no-batch (for critical messages like pings)
-    wsSendImmediate(data);
-    return;
-  }
-  
-  // Add to batch
-  _wsMessageBatch.push(data);
-  
-  // Flush if batch is full
-  if (_wsMessageBatch.length >= WS_BATCH_MAX_SIZE) {
-    _flushWsBatch();
-    return;
-  }
-  
-  // Schedule flush timeout if not already scheduled
-  if (!_wsBatchTimeout) {
-    _wsBatchTimeout = setTimeout(_flushWsBatch, WS_BATCH_MAX_DELAY_MS);
   }
 }
 
