@@ -559,28 +559,6 @@ export function Divider({ label }) {
  *  Avatar
  * ═══════════════════════════════════════════════ */
 
-/**
- * Simple avatar component.
- * @param {{src?: string, alt?: string, name?: string, size?: number}} props
- */
-export function Avatar({ src, alt, name, size = 32 }) {
-  const initials = (name || "?")
-    .split(" ")
-    .map((word) => word[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-
-  return html`
-    <div
-      class="avatar"
-      style=${`width: ${size}px; height: ${size}px; font-size: ${Math.max(10, size / 2.5)}px`}
-    >
-      ${src ? html`<img src=${src} alt=${alt || name} />` : html`<span>${initials}</span>`}
-    </div>
-  `;
-}
-
 /* ═══════════════════════════════════════════════
  *  ErrorBoundary
  * ═══════════════════════════════════════════════ */

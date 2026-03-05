@@ -255,7 +255,7 @@ export function exportAsCSV(headers, rows, filename) {
   for (const row of rows) {
     lines.push(row.map(csvEscape).join(","));
   }
-  const csv = "\\uFEFF" + lines.join("\\n");
+  const csv = "\uFEFF" + lines.join("\r\n");
   downloadFile(csv, filename, "text/csv;charset=utf-8");
 }
 
@@ -331,12 +331,6 @@ export function createSubscriptionHolder() {
       subscriptions.length = 0;
     },
   };
-}
-  for (const row of rows) {
-    lines.push(row.map(csvEscape).join(","));
-  }
-  const csv = "\uFEFF" + lines.join("\r\n");
-  downloadFile(csv, filename, "text/csv");
 }
 
 /**

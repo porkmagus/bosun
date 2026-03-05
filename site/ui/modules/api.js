@@ -447,7 +447,7 @@ function _flushWsBatch() {
     wsSendImmediate(messages[0]);
   } else {
     // Multiple messages — batch them
-    wsSendImmediate({ type: \"batch\", messages });
+    wsSendImmediate({ type: "batch", messages });
   }
 }
 
