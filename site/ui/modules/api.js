@@ -447,13 +447,20 @@ function _flushWsBatch() {
     wsSendImmediate(messages[0]);
   } else {
     // Multiple messages — batch them
+<<<<<<< HEAD
     wsSendImmediate({ type: "batch", messages });
+=======
+    wsSendImmediate({ type: \"batch\", messages });
+>>>>>>> feat
   }
 }
 
 function wsSendImmediate(data) {
   if (ws?.readyState === WebSocket.OPEN) {
+<<<<<<< HEAD
     ws.send(typeof data === "string" ? data : JSON.stringify(data));
+=======
+    ws.send(typeof data === \"string\" ? data : JSON.stringify(data));
   }
 }
 
