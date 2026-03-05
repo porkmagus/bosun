@@ -453,7 +453,7 @@ function _flushWsBatch() {
 
 function wsSendImmediate(data) {
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(typeof data === \"string\" ? data : JSON.stringify(data));
+    ws.send(typeof data === "string" ? data : JSON.stringify(data));
   }
 }
 
