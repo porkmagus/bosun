@@ -46,7 +46,7 @@ tests/__e2e-out.txt
 tests/__e2e-results.txt
 __e2e-verbose.txt
 .codex/config.toml
-
+.github/copilot-instructions.md
 playwright-screenshots/
 playwright-report/
 test-results/
