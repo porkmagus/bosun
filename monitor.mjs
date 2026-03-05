@@ -9094,7 +9094,6 @@ function startTelegramCommandListener() {
   }).catch((err) => {
     console.error("[monitor] Failed to acquire Telegram poll lock:", err);
   });
-  });
 }
 
 async function startTelegramNotifier() {
@@ -11892,10 +11891,14 @@ try {
     }
     if (cleaned > 0) {
       statusData.updated_at = new Date().toISOString();
-      writeFileSync(statusPath, JSON.stringify(statusData, null, 2), "utf8");
-      console.log(
-        `[monitor] cleaned ${cleaned} stale attempts from status file`,
-      );
+      try {
+        writeFileSync(statusPath, JSON.stringify(statusData, null, 2), "utf8");
+        console.log(
+          `[monitor] cleaned ${cleaned} stale attempts from status file`,
+        );
+      } catch (writeErr) {
+        console.warn(`[monitor] status file write failed: ${writeErr.message}`);
+      }
     }
   }
 } catch (err) {
