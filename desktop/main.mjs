@@ -1478,7 +1478,9 @@ function refreshTrayMenu() {
       enabled: app.isPackaged,
       click: () => {
         app.relaunch();
-        void shutdown("tray_restart_update");
+        shutdown("tray_restart_update").catch((err) => {
+          console.error("[desktop] Failed to shutdown for restart:", err);
+        });
       },
     },
 
@@ -1545,7 +1547,9 @@ function refreshTrayMenu() {
       label: "Quit",
       accelerator: process.platform === "darwin" ? "Cmd+Q" : "Ctrl+Q",
       click: () => {
-        void shutdown("tray_quit");
+        shutdown("tray_quit").catch((err) => {
+          console.error("[desktop] Failed to shutdown:", err);
+        });
       },
     },
   ]);
@@ -1573,7 +1577,9 @@ function ensureTray() {
         setWindowVisible(mainWindow);
       }
     } else {
-      void createMainWindow();
+      createMainWindow().catch((err) => {
+        console.error("[desktop] Failed to create main window on tray click:", err);
+      });
     }
   });
 
@@ -1971,13 +1977,17 @@ app.on("window-all-closed", () => {
   // In tray mode the app intentionally keeps running with no open windows.
   // Only shut down when quitting explicitly (e.g. tray menu Quit or Cmd+Q).
   if (trayMode) return;
-  void shutdown("window_all_closed");
+  shutdown("window_all_closed").catch((err) => {
+    console.error("[desktop] Failed to shutdown:", err);
+  });
 });
 
 app.on("activate", () => {
   // macOS: clicking the dock icon (re-)shows the app.
   if (!mainWindow || mainWindow.isDestroyed()) {
-    void createMainWindow();
+    createMainWindow().catch((err) => {
+      console.error("[desktop] Failed to create main window:", err);
+    });
   } else {
     setWindowVisible(mainWindow);
   }
@@ -1989,18 +1999,24 @@ app.on("second-instance", () => {
     return;
   }
   if (!mainWindow || mainWindow.isDestroyed()) {
-    void createMainWindow();
+    createMainWindow().catch((err) => {
+      console.error("[desktop] Failed to create main window:", err);
+    });
     return;
   }
   setWindowVisible(mainWindow);
 });
 
 process.on("SIGINT", () => {
-  void shutdown("sigint");
+  shutdown("sigint").catch((err) => {
+    console.error("[desktop] Failed to shutdown on SIGINT:", err);
+  });
 });
 
 process.on("SIGTERM", () => {
-  void shutdown("sigterm");
+  shutdown("sigterm").catch((err) => {
+    console.error("[desktop] Failed to shutdown on SIGTERM:", err);
+  });
 });
 
 // ── Pre-ready Chromium flags ──────────────────────────────────────────────────
